@@ -1,0 +1,312 @@
+#version 450
+// Copyright (c) 2025 Hans-Kristian Arntzen
+// SPDX-License-Identifier: MIT
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+layout(local_size_x = 64) in;
+
+struct BlockMeta
+{
+    uint code_word;
+    uint offset;
+};
+
+struct DeadZone
+{
+    float total;
+    int count;
+};
+
+struct BitstreamPacket
+{
+    uint offset;
+    uint num_words;
+};
+
+layout(set = 0, binding = 0) writeonly buffer BitstreamPayload
+{
+    uint data[];
+} bitstream_data;
+
+layout(set = 0, binding = 1) writeonly buffer BitstreamMeta
+{
+    BitstreamPacket packets[];
+} bitstream_meta;
+
+layout(set = 0, binding = 2) readonly buffer SSBOMeta
+{
+    BlockMeta meta[];
+} block_meta;
+
+layout(set = 0, binding = 3) buffer Payloads
+{
+    layout(offset = 4) uint bitstream_payload_counter;
+    layout(offset = 8) uint data[];
+} payload_data;
+
+layout(set = 0, binding = 4) readonly buffer DeadZones
+{
+    DeadZone data[];
+} deadzones;
+
+layout(set = 0, binding = 5) readonly buffer RateControlQuant
+{
+    int data[];
+} quant_data;
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution_64x64_blocks;
+    ivec2 resolution_16x16_blocks;
+    uint quant_resolution_code;
+    uint sequence_code;
+    int block_offset_64x64;
+    int block_stride_64x64;
+    int block_offset_16x16;
+    int block_stride_16x16;
+} registers;
+
+uint compute_required_16x16_size(uint control_word)
+{
+    int q_bits = int(bitfieldExtract(control_word, 16, 4));
+    uint lsbs = control_word & 0x5555u;
+    uint msbs = control_word & 0xaaaau;
+    uint msbs_shift = msbs >> 1;
+    msbs |= msbs_shift;
+    uint sign_mask = (msbs_shift | lsbs) | (q_bits != 0 ? 0x5555u : 0u);
+    return bitCount(lsbs) + bitCount(msbs) + bitCount(sign_mask) + q_bits * 8;
+}
+
+uint quantize_code_word(uint control_word, int quant)
+{
+    if (quant != 0 && control_word != 0)
+    {
+        int q_bits = int(bitfieldExtract(control_word, 16, 4));
+        int sub_quant = min(q_bits, quant);
+        q_bits -= sub_quant;
+        quant -= sub_quant;
+
+        if (quant != 0)
+        {
+            quant = min(quant, 3);
+
+            uint plane0 = control_word & 0x5555u;
+            uint plane1 = (control_word & 0xaaaau) >> 1;
+            uint plane2 = plane0 & plane1;
+
+            do
+            {
+                plane0 = plane1;
+                plane1 = plane2;
+                plane2 = 0;
+                quant--;
+            } while (quant != 0);
+
+            control_word = plane0 | (plane1 << 1);
+        }
+
+        control_word = bitfieldInsert(control_word, uint(q_bits), 16, 4);
+    }
+
+    return control_word;
+}
+
+uint copy_words(inout uint output_offset, inout uint input_offset, uint count)
+{
+    uint quant_to_zero_mask = ~0u;
+
+    if (count != 0)
+    {
+        // Copy the sign plane.
+        bitstream_data.data[output_offset++] = payload_data.data[input_offset++];
+        count--;
+
+        while (count != 0)
+        {
+            uint in_data = payload_data.data[input_offset++];
+            // If we observe any 1 in the non-sign planes, it's not deadzone quantized.
+            quant_to_zero_mask &= ~in_data;
+
+            bitstream_data.data[output_offset++] = in_data;
+            count--;
+        }
+    }
+
+    return quant_to_zero_mask;
+}
+
+uint modify_quant_code(uint code, int quant)
+{
+    int e = int(bitfieldExtract(code, 4, 4));
+    e = max(e - quant, 0);
+    code = bitfieldInsert(code, e, 4, 4);
+    return code;
+}
+
+void main()
+{
+    uint index = gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID;
+    uint linear_block_64x64_index = index >> 4;
+    ivec2 block64x64_index = 2 * ivec2(gl_WorkGroupID.xy);
+    block64x64_index.x += int(bitfieldExtract(index, 4, 1));
+    block64x64_index.y += int(bitfieldExtract(index, 5, 1));
+    ivec2 local_block_index = ivec2(bitfieldExtract(index, 0, 2), bitfieldExtract(index, 2, 2));
+    ivec2 block16x16_index = 4 * block64x64_index + local_block_index;
+
+    BlockMeta meta;
+    DeadZone deadzone;
+    int quant;
+
+    if (all(lessThan(block16x16_index, registers.resolution_16x16_blocks)))
+    {
+        int block_index = registers.block_offset_16x16 +
+            registers.block_stride_16x16 * block16x16_index.y +
+            block16x16_index.x;
+        meta = block_meta.meta[block_index];
+        deadzone = deadzones.data[block_index];
+    }
+    else
+    {
+        meta = BlockMeta(0, 0);
+        deadzone = DeadZone(0, 0);
+    }
+
+    if (all(lessThan(block64x64_index, registers.resolution_64x64_blocks)))
+    {
+        int block_index = registers.block_offset_64x64 +
+            registers.block_stride_64x64 * block64x64_index.y +
+            block64x64_index.x;
+        quant = quant_data.data[block_index];
+    }
+    else
+    {
+        quant = 0;
+    }
+
+    uint code_word = quantize_code_word(meta.code_word, quant);
+
+    uvec4 code_word_ballot = subgroupBallot(code_word != 0);
+    uint local_ballot = gl_SubgroupSize >= 64 && linear_block_64x64_index >= 2 ? code_word_ballot.y : code_word_ballot.x;
+    local_ballot = bitfieldExtract(local_ballot, int(16u * (linear_block_64x64_index & 1u)), 16);
+
+    uint required_size = compute_required_16x16_size(code_word);
+    uint required_size_with_meta = required_size;
+    if (required_size_with_meta != 0)
+        required_size_with_meta++;
+
+    const uint HeaderSize = 2;
+    bool writes_header =
+        all(lessThan(block64x64_index, registers.resolution_64x64_blocks)) && (index & 15u) == 0u;
+    if (writes_header)
+        required_size_with_meta += HeaderSize;
+
+    uint payload_scan = subgroupInclusiveAdd(required_size_with_meta);
+    uint subgroup_size = subgroupBroadcast(payload_scan, gl_SubgroupSize - 1);
+
+    uint global_payload_offset;
+    if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
+        global_payload_offset = atomicAdd(payload_data.bitstream_payload_counter, payload_scan);
+    global_payload_offset = subgroupBroadcast(global_payload_offset, gl_SubgroupSize - 1);
+
+    uint payload_offset = payload_scan - required_size_with_meta;
+
+    uint packet_end;
+    if (gl_SubgroupSize > 16)
+    {
+        uint payload_offset_upper = subgroupShuffleDown(payload_offset, 16);
+        packet_end = gl_SubgroupInvocationID + 16 < gl_SubgroupSize ? payload_offset_upper : subgroup_size;
+    }
+    else
+    {
+        packet_end = subgroup_size;
+    }
+
+    if (writes_header)
+    {
+        uint packet_size = packet_end - payload_offset;
+
+        // If there is no payload, just skip.
+        if (packet_size == HeaderSize)
+            packet_size = 0;
+
+        // Write the header:
+        // - 16b: local ballot
+        // - 8b: quant code (custom FP)
+        // - Sequence ID (wraps) (7 bit)
+        // - 1 bit to signal extended use.
+        // TODO: Encode the:
+        // - Size in words of payload with header (16 bit)
+        // - Start block (16 bit)
+        uint block_index = registers.block_offset_64x64 +
+            block64x64_index.y * registers.block_stride_64x64 + block64x64_index.x;
+
+        bitstream_data.data[global_payload_offset + payload_offset + 0] =
+            local_ballot | (packet_size << 16) | (registers.sequence_code << 28);
+        bitstream_data.data[global_payload_offset + payload_offset + 1] =
+            modify_quant_code(registers.quant_resolution_code, quant) | (block_index << 8);
+        bitstream_meta.packets[block_index] = BitstreamPacket(global_payload_offset + payload_offset, packet_size);
+    }
+
+    payload_offset += global_payload_offset;
+    payload_offset += 2;
+    uint payload_offset_base = subgroupShuffle(payload_offset, gl_SubgroupInvocationID & ~15u);
+
+    // Followed by N code words which map to the local ballot of active 16x16 regions.
+    if (code_word != 0)
+    {
+        uint block_header_offset = bitCount(bitfieldExtract(
+            local_ballot, 0, local_block_index.y * 4 + local_block_index.x));
+        uint data_offset = payload_offset + (bitCount(local_ballot) - block_header_offset);
+
+        // Compensate for the allocation of 2 bytes in first lane.
+        data_offset -= writes_header ? 0 : 2;
+
+        uint in_q_bits = bitfieldExtract(meta.code_word, 16, 4);
+        uint out_q_bits = bitfieldExtract(code_word, 16, 4);
+        uint input_offset = meta.offset;
+        uint output_offset = data_offset;
+
+        deadzone.total = ldexp(deadzone.total, -quant);
+
+        for (int i = 0; i < 8; i++)
+        {
+            uint out_planes = bitfieldExtract(code_word, 2 * i, 2) + out_q_bits;
+            if (out_planes != 0)
+                out_planes++;
+
+            uint in_planes = bitfieldExtract(meta.code_word, 2 * i, 2) + in_q_bits;
+            if (in_planes != 0)
+                in_planes++;
+
+            uint throw_planes = in_planes - out_planes;
+            uint quant_to_zero_mask = copy_words(output_offset, input_offset, out_planes);
+            uint threw_significant_mask = 0;
+
+            int e = int(throw_planes) - 1 - quant;
+
+            for (uint i = 0; i < throw_planes; i++)
+            {
+                uint in_data = payload_data.data[input_offset++];
+                deadzone.total += ldexp(float(bitCount(in_data & quant_to_zero_mask)), e);
+                threw_significant_mask |= in_data;
+                e--;
+            }
+
+            // If we only threw away zeroes, we've already marked the value as deadzone, don't double count.
+            quant_to_zero_mask &= threw_significant_mask;
+            deadzone.count += bitCount(quant_to_zero_mask);
+
+            // Consider that we dequant the deadzone.
+            deadzone.total += ldexp(float(bitCount(quant_to_zero_mask)), -(quant + 1));
+        }
+
+        float dead = deadzone.total / max(1.0, float(deadzone.count));
+        uint encoded_deadzone = min(63u, uint(dead * 128.0 + 0.5));
+        code_word = bitfieldInsert(code_word, encoded_deadzone, 26, 6);
+        bitstream_data.data[payload_offset_base + block_header_offset] = code_word;
+    }
+}

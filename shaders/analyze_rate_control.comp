@@ -1,0 +1,393 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+
+#include "dwt_quant_scale.h"
+
+layout(local_size_x = 64) in;
+
+struct BlockMeta
+{
+    uint code_word;
+    uint offset;
+};
+
+struct DeadZone
+{
+    float total;
+    int count;
+};
+
+struct RDOperation
+{
+    int quant;
+    uint block_offset_saving;
+};
+
+layout(set = 0, binding = 0) buffer Buckets
+{
+    uint count;
+    uint consumed_payload;
+    layout(offset = 512) uint total_savings_per_bucket[128];
+    RDOperation rdo_operations[];
+} buckets;
+
+layout(set = 0, binding = 1) readonly buffer SSBOMeta
+{
+    BlockMeta meta[];
+} block_meta;
+
+layout(set = 0, binding = 2) readonly buffer DeadZones
+{
+    DeadZone data[];
+} deadzones;
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;
+    ivec2 resolution_16x16_blocks;
+    float quant_resolution;
+    float rdo_distortion_scale;
+    float rdo_lambda;
+    int block_offset_16x16;
+    int block_stride_16x16;
+    int block_offset_64x64;
+    int block_stride_64x64;
+    uint total_wg_count;
+} registers;
+
+shared uint shared_rate_cost[16];
+shared float shared_distortion[16];
+shared uint shared_tmp[4];
+
+uint compute_required_16x16_size(uint control_word, int quant)
+{
+    int q_bits = int(bitfieldExtract(control_word, 16, 4));
+
+    int sub_q = min(q_bits, quant);
+    q_bits -= sub_q;
+    quant -= sub_q;
+
+    // Bit 0 plane survives if we don't quant any more.
+    uint plane0 = control_word & 0x5555u;
+    uint plane1 = (control_word & 0xaaaau) >> 1;
+    uint plane2 = plane0 & plane1;
+
+    if (quant >= 1)
+    {
+        plane0 = plane1;
+        plane1 = plane2;
+        plane2 = 0;
+    }
+
+    if (quant >= 2)
+    {
+        plane0 = plane1;
+        plane1 = 0;
+    }
+
+    if (quant >= 3)
+        plane0 = 0;
+
+    uint sign_mask = (plane1 | plane0) | (q_bits != 0 ? 0x5555u : 0u);
+    uint size = bitCount(plane0) + bitCount(plane1 * 3) + bitCount(sign_mask) + q_bits * 8;
+
+    if (size != 0u)
+        size++;
+
+    return size;
+}
+
+float estimate_weighted_square_error(uint control_word, DeadZone zone, int quant)
+{
+    // TODO: Scale the quant resolution.
+    float dequant_scale = registers.quant_resolution * decode_quant_scale(bitfieldExtract(control_word, 20, 6));
+    float step_size = 1.0 / dequant_scale;
+
+    // Assume perfectly uniform white noise. This should hold reasonably well for non-zero coefficients.
+    float uniform_quant_square_error = step_size * step_size * (1.0 / 12.0);
+    float uniform_quant_square_error_scaled = ldexp(uniform_quant_square_error, 2 * quant);
+
+    int q_bits = int(bitfieldExtract(control_word, 16, 4));
+    int sub_q = min(q_bits, quant);
+    q_bits -= sub_q;
+    quant -= sub_q;
+    uint lsbs = control_word & 0x5555u;
+    uint msbs = control_word & 0xaaaau;
+    uint msbs_shift = msbs >> 1;
+    uint msb_and_lsb = control_word & msbs_shift;
+
+    // If we don't have Q bits, we can code a 8x4 block to flat 0.
+    // The error rate is fixed at that point.
+    uint dead_zeroed_blocks = q_bits == 0 ? (8 - bitCount(lsbs | msbs_shift | msb_and_lsb)) : 0;
+    uint enters_dead_zero_blocks_1 = quant >= 1 ? bitCount(lsbs & ~(msb_and_lsb | msbs_shift)) : 0;
+    uint enters_dead_zero_blocks_2 = quant >= 2 ? bitCount(msbs_shift & ~lsbs) : 0;
+    uint enters_dead_zero_blocks_3 = quant >= 3 ? bitCount(msb_and_lsb) : 0;
+
+    // Surviving blocks assume uniform quantization.
+    uint surviving_blocks = 8 - dead_zeroed_blocks -
+        enters_dead_zero_blocks_1 -
+        enters_dead_zero_blocks_2 -
+        enters_dead_zero_blocks_3;
+
+    // If we don't have the sign plane anymore, quantizing to zero quadruples the average square error.
+    // This basically measures the average power of the samples given a maximum range assuming a uniform distribution.
+    // In reality this isn't true, and we probably won't be using the full range, so instead of 4.0, use a 2.0 multiplier
+    // as a fudge factor.
+    const float DeadzoneScale = 2.0;
+    float deadzone_base_square_error = ldexp(uniform_quant_square_error, 2 * sub_q) * DeadzoneScale;
+    float square_error_plane_1 = float(enters_dead_zero_blocks_1) * deadzone_base_square_error * 4.0;
+    float square_error_plane_2 = float(enters_dead_zero_blocks_2) * deadzone_base_square_error * 16.0;
+    float square_error_plane_3 = float(enters_dead_zero_blocks_3) * deadzone_base_square_error * 64.0;
+
+    // Coefficients that were quantized to zero before RDO will not generally get worse with more quant since we
+    // scale the deadzone region alongside the quant scale.
+    float deadzone = min(0.5, zone.total / max(1.0, float(zone.count)));
+    float deadzone_step_size = 2.0 * deadzone * step_size;
+    float deadzone_quant_square_error = deadzone_step_size * deadzone_step_size * (1.0 / 12.0);
+
+    float square_error = uniform_quant_square_error_scaled * float(surviving_blocks) +
+        square_error_plane_1 + square_error_plane_2 + square_error_plane_3;
+
+    // Get average square error.
+    square_error /= 8.0;
+
+    // Weight the results. If a lot of coefficents were initially quantized to 0, the actual error will look
+    // more like the deadzone quantization noise.
+    // If nothing is in the deadzone, we can assume more uniformly distributed noise and the actual square error
+    // starts looking more like normal white noise.
+    square_error = mix(square_error, deadzone_quant_square_error, float(zone.count) / 256.0);
+
+    // Weight the noise. This depends on psychovisual effects but also filter bank gains, etc.
+    square_error *= registers.rdo_distortion_scale;
+
+    return square_error;
+}
+
+// Perform operations that cause lower distortion first.
+uint distortion_to_bucket_index(float d, float cost)
+{
+    // Compress a large range into 64 possible buckets.
+    // Every band is ~1.5 dB.
+    float index = 60.0 + 2.0 * log2(d + registers.rdo_lambda * cost);
+    return uint(max(index + 0.5, 0.0));
+}
+
+uint inclusive_max_clustered16(uint v)
+{
+    // Ensures that we never end up with a value > 127.
+    v = min(v, 128 - 16 + gl_SubgroupInvocationID);
+
+    for (uint i = 1; i < 16; i *= 2)
+    {
+        // Ensure monotonic progression for buckets.
+        // Separate every quant level out by at least one bucket.
+        uint up = subgroupShuffleUp(v, i) + i;
+        v = max(v, gl_SubgroupInvocationID >= i ? up : 0);
+    }
+
+    return v;
+}
+
+void emit_rdo_operations()
+{
+    float distortion;
+    float cost;
+
+    if (gl_SubgroupInvocationID < 16)
+    {
+        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
+        distortion = shared_distortion[gl_SubgroupInvocationID];
+    }
+    else
+    {
+        // Dummy values.
+        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
+        distortion = 1e30;
+    }
+
+    uint bucket_index = distortion_to_bucket_index(distortion, cost);
+    if (gl_SubgroupInvocationID == 0)
+        bucket_index = 0;
+
+    // Constraints:
+    // bucket_index for Q1 must be less than bucket_index for Q2 if Q1 < Q2.
+    // If a high quant target sees very favorable RD, lower bucket indices for lower Q values.
+    uint inclusive_bucket_index = inclusive_max_clustered16(bucket_index);
+
+    if (gl_SubgroupInvocationID == 0)
+    {
+        uint unquantized_cost = shared_rate_cost[0];
+        atomicAdd(buckets.consumed_payload, unquantized_cost);
+    }
+    else if (gl_SubgroupInvocationID < 16)
+    {
+        uint saving = shared_rate_cost[gl_SubgroupInvocationID - 1] - shared_rate_cost[gl_SubgroupInvocationID];
+        float relative_dist = shared_distortion[gl_SubgroupInvocationID] - shared_distortion[gl_SubgroupInvocationID - 1];
+
+        if (saving != 0)
+        {
+            ivec2 block64x64_index = ivec2(gl_WorkGroupID.xy);
+            int block_index = registers.block_offset_64x64 +
+                block64x64_index.y * registers.block_stride_64x64 + block64x64_index.x;
+            atomicAdd(buckets.total_savings_per_bucket[inclusive_bucket_index], saving);
+            buckets.rdo_operations[block_index + inclusive_bucket_index * registers.total_wg_count] =
+                RDOperation(int(gl_SubgroupInvocationID), block_index | (saving << 16));
+        }
+    }
+}
+
+void main()
+{
+    // Each workgroup processes a 64x64 block and computes all possible rate wins for every potential quant rate.
+    uint index = gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID;
+    ivec2 block64x64_index = ivec2(gl_WorkGroupID.xy);
+    ivec2 local_block_index = ivec2(bitfieldExtract(index, 0, 2), bitfieldExtract(index, 2, 2));
+    ivec2 block16x16_index = 4 * block64x64_index + local_block_index;
+
+    BlockMeta meta;
+    DeadZone deadzone;
+    bool in_range;
+
+    if (all(lessThan(block16x16_index, registers.resolution_16x16_blocks)))
+    {
+        int block_index = registers.block_offset_16x16 +
+            registers.block_stride_16x16 * block16x16_index.y +
+            block16x16_index.x;
+        meta = block_meta.meta[block_index];
+        deadzone = deadzones.data[block_index];
+        in_range = true;
+    }
+    else
+    {
+        meta = BlockMeta(0, 0);
+        deadzone = DeadZone(0, 0);
+        in_range = false;
+    }
+
+    uint bit_index = index >> 4;
+
+    for (uint i = bit_index; i < 16; i += 4)
+    {
+        uint cost = compute_required_16x16_size(meta.code_word, int(i));
+        float dist = estimate_weighted_square_error(meta.code_word, deadzone, int(i));
+
+        // On the edge, assume edge expansion.
+        if (block16x16_index.x + 1 == registers.resolution_16x16_blocks.x)
+        {
+            uint x_range = registers.resolution.x - block16x16_index.x * 16;
+            dist *= 16.0 / float(x_range);
+        }
+
+        if (block16x16_index.y + 1 == registers.resolution_16x16_blocks.y)
+        {
+            uint y_range = registers.resolution.y - block16x16_index.y * 16;
+            dist *= 16.0 / float(y_range);
+        }
+
+        if (subgroupAny(!in_range))
+        {
+            // Avoid out of range blocks being counted as low noise.
+            // The top-left block is always in range.
+            float clamped_dist = subgroupShuffle(dist, gl_SubgroupInvocationID & ~15);
+            if (!in_range)
+                dist = clamped_dist;
+        }
+
+        if (gl_SubgroupSize == 16)
+        {
+            cost = subgroupAdd(cost);
+            dist = subgroupAdd(dist);
+            if (subgroupElect())
+            {
+                shared_rate_cost[i] = cost;
+                shared_distortion[i] = dist;
+            }
+        }
+        else
+        {
+            cost += subgroupShuffleXor(cost, 1);
+            cost += subgroupShuffleXor(cost, 2);
+            cost += subgroupShuffleXor(cost, 4);
+            cost += subgroupShuffleXor(cost, 8);
+
+            dist += subgroupShuffleXor(dist, 1);
+            dist += subgroupShuffleXor(dist, 2);
+            dist += subgroupShuffleXor(dist, 4);
+            dist += subgroupShuffleXor(dist, 8);
+
+            if ((index & 15u) == 0u)
+            {
+                // Need to encode a header.
+                // We can eliminate 64x64 blocks if everything decodes to 0.
+                if (cost != 0)
+                    cost += 2;
+
+                shared_rate_cost[i] = cost;
+                shared_distortion[i] = dist;
+            }
+        }
+    }
+
+    barrier();
+
+    if (gl_SubgroupID == 0)
+        emit_rdo_operations();
+
+    // Wait for atomics for all threads in the subgroup to go through.
+    memoryBarrierBuffer();
+    subgroupBarrier();
+
+    // Final pass.
+
+    uint wg_done_count;
+    if (gl_SubgroupSize == 64)
+    {
+        if (subgroupElect())
+            wg_done_count = atomicAdd(buckets.count, 1) + 1;
+        wg_done_count = subgroupBroadcastFirst(wg_done_count);
+    }
+    else
+    {
+        if (gl_LocalInvocationIndex == 0)
+            shared_tmp[0] = atomicAdd(buckets.count, 1) + 1;
+        barrier();
+        wg_done_count = shared_tmp[0];
+        barrier();
+    }
+
+    if (wg_done_count == registers.total_wg_count)
+    {
+        uint running_offset = 0;
+        uint total_wave;
+        for (int iter = 0; iter < 128 / gl_WorkGroupSize.x; iter++)
+        {
+            uint v = atomicAdd(buckets.total_savings_per_bucket[iter * gl_WorkGroupSize.x + index], 0);
+            v = subgroupInclusiveAdd(v);
+            if (gl_SubgroupSize < 64)
+            {
+                if (iter != 0)
+                    barrier();
+                if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
+                    shared_tmp[gl_SubgroupID] = v;
+                barrier();
+                for (uint i = 0; i < gl_SubgroupID; i++)
+                    v += shared_tmp[i];
+
+                total_wave = shared_tmp[gl_NumSubgroups - 1];
+            }
+            else
+            {
+                subgroupBarrier();
+                total_wave = subgroupBroadcast(v, gl_SubgroupSize - 1);
+            }
+
+            atomicExchange(buckets.total_savings_per_bucket[iter * gl_WorkGroupSize.x + index], v + running_offset);
+            running_offset += total_wave;
+        }
+    }
+}

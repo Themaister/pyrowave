@@ -1,0 +1,271 @@
+#version 450
+// Copyright (c) 2025 Hans-Kristian Arntzen
+// SPDX-License-Identifier: MIT
+
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_quad : require
+
+layout(local_size_x = 64, local_size_y_id = 0) in;
+layout(constant_id = 1) const bool DCShift = false;
+
+uint local_index;
+
+#include "dwt_common.h"
+
+layout(set = 0, binding = 0) uniform sampler2DArray uTexture[3];
+layout(set = 0, binding = 3) writeonly uniform image2D uOutput;
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;
+    vec2 inv_resolution;
+};
+
+vec2 generate_mirror_uv(ivec2 coord, bool even_x, bool even_y)
+{
+    coord -= ivec2(band(bvec2(even_x, even_y), lessThan(coord, ivec2(0))));
+    coord += 1;
+    coord += ivec2(band(bvec2(!even_x, !even_y), greaterThanEqual(coord, resolution)));
+    vec2 uv = vec2(coord) * inv_resolution;
+    return uv.yx; // Transpose on load.
+}
+
+void load_image_with_apron()
+{
+    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * ivec2(BLOCK_SIZE_HALF) - APRON_HALF;
+    ivec2 local_coord0 = 2 * unswizzle8x8(local_index);
+    ivec2 coord0 = base_coord + local_coord0;
+
+    // Transpose on load.
+    vec4 texels0 = textureGather(uTexture[component], vec3(generate_mirror_uv(coord0, true, true), 0.0), 0).wxzy;
+    vec4 texels1 = textureGather(uTexture[component], vec3(generate_mirror_uv(coord0, false, true), 2.0), 0).wxzy;
+    vec4 texels2 = textureGather(uTexture[component], vec3(generate_mirror_uv(coord0, true, false), 1.0), 0).wxzy;
+    vec4 texels3 = textureGather(uTexture[component], vec3(generate_mirror_uv(coord0, false, false), 3.0), 0).wxzy;
+
+    store_shared(2 * local_coord0.y + 0, local_coord0.x + 0, vec2(texels0.x, texels1.x));
+    store_shared(2 * local_coord0.y + 0, local_coord0.x + 1, vec2(texels0.y, texels1.y));
+    store_shared(2 * local_coord0.y + 1, local_coord0.x + 0, vec2(texels2.x, texels3.x));
+    store_shared(2 * local_coord0.y + 1, local_coord0.x + 1, vec2(texels2.y, texels3.y));
+    store_shared(2 * local_coord0.y + 2, local_coord0.x + 0, vec2(texels0.z, texels1.z));
+    store_shared(2 * local_coord0.y + 2, local_coord0.x + 1, vec2(texels0.w, texels1.w));
+    store_shared(2 * local_coord0.y + 3, local_coord0.x + 0, vec2(texels2.z, texels3.z));
+    store_shared(2 * local_coord0.y + 3, local_coord0.x + 1, vec2(texels2.w, texels3.w));
+
+    ivec2 local_coord_horiz = ivec2(BLOCK_SIZE_HALF + 2 * (local_index % 2u), 2 * (local_index / 2u));
+    if (local_coord_horiz.y < BLOCK_SIZE_HALF + 2 * APRON_HALF)
+    {
+        texels0 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_horiz, true, true), 0.0), 0).wxzy;
+        texels1 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_horiz, false, true), 2.0), 0).wxzy;
+        texels2 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_horiz, true, false), 1.0), 0).wxzy;
+        texels3 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_horiz, false, false), 3.0), 0).wxzy;
+
+        store_shared(2 * local_coord_horiz.y + 0, local_coord_horiz.x + 0, vec2(texels0.x, texels1.x));
+        store_shared(2 * local_coord_horiz.y + 0, local_coord_horiz.x + 1, vec2(texels0.y, texels1.y));
+        store_shared(2 * local_coord_horiz.y + 1, local_coord_horiz.x + 0, vec2(texels2.x, texels3.x));
+        store_shared(2 * local_coord_horiz.y + 1, local_coord_horiz.x + 1, vec2(texels2.y, texels3.y));
+        store_shared(2 * local_coord_horiz.y + 2, local_coord_horiz.x + 0, vec2(texels0.z, texels1.z));
+        store_shared(2 * local_coord_horiz.y + 2, local_coord_horiz.x + 1, vec2(texels0.w, texels1.w));
+        store_shared(2 * local_coord_horiz.y + 3, local_coord_horiz.x + 0, vec2(texels2.z, texels3.z));
+        store_shared(2 * local_coord_horiz.y + 3, local_coord_horiz.x + 1, vec2(texels2.w, texels3.w));
+    }
+
+    ivec2 local_coord_vert = local_coord_horiz.yx;
+    if (local_coord_vert.x < BLOCK_SIZE_HALF)
+    {
+        texels0 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_vert, true, true), 0.0), 0).wxzy;
+        texels1 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_vert, false, true), 2.0), 0).wxzy;
+        texels2 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_vert, true, false), 1.0), 0).wxzy;
+        texels3 = textureGather(uTexture[component], vec3(generate_mirror_uv(base_coord + local_coord_vert, false, false), 3.0), 0).wxzy;
+
+        store_shared(2 * local_coord_vert.y + 0, local_coord_vert.x + 0, vec2(texels0.x, texels1.x));
+        store_shared(2 * local_coord_vert.y + 0, local_coord_vert.x + 1, vec2(texels0.y, texels1.y));
+        store_shared(2 * local_coord_vert.y + 1, local_coord_vert.x + 0, vec2(texels2.x, texels3.x));
+        store_shared(2 * local_coord_vert.y + 1, local_coord_vert.x + 1, vec2(texels2.y, texels3.y));
+        store_shared(2 * local_coord_vert.y + 2, local_coord_vert.x + 0, vec2(texels0.z, texels1.z));
+        store_shared(2 * local_coord_vert.y + 2, local_coord_vert.x + 1, vec2(texels0.w, texels1.w));
+        store_shared(2 * local_coord_vert.y + 3, local_coord_vert.x + 0, vec2(texels2.z, texels3.z));
+        store_shared(2 * local_coord_vert.y + 3, local_coord_vert.x + 1, vec2(texels2.w, texels3.w));
+    }
+
+    barrier();
+}
+
+void inverse_transform16(int y_offset, bool transpose_output)
+{
+    const int SIZE = 16;
+    const int PADDED_SIZE = SIZE + 2 * APRON;
+    float values[PADDED_SIZE];
+
+    uint shuffled_index;
+    if (transpose_output)
+        shuffled_index = ((local_index & 2u) >> 1) | ((local_index & 1u) << 1) | (local_index & ~3u);
+    else
+        shuffled_index = local_index;
+
+    ivec2 local_coord = ivec2(16 * (shuffled_index % 2u), shuffled_index / 2u + y_offset);
+
+    for (int i = 0; i < PADDED_SIZE / 2; i++)
+    {
+        vec2 v = load_shared(local_coord.y, (local_coord.x >> 1) + i);
+        // Filter kernel rescale.
+        values[2 * i + 0] = v.x * K;
+        values[2 * i + 1] = v.y * inv_K;
+    }
+
+    // CDF 9/7 lifting steps.
+    // Arith go brrr.
+    for (int i = 2; i < PADDED_SIZE - 1; i += 2)
+        values[i] -= DELTA * (values[i - 1] + values[i + 1]);
+    for (int i = 3; i < PADDED_SIZE - 2; i += 2)
+        values[i] -= GAMMA * (values[i - 1] + values[i + 1]);
+    for (int i = 4; i < PADDED_SIZE - 3; i += 2)
+        values[i] -= BETA * (values[i - 1] + values[i + 1]);
+    for (int i = 5; i < PADDED_SIZE - 4; i += 2)
+        values[i] -= ALPHA * (values[i - 1] + values[i + 1]);
+
+    // Avoid WAR hazard.
+    barrier();
+
+    if (transpose_output)
+    {
+        for (int i = APRON; i < PADDED_SIZE - APRON; i += 2)
+        {
+            float neighbor0 = subgroupQuadSwapHorizontal(values[i]);
+            float neighbor1 = subgroupQuadSwapHorizontal(values[i + 1]);
+
+            if ((local_coord.y & 1u) == 0u)
+            {
+                // Transpose to go from horizontal to vertical.
+                store_shared(local_coord.x + i + (-APRON + 0), local_coord.y >> 1, vec2(values[i], neighbor0));
+                store_shared(local_coord.x + i + (-APRON + 1), local_coord.y >> 1, vec2(values[i + 1], neighbor1));
+            }
+        }
+    }
+    else
+    {
+        for (int i = 0; i < 8; i++)
+            store_shared(local_coord.y, (local_coord.x >> 1) + i, vec2(values[2 * i + 4], values[2 * i + 5]));
+    }
+}
+
+void inverse_transform8(bool active_lane, int y_offset)
+{
+    const int SIZE = 8;
+    const int PADDED_SIZE = SIZE + 2 * APRON;
+    float values[PADDED_SIZE];
+
+    uint shuffled_index = ((local_index & 6u) >> 1) | ((local_index & 1u) << 2) | (local_index & ~7u);
+    ivec2 local_coord = ivec2(8 * (shuffled_index % 4u), shuffled_index / 4u + y_offset);
+
+    if (active_lane)
+    {
+        for (int i = 0; i < PADDED_SIZE / 2; i++)
+        {
+            vec2 v = load_shared(local_coord.y, (local_coord.x >> 1) + i);
+            // Filter kernel rescale.
+            values[2 * i + 0] = v.x * K;
+            values[2 * i + 1] = v.y * inv_K;
+        }
+
+        // CDF 9/7 lifting steps.
+        // Arith go brrr.
+        for (int i = 2; i < PADDED_SIZE - 1; i += 2)
+            values[i] -= DELTA * (values[i - 1] + values[i + 1]);
+        for (int i = 3; i < PADDED_SIZE - 2; i += 2)
+            values[i] -= GAMMA * (values[i - 1] + values[i + 1]);
+        for (int i = 4; i < PADDED_SIZE - 3; i += 2)
+            values[i] -= BETA * (values[i - 1] + values[i + 1]);
+        for (int i = 5; i < PADDED_SIZE - 4; i += 2)
+            values[i] -= ALPHA * (values[i - 1] + values[i + 1]);
+    }
+
+    // Avoid WAR hazard.
+    barrier();
+
+    if (active_lane)
+    {
+        for (int i = APRON; i < PADDED_SIZE - APRON; i += 2)
+        {
+            float neighbor0 = subgroupQuadSwapHorizontal(values[i]);
+            float neighbor1 = subgroupQuadSwapHorizontal(values[i + 1]);
+
+            if ((local_coord.y & 1u) == 0u)
+            {
+                // Transpose to go from horizontal to vertical.
+                store_shared(local_coord.x + i + (-APRON + 0), local_coord.y >> 1, vec2(values[i], neighbor0));
+                store_shared(local_coord.x + i + (-APRON + 1), local_coord.y >> 1, vec2(values[i + 1], neighbor1));
+            }
+        }
+    }
+}
+
+void main()
+{
+    local_index = (gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID) & (gl_WorkGroupSize.x - 1u);
+
+    if (gl_WorkGroupSize.y > 1)
+    {
+        // All POT constant expressions, so should collapse into something nice.
+        uint subgroups_per_component = gl_WorkGroupSize.x / gl_SubgroupSize;
+        component = gl_SubgroupID / subgroups_per_component;
+    }
+    else
+    {
+        component = 0;
+    }
+
+    load_image_with_apron();
+
+    // Horizontal transform.
+    inverse_transform16(0, true);
+
+    // Also need to transform the apron.
+    inverse_transform8(local_index < 32, BLOCK_SIZE);
+
+    barrier();
+
+    // Vertical transform.
+    inverse_transform16(0, false);
+
+    barrier();
+
+    ivec2 local_coord = unswizzle8x8(local_index);
+
+    if (gl_WorkGroupSize.y == 3)
+    {
+        for (int y = local_coord.y + 8 * int(component); y < BLOCK_SIZE; y += 24)
+        {
+            for (int x = local_coord.x; x < BLOCK_SIZE_HALF; x += 8)
+            {
+                vec2 luma = load_shared_component(y, x, 0) + 0.5;
+                vec2 cb = load_shared_component(y, x, 1);
+                vec2 cr = load_shared_component(y, x, 2);
+
+                const mat3 bt709_to_rgb = mat3(
+                    vec3(1.0, 0.0, 1.5748),
+                    vec3(1.0, -0.13397432 / 0.7152, -0.33480248 / 0.7152),
+                    vec3(1.0, 1.8556, 0.0));
+
+                vec3 rgb0 = vec3(luma.x, cb.x, cr.x) * bt709_to_rgb;
+                vec3 rgb1 = vec3(luma.y, cb.y, cr.y) * bt709_to_rgb;
+
+                imageStore(uOutput, ivec2(2 * x, y) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), vec4(rgb0, 1.0));
+                imageStore(uOutput, ivec2(2 * x + 1, y) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), vec4(rgb1, 1.0));
+            }
+        }
+    }
+    else
+    {
+        for (int y = local_coord.y; y < BLOCK_SIZE; y += 8)
+        {
+            for (int x = local_coord.x; x < BLOCK_SIZE_HALF; x += 8)
+            {
+                vec2 v = load_shared(y, x);
+                if (DCShift)
+                    v += 128.0 / 255.0;
+                imageStore(uOutput, ivec2(2 * x, y) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), v.xxxx);
+                imageStore(uOutput, ivec2(2 * x + 1, y) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), v.yyyy);
+            }
+        }
+    }
+}

@@ -1,0 +1,225 @@
+#version 450
+// Copyright (c) 2025 Hans-Kristian Arntzen
+// SPDX-License-Identifier: MIT
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_vote : require
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0) writeonly uniform image2DArray uDequantImg;
+
+struct BlockMeta
+{
+    uint code_word;
+    uint offset;
+};
+
+layout(set = 0, binding = 1) readonly buffer SSBOMeta
+{
+    BlockMeta meta[];
+} block_meta;
+
+layout(set = 0, binding = 2) readonly buffer Payloads
+{
+    uint data[];
+} payload_data;
+
+layout(set = 0, binding = 3) readonly buffer Quant
+{
+    float data[];
+} quant_data;
+
+#include "dwt_swizzle.h"
+#include "dwt_quant_scale.h"
+
+layout(push_constant) uniform Registers
+{
+    ivec2 resolution;
+    int output_layer;
+    int block_offset_16x16;
+    int block_stride_16x16;
+    int block_offset_64x64;
+    int block_stride_64x64;
+} registers;
+
+int decode_bits32(uint payload)
+{
+    return int(subgroupInverseBallot(uvec4(payload, 0, 0, 0)));
+}
+
+int decode_bits64(uint payload)
+{
+    uint payload0 = subgroupBroadcast(payload, 0);
+    uint payload1 = subgroupBroadcast(payload, 32);
+    return int(subgroupInverseBallot(uvec4(payload0, payload1, 0, 0)));
+}
+
+float decode_payload64(BlockMeta meta)
+{
+    // This path isn't ideal since we cannot get a highly scalar path working on wave64.
+    bool empty_block = meta.code_word == 0;
+    if (empty_block)
+        return 0.0;
+
+    uint control_word = meta.code_word;
+    uint q_bits = bitfieldExtract(control_word, 16, 4);
+    uint block_index = 2 * gl_SubgroupID + (gl_SubgroupInvocationID >> 5);
+
+    int bit_offset = 2 * int(block_index);
+
+    // First, we need to compute the offset that our 8x4 block starts on.
+    uint lsbs = control_word & 0x5555u;
+    uint msbs = control_word & 0xaaaau;
+    uint msbs_shift = msbs >> 1;
+    uint sign_mask = (msbs_shift | lsbs) | (q_bits != 0 ? 0x5555u : 0u);
+    msbs |= msbs_shift;
+
+    uint word_offset =
+        bitCount(bitfieldExtract(lsbs, 0, bit_offset)) +
+        bitCount(bitfieldExtract(msbs, 0, bit_offset)) +
+        bitCount(bitfieldExtract(sign_mask, 0, bit_offset)) +
+        q_bits * block_index + meta.offset;
+
+    // Eagerly load the data to keep latency down.
+    // Also forces the descriptor to be loaded early.
+    uint payload = payload_data.data[word_offset];
+
+    uint local_control_word = bitfieldExtract(control_word, bit_offset, 2);
+    bool need_sign = local_control_word != 0 || q_bits != 0;
+
+    int decoded_sign = 0;
+    int decoded_abs = 0;
+
+    if (subgroupAny(need_sign))
+    {
+        int decoded = decode_bits64(payload);
+        if (need_sign)
+        {
+            decoded_sign = decoded;
+            word_offset++;
+            payload = payload_data.data[word_offset];
+        }
+    }
+
+    int plane_iterations = int(q_bits + local_control_word);
+
+    // Enforce a scalar loop.
+    int max_plane_iterations = max(
+        subgroupBroadcast(plane_iterations, 0),
+        subgroupBroadcast(plane_iterations, 32));
+
+    for (int q = max_plane_iterations - 1; q >= 0; q--)
+    {
+        bool is_active = q < plane_iterations;
+        int decoded = decode_bits64(payload);
+        if (is_active)
+        {
+            decoded_abs = bitfieldInsert(decoded_abs, decoded, q, 1);
+            word_offset++;
+            payload = payload_data.data[word_offset];
+        }
+    }
+
+    float deadzone = float(bitfieldExtract(control_word, 26, 6)) / 128.0;
+    float v = float(decoded_abs);
+
+    if (v != 0.0)
+        v += 0.5;
+    else if (need_sign)
+        v += deadzone;
+
+    v *= 1.0 - 2.0 * float(decoded_sign);
+    return v;
+}
+
+float decode_payload32(BlockMeta meta)
+{
+    bool empty_block = meta.code_word == 0;
+    if (empty_block)
+        return 0.0;
+
+    uint control_word = meta.code_word;
+    uint q_bits = bitfieldExtract(control_word, 16, 4);
+    uint block_index = gl_SubgroupID;
+
+    int bit_offset = 2 * int(block_index);
+
+    // First, we need to compute the offset that our 8x4 block starts on.
+    uint lsbs = control_word & 0x5555u;
+    uint msbs = control_word & 0xaaaau;
+    uint msbs_shift = msbs >> 1;
+    uint sign_mask = (msbs_shift | lsbs) | (q_bits != 0 ? 0x5555u : 0u);
+    msbs |= msbs_shift;
+
+    uint word_offset =
+        bitCount(bitfieldExtract(lsbs, 0, bit_offset)) +
+        bitCount(bitfieldExtract(msbs, 0, bit_offset)) +
+        bitCount(bitfieldExtract(sign_mask, 0, bit_offset)) +
+        q_bits * block_index + meta.offset;
+
+    // Eagerly load the data to keep latency down.
+    // Also forces the descriptor to be loaded early.
+    uint payload = payload_data.data[word_offset];
+
+    uint local_control_word = bitfieldExtract(control_word, bit_offset, 2);
+    bool need_sign = local_control_word != 0 || q_bits != 0;
+
+    int decoded_sign = 0;
+    int decoded_abs = 0;
+
+    if (need_sign)
+    {
+        decoded_sign = decode_bits32(payload);
+        word_offset++;
+        payload = payload_data.data[word_offset];
+    }
+
+    int plane_iterations = int(q_bits + local_control_word);
+
+    for (int q = plane_iterations - 1; q >= 0; q--)
+    {
+        decoded_abs = bitfieldInsert(decoded_abs, decode_bits32(payload), q, 1);
+        word_offset++;
+        payload = payload_data.data[word_offset];
+    }
+
+    float deadzone = float(bitfieldExtract(control_word, 26, 6)) / 128.0;
+
+    float v = float(decoded_abs);
+    if (v != 0.0)
+        v += 0.5;
+    else if (need_sign)
+        v += deadzone;
+
+    v *= 1.0 - 2.0 * float(decoded_sign);
+    return v;
+}
+
+void main()
+{
+    uint local_index = gl_SubgroupInvocationID + gl_SubgroupID * gl_SubgroupSize;
+    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * 16;
+
+    BlockMeta meta = block_meta.meta[
+        registers.block_offset_16x16 +
+        gl_WorkGroupID.y * registers.block_stride_16x16 +
+        gl_WorkGroupID.x];
+
+    ivec2 local_coord = unswizzle16x16_dequant(local_index);
+    float v;
+
+    if (gl_SubgroupSize == 64)
+        v = decode_payload64(meta);
+    else if (gl_SubgroupSize == 32)
+        v = decode_payload32(meta);
+
+    v *= quant_data.data[
+        registers.block_offset_64x64 +
+        (gl_WorkGroupID.y >> 2) * registers.block_stride_64x64 +
+        (gl_WorkGroupID.x >> 2)];
+
+    v *= decode_quant_scale(bitfieldExtract(meta.code_word, 20, 6));
+
+    imageStore(uDequantImg, ivec3(base_coord + local_coord, registers.output_layer), vec4(v));
+}
