@@ -32,6 +32,8 @@ target_compile_options(pyrowave PRIVATE ${PYROWAVE_CXX_FLAGS})
 option(PYROWAVE_STANDALONE "Build PyroWave as a standalone sandbox." ON)
 
 if (PYROWAVE_STANDALONE)
+    add_library(pyrowave-utils STATIC yuv4mpeg.cpp yuv4mpeg.hpp)
+
     # Standalone build, build the sandbox.
     set(GRANITE_RENDERER ON CACHE BOOL "" FORCE)
     set(GRANITE_VULKAN_FOSSILIZE OFF CACHE BOOL "" FORCE)
@@ -42,7 +44,7 @@ if (PYROWAVE_STANDALONE)
     add_granite_offline_tool(pyrowave-sandbox sandbox.cpp)
     target_link_libraries(pyrowave-sandbox PRIVATE pyrowave)
     target_compile_definitions(pyrowave-sandbox PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/assets\")
-    target_link_libraries(pyrowave-sandbox PRIVATE granite-stb granite-renderer)
+    target_link_libraries(pyrowave-sandbox PRIVATE granite-stb granite-renderer pyrowave-utils)
 endif()
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)

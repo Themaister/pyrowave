@@ -15,6 +15,7 @@
 #include "pyrowave_common.hpp"
 #include <random>
 #include "fft.hpp"
+#include "yuv4mpeg.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -24,8 +25,7 @@ static void run_encoder_test(Device &device,
                              PyroWave::Decoder &dec,
                              const PyroWave::ViewBuffers &inputs,
                              const PyroWave::ViewBuffers &outputs,
-							 size_t bitstream_size,
-                             FILE *f)
+							 size_t bitstream_size, YUV4MPEGFile &f)
 {
 	BufferCreateInfo buffer_info = {};
 	buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -105,7 +105,9 @@ static void run_encoder_test(Device &device,
 
 	{
 		auto cmd = device.request_command_buffer();
-		if (!dec.decode(*cmd, outputs, false))
+		if (!dec.decode_is_ready(false))
+			return;
+		if (!dec.decode(*cmd, outputs))
 			return;
 
 		for (int i = 0; i < 3; i++)
@@ -129,16 +131,13 @@ static void run_encoder_test(Device &device,
 		device.submit(cmd);
 		device.wait_idle();
 
-		if (fwrite("FRAME\n", 1, 6, f) != 6)
-		{
-			LOGE("Failed to write frame header.\n");
+		if (!f.begin_frame())
 			return;
-		}
 
 		for (auto &buf : out_buffers)
 		{
 			const void *mapped = device.map_host_buffer(*buf, MEMORY_ACCESS_READ_BIT);
-			if (fwrite(mapped, 1, buf->get_create_info().size, f) != buf->get_create_info().size)
+			if (!f.write(mapped, buf->get_create_info().size))
 			{
 				LOGE("Failed to write plane.\n");
 				return;
@@ -318,7 +317,7 @@ static void run_noise_power_test(Device &device)
 	append_random_block(0, 2, 128);
 	append_random_block(0, 3, 64);
 
-	dec.decode(*cmd, outputs.views, true);
+	dec.decode(*cmd, outputs.views);
 
 	cmd->image_barrier(*outputs.images[0], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 	                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -364,68 +363,16 @@ static void run_noise_power_test(Device &device)
 
 static void run_vulkan_test(Device &device, const char *in_path, const char *out_path, size_t bitstream_size)
 {
-	struct FileDeleter { void operator()(FILE *f) { if (f) fclose(f); } };
-	std::unique_ptr<FILE, FileDeleter> in_f(fopen(in_path, "rb"));
-	std::unique_ptr<FILE, FileDeleter> out_f(fopen(out_path, "wb"));
-	if (!in_f)
-	{
-		LOGE("Failed to open %s\n", in_path);
+	YUV4MPEGFile input, output;
+
+	if (!input.open_read(in_path))
 		return;
-	}
 
-	if (!out_f)
-	{
-		LOGE("Failed to open %s\n", out_path);
+	if (!output.open_write(out_path, input.get_params()))
 		return;
-	}
 
-	char magic[11] = {};
-	if (fread(magic, 1, sizeof(magic) - 1, in_f.get()) != sizeof(magic) - 1)
-	{
-		LOGE("Failed to read magic.\n");
-		return;
-	}
-
-	if (strcmp(magic, "YUV4MPEG2 ") != 0)
-	{
-		LOGE("Invalid magic\n");
-		return;
-	}
-
-	if (fwrite(magic, 1, 10, out_f.get()) != 10)
-	{
-		LOGE("Failed to write magic.\n");
-		return;
-	}
-
-	unsigned width = 0;
-	unsigned height = 0;
-
-	std::string params;
-
-	char c;
-	while (fread(&c, 1, 1, in_f.get()) == 1 && c != '\n')
-		params += c;
-	params += '\n';
-
-	if (fwrite(params.data(), 1, params.size(), out_f.get()) != params.size())
-	{
-		LOGE("Failed to write params.\n");
-		return;
-	}
-
-	auto w_pos = params.find_first_of('W');
-	if (w_pos == std::string::npos)
-		return;
-	width = strtoul(params.c_str() + w_pos + 1, nullptr, 0);
-
-	auto h_pos = params.find_first_of('H');
-	if (h_pos == std::string::npos)
-		return;
-	height = strtoul(params.c_str() + h_pos + 1, nullptr, 0);
-
-	//if (params.find("C420") == std::string::npos)
-	//	return;
+	auto width = input.get_width();
+	auto height = input.get_height();
 
 	auto inputs = create_ycbcr_images(device, width, height);
 	auto outputs = create_ycbcr_images(device, width, height);
@@ -446,12 +393,8 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 
 	for (;;)
 	{
-		params.clear();
-		while (fread(&c, 1, 1, in_f.get()) == 1 && c != '\n')
-			params += c;
-
-		if (params != "FRAME")
-			return;
+		if (!input.begin_frame())
+			break;
 
 		auto cmd = device.request_command_buffer();
 
@@ -468,8 +411,7 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 		for (int i = 0; i < 3; i++)
 		{
 			auto *y = cmd->update_image(*inputs.images[i]);
-			if (fread(y, 1, inputs.images[i]->get_width() * inputs.images[i]->get_height(), in_f.get()) !=
-			    inputs.images[i]->get_width() * inputs.images[i]->get_height())
+			if (!input.read(y, inputs.images[i]->get_width() * inputs.images[i]->get_height()))
 			{
 				LOGE("Failed to read plane.\n");
 				device.submit_discard(cmd);
@@ -486,7 +428,7 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 
 		device.submit(cmd);
 
-		run_encoder_test(device, enc, dec, inputs.views, outputs.views, bitstream_size, out_f.get());
+		run_encoder_test(device, enc, dec, inputs.views, outputs.views, bitstream_size, output);
 
 		frames++;
 		if (has_rdoc && frames >= 10)
@@ -523,7 +465,7 @@ static void run_vulkan_test(const char *in_path, const char *out_path, size_t bi
 	Device dev;
 	dev.set_context(ctx);
 
-	//run_noise_power_test(dev);
+	run_noise_power_test(dev);
 	run_vulkan_test(dev, in_path, out_path, bitstream_size);
 }
 
