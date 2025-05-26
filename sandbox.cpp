@@ -3,7 +3,6 @@
 
 #include <string.h>
 
-#include "os_filesystem.hpp"
 #include "global_managers_init.hpp"
 #include "application.hpp"
 #include "filesystem.hpp"
@@ -16,6 +15,7 @@
 #include <random>
 #include "fft.hpp"
 #include "yuv4mpeg.hpp"
+#include "shaders/slangmosh.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -215,6 +215,9 @@ static BlockCounts compute_block_counts(int width, int height, int sample_level,
 
 static void run_noise_power_test(Device &device)
 {
+	Vulkan::ResourceLayout layout;
+	PyroWave::Shaders<> shaders(device, layout, 0);
+
 	constexpr int Width = 4096;
 	constexpr int Height = 4096;
 	auto outputs = create_ycbcr_images(device, Width, Height, VK_FORMAT_R32_SFLOAT);
@@ -350,7 +353,7 @@ static void run_noise_power_test(Device &device)
 					   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 					   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
-	cmd->set_program("assets://power_to_db.comp");
+	cmd->set_program(shaders.power_to_db);
 	cmd->set_texture(0, 0, fft_outputs.images[0]->get_view());
 	cmd->set_storage_texture(0, 1, db_outputs.images[0]->get_view());
 	cmd->dispatch(Width / (2 * 8 * 8), Height / (2 * 8 * 8), 1);
@@ -441,10 +444,8 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 
 static void run_vulkan_test(const char *in_path, const char *out_path, size_t bitstream_size)
 {
-	Global::init(Global::MANAGER_FEATURE_ASSET_MANAGER_BIT |
-	             Global::MANAGER_FEATURE_EVENT_BIT |
-	             Global::MANAGER_FEATURE_THREAD_GROUP_BIT |
-	             Global::MANAGER_FEATURE_FILESYSTEM_BIT, 1);
+	Global::init(Global::MANAGER_FEATURE_EVENT_BIT | Global::MANAGER_FEATURE_FILESYSTEM_BIT |
+	             Global::MANAGER_FEATURE_THREAD_GROUP_BIT, 1);
 
 	Filesystem::setup_default_filesystem(GRANITE_FILESYSTEM(), ASSET_DIRECTORY);
 
@@ -452,9 +453,8 @@ static void run_vulkan_test(const char *in_path, const char *out_path, size_t bi
 		return;
 
 	Context::SystemHandles handles = {};
-	handles.asset_manager = GRANITE_ASSET_MANAGER();
-	handles.filesystem = GRANITE_FILESYSTEM();
 	handles.thread_group = GRANITE_THREAD_GROUP();
+	handles.filesystem = GRANITE_FILESYSTEM();
 
 	Context ctx;
 	ctx.set_system_handles(handles);

@@ -40,9 +40,8 @@ struct AnalyzeRateControlPushData
 {
 	ivec2 resolution;
 	ivec2 resolution_16x16_blocks;
-	float quant_resolution;
+	float step_size;
 	float rdo_distortion_scale;
-	float rdo_lambda;
 	int32_t block_offset_16x16;
 	int32_t block_stride_16x16;
 	int32_t block_offset_64x64;
@@ -102,6 +101,10 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 	cpd = std::max(cpd, 8.0f);
 
 	float csf = 2.6f * (0.0192f + 0.114f * cpd) * std::exp(-std::pow(0.114f * cpd, 1.1f));
+
+	// Heavily discount chroma quality.
+	if (component != 0)
+		csf *= 0.4f;
 
 	// Due to filtering, distortion in lower bands will result in more noise power.
 	// By scaling the distortion by this factor, we ensure uniform results.
@@ -323,9 +326,8 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				push.resolution.y = level_height;
 				push.resolution_16x16_blocks.x = (level_width + 15) / 16;
 				push.resolution_16x16_blocks.y = (level_height + 15) / 16;
-				push.quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res));
+				push.step_size = decode_quant(encode_quant(1.0f / quant_res));
 				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
-				push.rdo_lambda = 1.0f; // TODO: Figure out what to do here.
 				push.block_offset_16x16 = block_meta[component][level][band].block_offset_16x16;
 				push.block_stride_16x16 = block_meta[component][level][band].block_stride_16x16;
 				push.block_offset_64x64 = block_meta[component][level][band].block_offset_64x64;

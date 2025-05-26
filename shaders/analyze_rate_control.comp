@@ -50,9 +50,8 @@ layout(push_constant) uniform Registers
 {
     ivec2 resolution;
     ivec2 resolution_16x16_blocks;
-    float quant_resolution;
+    float step_size;
     float rdo_distortion_scale;
-    float rdo_lambda;
     int block_offset_16x16;
     int block_stride_16x16;
     int block_offset_64x64;
@@ -104,9 +103,7 @@ uint compute_required_16x16_size(uint control_word, int quant)
 
 float estimate_weighted_square_error(uint control_word, DeadZone zone, int quant)
 {
-    // TODO: Scale the quant resolution.
-    float dequant_scale = registers.quant_resolution * decode_quant_scale(bitfieldExtract(control_word, 20, 6));
-    float step_size = 1.0 / dequant_scale;
+    float step_size = registers.step_size * decode_quant_scale(bitfieldExtract(control_word, 20, 6));
 
     // Assume perfectly uniform white noise. This should hold reasonably well for non-zero coefficients.
     float uniform_quant_square_error = step_size * step_size * (1.0 / 12.0);
@@ -169,11 +166,15 @@ float estimate_weighted_square_error(uint control_word, DeadZone zone, int quant
 }
 
 // Perform operations that cause lower distortion first.
-uint distortion_to_bucket_index(float d, float cost)
+uint distortion_to_bucket_index(float d, float cost, float d_base, float cost_base)
 {
+    if (cost == cost_base)
+        return 0;
+
     // Compress a large range into 64 possible buckets.
     // Every band is ~1.5 dB.
-    float index = 60.0 + 2.0 * log2(d + registers.rdo_lambda * cost);
+    // Greedily chase least added distortion per word removed from code stream.
+    float index = 60.0 + 2.0 * log2((d - d_base) / (cost_base - cost));
     return uint(max(index + 0.5, 0.0));
 }
 
@@ -210,7 +211,7 @@ void emit_rdo_operations()
         distortion = 1e30;
     }
 
-    uint bucket_index = distortion_to_bucket_index(distortion, cost);
+    uint bucket_index = distortion_to_bucket_index(distortion, cost, shared_distortion[0], float(shared_rate_cost[0]));
     if (gl_SubgroupInvocationID == 0)
         bucket_index = 0;
 
@@ -227,7 +228,6 @@ void emit_rdo_operations()
     else if (gl_SubgroupInvocationID < 16)
     {
         uint saving = shared_rate_cost[gl_SubgroupInvocationID - 1] - shared_rate_cost[gl_SubgroupInvocationID];
-        float relative_dist = shared_distortion[gl_SubgroupInvocationID] - shared_distortion[gl_SubgroupInvocationID - 1];
 
         if (saving != 0)
         {
@@ -251,7 +251,6 @@ void main()
 
     BlockMeta meta;
     DeadZone deadzone;
-    bool in_range;
 
     if (all(lessThan(block16x16_index, registers.resolution_16x16_blocks)))
     {
@@ -260,13 +259,11 @@ void main()
             block16x16_index.x;
         meta = block_meta.meta[block_index];
         deadzone = deadzones.data[block_index];
-        in_range = true;
     }
     else
     {
         meta = BlockMeta(0, 0);
         deadzone = DeadZone(0, 0);
-        in_range = false;
     }
 
     uint bit_index = index >> 4;
@@ -275,28 +272,6 @@ void main()
     {
         uint cost = compute_required_16x16_size(meta.code_word, int(i));
         float dist = estimate_weighted_square_error(meta.code_word, deadzone, int(i));
-
-        // On the edge, assume edge expansion.
-        if (block16x16_index.x + 1 == registers.resolution_16x16_blocks.x)
-        {
-            uint x_range = registers.resolution.x - block16x16_index.x * 16;
-            dist *= 16.0 / float(x_range);
-        }
-
-        if (block16x16_index.y + 1 == registers.resolution_16x16_blocks.y)
-        {
-            uint y_range = registers.resolution.y - block16x16_index.y * 16;
-            dist *= 16.0 / float(y_range);
-        }
-
-        if (subgroupAny(!in_range))
-        {
-            // Avoid out of range blocks being counted as low noise.
-            // The top-left block is always in range.
-            float clamped_dist = subgroupShuffle(dist, gl_SubgroupInvocationID & ~15);
-            if (!in_range)
-                dist = clamped_dist;
-        }
 
         if (gl_SubgroupSize == 16)
         {
@@ -344,50 +319,21 @@ void main()
 
     // Final pass.
 
-    uint wg_done_count;
-    if (gl_SubgroupSize == 64)
-    {
-        if (subgroupElect())
-            wg_done_count = atomicAdd(buckets.count, 1) + 1;
-        wg_done_count = subgroupBroadcastFirst(wg_done_count);
-    }
-    else
-    {
-        if (gl_LocalInvocationIndex == 0)
-            shared_tmp[0] = atomicAdd(buckets.count, 1) + 1;
-        barrier();
-        wg_done_count = shared_tmp[0];
-        barrier();
-    }
+    uint subgroups_done_count;
+    if (subgroupElect())
+        subgroups_done_count = atomicAdd(buckets.count, 1) + 1;
+    subgroups_done_count = subgroupBroadcastFirst(subgroups_done_count);
 
-    if (wg_done_count == registers.total_wg_count)
+    if (subgroups_done_count == registers.total_wg_count * gl_NumSubgroups)
     {
         uint running_offset = 0;
-        uint total_wave;
-        for (int iter = 0; iter < 128 / gl_WorkGroupSize.x; iter++)
+
+        for (int iter = 0; iter < 128 / gl_SubgroupSize; iter++)
         {
-            uint v = atomicAdd(buckets.total_savings_per_bucket[iter * gl_WorkGroupSize.x + index], 0);
+            uint v = atomicAdd(buckets.total_savings_per_bucket[iter * gl_SubgroupSize + gl_SubgroupInvocationID], 0);
             v = subgroupInclusiveAdd(v);
-            if (gl_SubgroupSize < 64)
-            {
-                if (iter != 0)
-                    barrier();
-                if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
-                    shared_tmp[gl_SubgroupID] = v;
-                barrier();
-                for (uint i = 0; i < gl_SubgroupID; i++)
-                    v += shared_tmp[i];
-
-                total_wave = shared_tmp[gl_NumSubgroups - 1];
-            }
-            else
-            {
-                subgroupBarrier();
-                total_wave = subgroupBroadcast(v, gl_SubgroupSize - 1);
-            }
-
-            atomicExchange(buckets.total_savings_per_bucket[iter * gl_WorkGroupSize.x + index], v + running_offset);
-            running_offset += total_wave;
+            atomicExchange(buckets.total_savings_per_bucket[iter * gl_SubgroupSize + gl_SubgroupInvocationID], v + running_offset);
+            running_offset += subgroupBroadcast(v, gl_SubgroupSize - 1);
         }
     }
 }
