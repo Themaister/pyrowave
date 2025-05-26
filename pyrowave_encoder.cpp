@@ -91,7 +91,7 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 	// Normal PC monitors.
 	constexpr float dpi = 96.0f;
 	// Compromise between couch gaming and desktop.
-	constexpr float viewing_distance = 1.5f;
+	constexpr float viewing_distance = 1.0f;
 	constexpr float cpd_nyquist = 0.34f * viewing_distance * dpi;
 
 	float cpd = std::sqrt(horiz_midpoint * horiz_midpoint + vert_midpoint * vert_midpoint) *
