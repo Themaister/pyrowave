@@ -45,6 +45,9 @@ if (PYROWAVE_STANDALONE)
     target_link_libraries(pyrowave-sandbox PRIVATE pyrowave)
     target_compile_definitions(pyrowave-sandbox PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/assets\")
     target_link_libraries(pyrowave-sandbox PRIVATE granite-stb granite-renderer pyrowave-utils)
+
+    add_granite_offline_tool(pyrowave-psnr psnr.cpp)
+    target_link_libraries(pyrowave-psnr PRIVATE pyrowave-utils)
 endif()
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
