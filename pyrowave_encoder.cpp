@@ -140,9 +140,6 @@ float Encoder::Impl::get_noise_power_normalized_quant_resolution(int level, int 
 	if (component != 0)
 		bits--;
 
-	if (bits > 10)
-		bits = 10;
-
 	return float(1 << bits);
 }
 
