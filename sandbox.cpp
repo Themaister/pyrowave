@@ -73,6 +73,7 @@ static void run_encoder_test(Device &device,
 	                                   reordered_packet_buffer.data(),
 	                                   reordered_packet_buffer.size(),
 	                                   mapped_meta, mapped_bits);
+	enc.report_stats(mapped_meta, mapped_bits);
 	(void)out_packets;
 
 	size_t encoded_size = 0;

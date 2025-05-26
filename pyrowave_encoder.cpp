@@ -79,6 +79,8 @@ struct Encoder::Impl : public WaveletBuffers
 	                 void *bitstream, size_t size,
 	                 const void *mapped_meta, const void *mapped_bitstream) const;
 
+	void report_stats(const void *mapped_meta, const void *mapped_bitstream) const;
+
 	uint32_t sequence_count = 0;
 };
 
@@ -573,6 +575,66 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 	return num_packets;
 }
 
+void Encoder::Impl::report_stats(const void *mapped_meta, const void *) const
+{
+	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
+
+	int total_pixels = 0;
+	int total_words = 0;
+
+	static const char *components[] = { "Y", "Cb", "Cr" };
+	static const char *bands[] = { "LL", "HL", "LH", "HH" };
+
+	for (int component = 0; component < NumComponents; component++)
+	{
+		for (int level = 0; level < DecompositionLevels; level++)
+		{
+			int total_words_in_level = 0;
+
+			// Ignore top-level CbCr when doing 420 subsampling.
+			if (level == 0 && component != 0)
+				continue;
+
+			auto band_width = wavelet_img->get_width(level);
+			auto band_height = wavelet_img->get_height(level);
+			int blocks_x_64x64 = (band_width + 63) / 64;
+			int blocks_y_64x64 = (band_height + 63) / 64;
+
+			for (int band = 3; band >= (level == DecompositionLevels - 1 ? 0 : 1); band--)
+			{
+				auto &block_mapping = block_meta[component][level][band];
+
+				int words = 0;
+				for (int y = 0; y < blocks_y_64x64; y++)
+				{
+					for (int x = 0; x < blocks_x_64x64; x++)
+					{
+						int block_index = block_mapping.block_offset_64x64 + y * block_mapping.block_stride_64x64 + x;
+						words += meta[block_index].num_words;
+					}
+				}
+
+				int bytes = words * 4;
+				double bpp = (bytes * 8.0) / (band_width * band_height);
+
+				LOGI("%s: decomposition level %d, band %s: %.3f bpp\n",
+					 components[component], level, bands[band], bpp);
+
+				total_words += words;
+
+				if (component == 0)
+					total_pixels += band_width * band_height;
+
+				total_words_in_level += words;
+			}
+
+			LOGI("%s: decomposition level %d: %d bytes\n", components[component], level, total_words_in_level * 4);
+		}
+	}
+
+	LOGI("Overall: %.3f bpp\n", (total_words * 32.0) / total_pixels);
+}
+
 size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
                                 void *output_bitstream_, size_t size,
                                 const void *mapped_meta,
@@ -700,6 +762,11 @@ size_t Encoder::packetize(Packet *packets, size_t packet_boundary,
                           const void *mapped_meta, const void *mapped_bitstream) const
 {
 	return impl->packetize(packets, packet_boundary, bitstream, size, mapped_meta, mapped_bitstream);
+}
+
+void Encoder::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
+{
+	impl->report_stats(mapped_meta, mapped_bitstream);
 }
 
 uint64_t Encoder::get_meta_required_size() const

@@ -51,6 +51,8 @@ public:
 					 void *bitstream, size_t size,
 					 const void *mapped_meta, const void *mapped_bitstream) const;
 
+	void report_stats(const void *mapped_meta, const void *mapped_bitstream) const;
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> impl;
