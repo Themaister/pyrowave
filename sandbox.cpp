@@ -56,9 +56,11 @@ static void run_encoder_test(Device &device,
 		cmd->copy_buffer(*meta_host, *meta);
 		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 		             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
-		device.submit(cmd);
+
+		Fence fence;
+		device.submit(cmd, &fence);
 		device.next_frame_context();
-		device.wait_idle();
+		fence->wait();
 	}
 
 	auto *mapped_meta = static_cast<const PyroWave::BitstreamPacket *>(
@@ -129,8 +131,10 @@ static void run_encoder_test(Device &device,
 		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 					 VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 
-		device.submit(cmd);
-		device.wait_idle();
+		Fence fence;
+		device.submit(cmd, &fence);
+		device.next_frame_context();
+		fence->wait();
 
 		if (!f.begin_frame())
 			return;
