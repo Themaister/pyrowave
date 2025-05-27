@@ -466,7 +466,7 @@ static void run_vulkan_test(const char *in_path, const char *out_path, size_t bi
 	Device dev;
 	dev.set_context(ctx);
 
-	run_noise_power_test(dev);
+	//run_noise_power_test(dev);
 	run_vulkan_test(dev, in_path, out_path, bitstream_size);
 }
 

@@ -119,16 +119,18 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 			meta_buffer_cpu[block_16x16].offset = offset;
 			meta_buffer_cpu[block_16x16].code_word = *control_words;
 
+			auto &mapping_16x16 = block_meta_16x16[block_16x16];
+
 			auto q_bits = (*control_words >> 16) & 0xf;
-			auto lsbs = *control_words & 0x5555u;
-			auto msbs = *control_words & 0xaaaau;
+			auto lsbs = *control_words & (mapping_16x16.block_mask << 0);
+			auto msbs = *control_words & (mapping_16x16.block_mask << 1);
 			auto msbs_shift = msbs >> 1;
-			auto sign_mask = (msbs_shift | lsbs) | (q_bits ? 0x5555 : 0);
+			auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_16x16.block_mask : 0);
 			msbs |= msbs_shift;
 			auto cost = Util::popcount32(lsbs) +
 			            Util::popcount32(msbs) +
 			            Util::popcount32(sign_mask) +
-			            q_bits * 8;
+			            q_bits * mapping_16x16.in_bounds_subblocks;
 
 			offset += cost;
 			control_words++;

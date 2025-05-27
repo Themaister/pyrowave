@@ -26,6 +26,7 @@ struct QuantizerPushData
 
 struct BlockPackingPushData
 {
+	ivec2 resolution;
 	ivec2 resolution_64x64_blocks;
 	ivec2 resolution_16x16_blocks;
 	uint32_t quant_resolution_code;
@@ -80,6 +81,8 @@ struct Encoder::Impl : public WaveletBuffers
 	                 const void *mapped_meta, const void *mapped_bitstream) const;
 
 	void report_stats(const void *mapped_meta, const void *mapped_bitstream) const;
+
+	bool validate_bitstream(const uint32_t *bitstream, const BitstreamPacket *meta, uint32_t block_index) const;
 
 	uint32_t sequence_count = 0;
 };
@@ -213,6 +216,7 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
 				BlockPackingPushData packing_push = {};
+				packing_push.resolution = ivec2(level_width, level_height);
 				packing_push.resolution_64x64_blocks = ivec2((level_width + 63) / 64, (level_height + 63) / 64);
 				packing_push.resolution_16x16_blocks = ivec2((level_width + 15) / 16, (level_height + 15) / 16);
 
@@ -632,6 +636,97 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *) const
 	LOGI("Overall: %.3f bpp\n", (total_words * 32.0) / total_pixels);
 }
 
+bool Encoder::Impl::validate_bitstream(
+		const uint32_t *bitstream, const BitstreamPacket *meta, uint32_t block_index) const
+{
+	if (meta[block_index].num_words == 0)
+		return true;
+
+	bitstream += meta[block_index].offset_u32;
+	auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream);
+	if (header->block_index != block_index)
+	{
+		LOGI("Mismatch in block index. header: %u, meta: %u\n", header->block_index, block_index);
+		return false;
+	}
+
+	if (header->payload_words != meta[block_index].num_words)
+	{
+		LOGI("Mismatch in payload words, header: %u, meta: %u\n", header->payload_words, meta[block_index].num_words);
+		return false;
+	}
+
+	int blocks_16x16 = int(Util::popcount32(header->ballot));
+	auto *control_words = bitstream + 2;
+	uint32_t offset = 2 + blocks_16x16;
+
+	if (sizeof(*header) / sizeof(uint32_t) + blocks_16x16 > header->payload_words)
+	{
+		LOGE("payload_words is not large enough.\n");
+		return false;
+	}
+
+	const auto &mapping = block_64x64_to_16x16_mapping[header->block_index];
+
+	bool invalid_packet = false;
+
+	Util::for_each_bit(header->ballot, [&](unsigned bit) {
+		int x = int(bit & 3);
+		int y = int(bit >> 2);
+
+		if (x < mapping.block_width_16x16 && y < mapping.block_height_16x16)
+		{
+			int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * y + x;
+
+			auto &mapping_16x16 = block_meta_16x16[block_16x16];
+
+			auto q_bits = (*control_words >> 16) & 0xf;
+			auto lsbs = *control_words & 0x5555u;
+			auto msbs = *control_words & 0xaaaau;
+
+			if ((lsbs & (mapping_16x16.block_mask << 0)) != lsbs)
+			{
+				LOGE("Invalid LSBs for block_index %u.\n", block_index);
+				invalid_packet = true;
+			}
+
+			if ((msbs & (mapping_16x16.block_mask << 1)) != msbs)
+			{
+				LOGE("Invalid MSBs for block_index %u.\n", block_index);
+				invalid_packet = true;
+			}
+
+			auto msbs_shift = msbs >> 1;
+			auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_16x16.block_mask : 0);
+			msbs |= msbs_shift;
+			auto cost = Util::popcount32(lsbs) +
+			            Util::popcount32(msbs) +
+			            Util::popcount32(sign_mask) +
+			            q_bits * mapping_16x16.in_bounds_subblocks;
+
+			offset += cost;
+			control_words++;
+		}
+		else
+		{
+			LOGE("block_index %u: 16x16 block is out of bounds. (%d, %d) >= (%d, %d)\n",
+			     block_index, x, y, mapping.block_width_16x16, mapping.block_height_16x16);
+			invalid_packet = true;
+		}
+	});
+
+	if (invalid_packet)
+		return false;
+
+	if (offset != header->payload_words)
+	{
+		LOGE("Block index %u, offset %u != %u\n", block_index, offset, header->payload_words);
+		return false;
+	}
+
+	return true;
+}
+
 size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
                                 void *output_bitstream_, size_t size,
                                 const void *mapped_meta,
@@ -663,6 +758,10 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	memcpy(output_bitstream, &header, sizeof(header));
 	output_offset += sizeof(header);
 	size_in_packet += sizeof(header);
+
+	for (int i = 0; i < block_count_64x64; i++)
+		if (!validate_bitstream(input_bitstream, meta, i))
+			return false;
 
 	for (int i = 0; i < block_count_64x64; i++)
 	{

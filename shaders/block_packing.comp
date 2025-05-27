@@ -62,6 +62,7 @@ layout(set = 0, binding = 5) readonly buffer RateControlQuant
 
 layout(push_constant) uniform Registers
 {
+    ivec2 resolution;
     ivec2 resolution_64x64_blocks;
     ivec2 resolution_16x16_blocks;
     uint quant_resolution_code;
@@ -72,15 +73,15 @@ layout(push_constant) uniform Registers
     int block_stride_16x16;
 } registers;
 
-uint compute_required_16x16_size(uint control_word)
+uint compute_required_16x16_size(uint control_word, uint block_mask, int in_range_subblocks)
 {
     int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
     uint lsbs = control_word & 0x5555u;
     uint msbs = control_word & 0xaaaau;
     uint msbs_shift = msbs >> 1;
     msbs |= msbs_shift;
-    uint sign_mask = (msbs_shift | lsbs) | (q_bits != 0 ? 0x5555u : 0u);
-    return bitCount(lsbs) + bitCount(msbs) + bitCount(sign_mask) + q_bits * 8;
+    uint sign_mask = (msbs_shift | lsbs) | (q_bits != 0 ? block_mask : 0u);
+    return bitCount(lsbs) + bitCount(msbs) + bitCount(sign_mask) + q_bits * in_range_subblocks;
 }
 
 uint quantize_code_word(uint control_word, int quant)
@@ -163,6 +164,14 @@ void main()
     DeadZone deadzone;
     int quant;
 
+    ivec2 active_block_res = min(registers.resolution - 16 * block16x16_index, ivec2(16));
+    int active_subblocks_x = (active_block_res.x + 7) >> 3;
+    int active_subblocks_y = (active_block_res.y + 3) >> 2;
+    int in_range_subblocks = active_subblocks_x * active_subblocks_y;
+    uint block_mask = bitfieldExtract(0x5555u, 0, 2 * active_subblocks_y);
+    if (active_subblocks_x == 2)
+        block_mask |= block_mask << 8;
+
     if (all(lessThan(block16x16_index, registers.resolution_16x16_blocks)))
     {
         int block_index = registers.block_offset_16x16 +
@@ -195,7 +204,7 @@ void main()
     uint local_ballot = gl_SubgroupSize >= 64 && linear_block_64x64_index >= 2 ? code_word_ballot.y : code_word_ballot.x;
     local_ballot = bitfieldExtract(local_ballot, int(16u * (linear_block_64x64_index & 1u)), 16);
 
-    uint required_size = compute_required_16x16_size(code_word);
+    uint required_size = compute_required_16x16_size(code_word, block_mask, in_range_subblocks);
     uint required_size_with_meta = required_size;
     if (required_size_with_meta != 0)
         required_size_with_meta++;
@@ -274,36 +283,40 @@ void main()
 
         deadzone.total = ldexp(deadzone.total, -quant);
 
-        for (int i = 0; i < 8; i++)
+        for (int x = 0; x < active_subblocks_x; x++)
         {
-            uint out_planes = bitfieldExtract(code_word, 2 * i, 2) + out_q_bits;
-            if (out_planes != 0)
-                out_planes++;
-
-            uint in_planes = bitfieldExtract(meta.code_word, 2 * i, 2) + in_q_bits;
-            if (in_planes != 0)
-                in_planes++;
-
-            uint throw_planes = in_planes - out_planes;
-            uint quant_to_zero_mask = copy_words(output_offset, input_offset, out_planes);
-            uint threw_significant_mask = 0;
-
-            int e = int(throw_planes) - 1 - quant;
-
-            for (uint i = 0; i < throw_planes; i++)
+            for (int y = 0; y < active_subblocks_y; y++)
             {
-                uint in_data = payload_data.data[input_offset++];
-                deadzone.total += ldexp(float(bitCount(in_data & quant_to_zero_mask)), e);
-                threw_significant_mask |= in_data;
-                e--;
+                int bit_offset = x * 8 + y * 2;
+                uint out_planes = bitfieldExtract(code_word, bit_offset, 2) + out_q_bits;
+                if (out_planes != 0)
+                    out_planes++;
+
+                uint in_planes = bitfieldExtract(meta.code_word, bit_offset, 2) + in_q_bits;
+                if (in_planes != 0)
+                    in_planes++;
+
+                uint throw_planes = in_planes - out_planes;
+                uint quant_to_zero_mask = copy_words(output_offset, input_offset, out_planes);
+                uint threw_significant_mask = 0;
+
+                int e = int(throw_planes) - 1 - quant;
+
+                for (uint i = 0; i < throw_planes; i++)
+                {
+                    uint in_data = payload_data.data[input_offset++];
+                    deadzone.total += ldexp(float(bitCount(in_data & quant_to_zero_mask)), e);
+                    threw_significant_mask |= in_data;
+                    e--;
+                }
+
+                // If we only threw away zeroes, we've already marked the value as deadzone, don't double count.
+                quant_to_zero_mask &= threw_significant_mask;
+                deadzone.count += bitCount(quant_to_zero_mask);
+
+                // Consider that we dequant the deadzone.
+                deadzone.total += ldexp(float(bitCount(quant_to_zero_mask)), -(quant + 1));
             }
-
-            // If we only threw away zeroes, we've already marked the value as deadzone, don't double count.
-            quant_to_zero_mask &= threw_significant_mask;
-            deadzone.count += bitCount(quant_to_zero_mask);
-
-            // Consider that we dequant the deadzone.
-            deadzone.total += ldexp(float(bitCount(quant_to_zero_mask)), -(quant + 1));
         }
 
         float dead = deadzone.total / max(1.0, float(deadzone.count));

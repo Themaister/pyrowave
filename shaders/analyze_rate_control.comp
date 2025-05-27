@@ -64,7 +64,7 @@ shared uint shared_rate_cost[16];
 shared float shared_distortion[16];
 shared uint shared_tmp[4];
 
-uint compute_required_16x16_size(uint control_word, int quant)
+uint compute_required_16x16_size(uint control_word, int quant, uint block_mask, int in_range_subblocks)
 {
     int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
 
@@ -93,8 +93,8 @@ uint compute_required_16x16_size(uint control_word, int quant)
     if (quant >= 3)
         plane0 = 0;
 
-    uint sign_mask = (plane1 | plane0) | (q_bits != 0 ? 0x5555u : 0u);
-    uint size = bitCount(plane0) + bitCount(plane1 * 3) + bitCount(sign_mask) + q_bits * 8;
+    uint sign_mask = (plane1 | plane0) | (q_bits != 0 ? block_mask : 0u);
+    uint size = bitCount(plane0) + bitCount(plane1 * 3) + bitCount(sign_mask) + q_bits * in_range_subblocks;
 
     if (size != 0u)
         size++;
@@ -269,9 +269,17 @@ void main()
 
     uint bit_index = index >> 4;
 
+    ivec2 active_block_res = min(registers.resolution - 16 * block16x16_index, ivec2(16));
+    int active_subblocks_x = (active_block_res.x + 7) >> 3;
+    int active_subblocks_y = (active_block_res.y + 3) >> 2;
+    int in_range_subblocks = active_subblocks_x * active_subblocks_y;
+    uint block_mask = bitfieldExtract(0x5555u, 0, 2 * active_subblocks_y);
+    if (active_subblocks_x == 2)
+        block_mask |= block_mask << 8;
+
     for (uint i = bit_index; i < 16; i += 4)
     {
-        uint cost = compute_required_16x16_size(meta.code_word, int(i));
+        uint cost = compute_required_16x16_size(meta.code_word, int(i), block_mask, in_range_subblocks);
         float dist = estimate_weighted_square_error(meta.code_word, deadzone, int(i));
 
         if (gl_SubgroupSize == 16)

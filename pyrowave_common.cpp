@@ -57,6 +57,33 @@ void WaveletBuffers::allocate_images()
 	}
 }
 
+void WaveletBuffers::accumulate_block_16x16_mapping(int level_width, int level_height)
+{
+	int blocks_x_16x16 = (level_width + 15) / 16;
+	int blocks_y_16x16 = (level_height + 15) / 16;
+
+	for (int y = 0; y < blocks_y_16x16; y++)
+	{
+		for (int x = 0; x < blocks_x_16x16; x++)
+		{
+			int block_width = std::min<int>(16, level_width - x * 16);
+			int block_height = std::min<int>(16, level_height - y * 16);
+
+			int subblocks_x = (block_width + 7) >> 3;
+			int subblocks_y = (block_height + 3) >> 2;
+
+			uint32_t block_mask = 0x5555u & ((1u << (2 * subblocks_y)) - 1u);
+			if (subblocks_x == 2)
+				block_mask |= block_mask << 8u;
+
+			BlockInfo16x16 info = {};
+			info.block_mask = block_mask;
+			info.in_bounds_subblocks = subblocks_x * subblocks_y;
+			block_meta_16x16.push_back(info);
+		}
+	}
+}
+
 void WaveletBuffers::accumulate_block_mapping(int blocks_x_16x16, int blocks_y_16x16)
 {
 	int blocks_x_64x64 = (blocks_x_16x16 + 3) / 4;
@@ -91,19 +118,25 @@ void WaveletBuffers::init_block_meta()
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				int blocks_x_16x16 = (wavelet_img->get_width(level) + 15) / 16;
-				int blocks_y_16x16 = (wavelet_img->get_height(level) + 15) / 16;
-				int blocks_x_64x64 = (wavelet_img->get_width(level) + 63) / 64;
+				uint32_t level_width = wavelet_img->get_width(level);
+				uint32_t level_height = wavelet_img->get_height(level);
+
+				int blocks_x_16x16 = (level_width + 15) / 16;
+				int blocks_y_16x16 = (level_height + 15) / 16;
+				int blocks_x_64x64 = (level_width + 63) / 64;
 
 				block_meta[component][level][band] = {
 					block_count_16x16, blocks_x_16x16,
 					block_count_64x64, blocks_x_64x64,
 				};
 
+				accumulate_block_16x16_mapping(level_width, level_height);
 				accumulate_block_mapping(blocks_x_16x16, blocks_y_16x16);
 			}
 		}
 	}
+
+	assert(size_t(block_count_16x16) == block_meta_16x16.size());
 }
 
 bool WaveletBuffers::init(Device *device_, int width_, int height_)
