@@ -6,7 +6,7 @@
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
 
-layout(local_size_x = 256) in;
+layout(local_size_x_id = 0) in;
 
 struct RDOperation
 {
@@ -32,11 +32,8 @@ layout(push_constant) uniform Registers
     uint num_blocks;
 } registers;
 
-shared uint shared_tmp[16];
-
 void main()
 {
-    uint index = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
     int required_savings_per_bucket = int(buckets.consumed_payload) - int(registers.target_payload_size);
     if (gl_WorkGroupID.x != 0)
     {
@@ -60,51 +57,22 @@ void main()
 
     uint total_saved = 0;
 
-    for (uint i = 0; i < registers.num_blocks && total_saved < required_savings_per_bucket; i += gl_WorkGroupSize.x)
+    for (uint i = 0; i < registers.num_blocks && total_saved < required_savings_per_bucket; i += gl_SubgroupSize)
     {
         RDOperation op = RDOperation(0, 0);
-        if (i + index < registers.num_blocks)
-            op = buckets.rdo_operations[gl_WorkGroupID.x * registers.num_blocks + i + index];
+        if (i + gl_SubgroupInvocationID < registers.num_blocks)
+            op = buckets.rdo_operations[gl_WorkGroupID.x * registers.num_blocks + i + gl_SubgroupInvocationID];
 
         uint saving = bitfieldExtract(op.block_offset_saving, 16, 16);
         uint block_offset = bitfieldExtract(op.block_offset_saving, 0, 16);
 
-        barrier();
-
         uint scan_saving = subgroupInclusiveAdd(saving);
-        if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
-            shared_tmp[gl_SubgroupID] = scan_saving;
 
-        barrier();
-
-        if (gl_SubgroupID == 0)
-        {
-            uint subgroup_saving = 0;
-            if (gl_SubgroupInvocationID < gl_NumSubgroups)
-                subgroup_saving = shared_tmp[gl_SubgroupInvocationID];
-
-            for (uint j = 1; j < gl_NumSubgroups; j *= 2)
-            {
-                uint up = subgroupShuffleUp(subgroup_saving, j);
-                subgroup_saving += gl_SubgroupInvocationID >= j ? up : 0;
-            }
-
-            subgroupBarrier();
-            if (gl_SubgroupInvocationID < gl_NumSubgroups)
-                shared_tmp[gl_SubgroupInvocationID] = subgroup_saving;
-        }
-
-        barrier();
-
-        uint prev_group_savings = 0;
-        if (gl_SubgroupID != 0)
-            prev_group_savings = shared_tmp[gl_SubgroupID - 1];
-
-        bool should_apply_quant = total_saved + prev_group_savings + scan_saving - saving < required_savings_per_bucket;
+        bool should_apply_quant = total_saved + scan_saving - saving < required_savings_per_bucket;
         if (should_apply_quant && saving != 0)
             atomicMax(quant_data.data[block_offset], op.quant);
 
-        total_saved += shared_tmp[gl_NumSubgroups - 1];
+        total_saved += subgroupBroadcast(scan_saving, gl_SubgroupSize - 1);
     }
 }
 

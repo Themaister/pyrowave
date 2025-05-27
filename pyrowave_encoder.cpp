@@ -261,9 +261,22 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 	if (target_payload_size >= sizeof(BitstreamSequenceHeader))
 		target_payload_size -= sizeof(BitstreamSequenceHeader);
 
-	if (device->supports_subgroup_size_log2(true, 4, 7))
+	cmd.set_specialization_constant_mask(1);
+
+	if (device->supports_subgroup_size_log2(true, 6, 6))
 	{
-		cmd.set_subgroup_size_log2(true, 4, 7);
+		cmd.set_specialization_constant(0, 64);
+		cmd.set_subgroup_size_log2(true, 6, 6);
+	}
+	else if (device->supports_subgroup_size_log2(true, 4, 4))
+	{
+		cmd.set_specialization_constant(0, 16);
+		cmd.set_subgroup_size_log2(true, 4, 4);
+	}
+	else if (device->supports_subgroup_size_log2(true, 5, 5))
+	{
+		cmd.set_specialization_constant(0, 32);
+		cmd.set_subgroup_size_log2(true, 5, 5);
 	}
 	else
 	{
@@ -292,6 +305,7 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 
 	auto end_resolve = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	device->register_time_interval("GPU", std::move(start_resolve), std::move(end_resolve), "Resolve");
+	cmd.set_specialization_constant_mask(0);
 	return true;
 }
 
