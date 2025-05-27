@@ -8,6 +8,7 @@
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
 
 #include "dwt_quant_scale.h"
+#include "constants.h"
 
 layout(local_size_x_id = 0) in;
 
@@ -210,8 +211,8 @@ void encode_payload32(vec4 texels0, vec4 texels1)
     global_offset = subgroupBroadcast(global_offset, 31);
 
     // First, encode the code word.
-    uint code_word = quality_planes << 16;
-    code_word = bitfieldInsert(code_word, quant_code, 20, 6);
+    uint code_word = quality_planes << Q_PLANES_OFFSET;
+    code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
     uint plane_code0 = findMSB(block8x4_0_shifted) + 1;
     uint plane_code1 = findMSB(block8x4_1_shifted) + 1;
     uint plane_code = plane_code0 | (plane_code1 << 8);
@@ -318,8 +319,8 @@ void encode_payload64(vec4 texels)
     global_offset = subgroupBroadcast(global_offset, 63);
 
     // First, encode the code word.
-    uint code_word = quality_planes << 16;
-    code_word = bitfieldInsert(code_word, quant_code, 20, 6);
+    uint code_word = quality_planes << Q_PLANES_OFFSET;
+    code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
     uint plane_code = findMSB(block8x4_shifted) + 1;
 
     for (int i = 0; i < 8; i++)

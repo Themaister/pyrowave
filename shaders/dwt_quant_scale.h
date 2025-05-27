@@ -6,7 +6,7 @@
 float decode_quant_scale(uint code)
 {
 	// Minimum scale: 0.25
-	// Maximum scale: ~2.21
+	// Maximum scale: ~2.2
 	return float(code) / 32.0 + 0.25;
 }
 

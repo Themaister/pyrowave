@@ -7,6 +7,7 @@
 #extension GL_KHR_shader_subgroup_shuffle : require
 
 #include "dwt_quant_scale.h"
+#include "constants.h"
 
 layout(local_size_x = 64) in;
 
@@ -65,7 +66,7 @@ shared uint shared_tmp[4];
 
 uint compute_required_16x16_size(uint control_word, int quant)
 {
-    int q_bits = int(bitfieldExtract(control_word, 16, 4));
+    int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
 
     int sub_q = min(q_bits, quant);
     q_bits -= sub_q;
@@ -103,13 +104,13 @@ uint compute_required_16x16_size(uint control_word, int quant)
 
 float estimate_weighted_square_error(uint control_word, DeadZone zone, int quant)
 {
-    float step_size = registers.step_size * decode_quant_scale(bitfieldExtract(control_word, 20, 6));
+    float step_size = registers.step_size * decode_quant_scale(bitfieldExtract(control_word, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS));
 
     // Assume perfectly uniform white noise. This should hold reasonably well for non-zero coefficients.
     float uniform_quant_square_error = step_size * step_size * (1.0 / 12.0);
     float uniform_quant_square_error_scaled = ldexp(uniform_quant_square_error, 2 * quant);
 
-    int q_bits = int(bitfieldExtract(control_word, 16, 4));
+    int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
     int sub_q = min(q_bits, quant);
     q_bits -= sub_q;
     quant -= sub_q;

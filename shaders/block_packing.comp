@@ -7,6 +7,8 @@
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 
+#include "constants.h"
+
 layout(local_size_x = 64) in;
 
 struct BlockMeta
@@ -72,7 +74,7 @@ layout(push_constant) uniform Registers
 
 uint compute_required_16x16_size(uint control_word)
 {
-    int q_bits = int(bitfieldExtract(control_word, 16, 4));
+    int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
     uint lsbs = control_word & 0x5555u;
     uint msbs = control_word & 0xaaaau;
     uint msbs_shift = msbs >> 1;
@@ -85,7 +87,7 @@ uint quantize_code_word(uint control_word, int quant)
 {
     if (quant != 0 && control_word != 0)
     {
-        int q_bits = int(bitfieldExtract(control_word, 16, 4));
+        int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
         int sub_quant = min(q_bits, quant);
         q_bits -= sub_quant;
         quant -= sub_quant;
@@ -109,7 +111,7 @@ uint quantize_code_word(uint control_word, int quant)
             control_word = plane0 | (plane1 << 1);
         }
 
-        control_word = bitfieldInsert(control_word, uint(q_bits), 16, 4);
+        control_word = bitfieldInsert(control_word, uint(q_bits), Q_PLANES_OFFSET, Q_PLANES_BITS);
     }
 
     return control_word;
@@ -265,8 +267,8 @@ void main()
         // Compensate for the allocation of 2 bytes in first lane.
         data_offset -= writes_header ? 0 : 2;
 
-        uint in_q_bits = bitfieldExtract(meta.code_word, 16, 4);
-        uint out_q_bits = bitfieldExtract(code_word, 16, 4);
+        uint in_q_bits = bitfieldExtract(meta.code_word, Q_PLANES_OFFSET, Q_PLANES_BITS);
+        uint out_q_bits = bitfieldExtract(code_word, Q_PLANES_OFFSET, Q_PLANES_BITS);
         uint input_offset = meta.offset;
         uint output_offset = data_offset;
 
@@ -306,7 +308,7 @@ void main()
 
         float dead = deadzone.total / max(1.0, float(deadzone.count));
         uint encoded_deadzone = min(63u, uint(dead * 128.0 + 0.5));
-        code_word = bitfieldInsert(code_word, encoded_deadzone, 26, 6);
+        code_word = bitfieldInsert(code_word, encoded_deadzone, DEADZONE_STRENGTH_OFFSET, DEADZONE_STRENGTH_BITS);
         bitstream_data.data[payload_offset_base + block_header_offset] = code_word;
     }
 }
