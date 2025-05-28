@@ -111,10 +111,6 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 	if (component != 0)
 		csf *= 0.4f;
 
-	// Don't compromise on the LL band.
-	if (level == DecompositionLevels - 1)
-		csf *= 4.0f;
-
 	// Due to filtering, distortion in lower bands will result in more noise power.
 	// By scaling the distortion by this factor, we ensure uniform results.
 	float resolution = get_noise_power_normalized_quant_resolution(level, component, band);
