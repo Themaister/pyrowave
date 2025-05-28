@@ -38,16 +38,20 @@ if (PYROWAVE_STANDALONE)
     set(GRANITE_RENDERER ON CACHE BOOL "" FORCE)
     set(GRANITE_VULKAN_FOSSILIZE OFF CACHE BOOL "" FORCE)
     set(GRANITE_SHIPPING OFF CACHE BOOL "" FORCE)
-    set(GRANITE_PLATFORM "null" CACHE STRING "" FORCE)
+    set(GRANITE_PLATFORM "SDL" CACHE STRING "" FORCE)
     add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
     add_granite_offline_tool(pyrowave-sandbox sandbox.cpp)
     target_link_libraries(pyrowave-sandbox PRIVATE pyrowave)
-    target_compile_definitions(pyrowave-sandbox PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/assets\")
+    target_compile_definitions(pyrowave-sandbox PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
     target_link_libraries(pyrowave-sandbox PRIVATE granite-stb granite-renderer pyrowave-utils)
 
     add_granite_offline_tool(pyrowave-psnr psnr.cpp)
     target_link_libraries(pyrowave-psnr PRIVATE pyrowave-utils)
+
+    add_granite_application(pyrowave-viewer viewer.cpp)
+    target_link_libraries(pyrowave-viewer PRIVATE pyrowave pyrowave-utils)
+    target_compile_definitions(pyrowave-viewer PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
 endif()
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
