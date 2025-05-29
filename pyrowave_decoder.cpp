@@ -61,10 +61,14 @@ Decoder::~Decoder()
 void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 {
 	VkDeviceSize required_size = payload_data_cpu.size() * sizeof(uint32_t);
-	if (!payload_data || required_size > payload_data->get_create_info().size)
+
+	// Avoid a theoretical OOB access without robustness on the payload buffer during dequant.
+	VkDeviceSize required_size_padded = required_size + sizeof(uint32_t);
+
+	if (!payload_data || required_size_padded > payload_data->get_create_info().size)
 	{
 		BufferCreateInfo bufinfo;
-		bufinfo.size = std::max<VkDeviceSize>(64 * 1024, required_size * 2);
+		bufinfo.size = std::max<VkDeviceSize>(64 * 1024, required_size_padded * 2);
 		bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 		bufinfo.domain = BufferDomain::Device;
 		payload_data = device->create_buffer(bufinfo);
@@ -293,13 +297,17 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 
 	cmd.set_specialization_constant_mask(0);
 	cmd.enable_subgroup_size_control(true);
-	if (device->supports_subgroup_size_log2(true, 5, 5))
+
+	bool assume_fast_wave32 = device->get_device_features().vk13_props.minSubgroupSize >= 32;
+	if (assume_fast_wave32 && device->supports_subgroup_size_log2(true, 5, 5))
 		cmd.set_subgroup_size_log2(true, 5, 5);
-	else if (device->supports_subgroup_size_log2(true, 6, 6))
+	else if (assume_fast_wave32 && device->supports_subgroup_size_log2(true, 6, 6))
 		cmd.set_subgroup_size_log2(true, 6, 6);
+	else if (device->supports_subgroup_size_log2(true, 2, 6))
+		cmd.set_subgroup_size_log2(true, 2, 6);
 	else
 	{
-		LOGI("No compatible subgroup size config.\n");
+		LOGE("No compatible subgroup size config.\n");
 		return false;
 	}
 

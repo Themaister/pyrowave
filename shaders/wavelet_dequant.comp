@@ -147,7 +147,7 @@ float decode_payload64(BlockMeta meta, uint block_mask, bool in_range)
     return v;
 }
 
-float decode_payload32(BlockMeta meta, uint block_mask)
+float decode_payload_generic(BlockMeta meta, uint block_mask, uint index)
 {
     bool empty_block = meta.code_word == 0;
     if (empty_block)
@@ -155,7 +155,7 @@ float decode_payload32(BlockMeta meta, uint block_mask)
 
     uint control_word = meta.code_word;
     uint q_bits = bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS);
-    uint block_index = gl_SubgroupID;
+    uint block_index = gl_SubgroupID / (32 / gl_SubgroupSize);
 
     int bit_offset = 2 * int(block_index);
 
@@ -184,7 +184,11 @@ float decode_payload32(BlockMeta meta, uint block_mask)
 
     if (need_sign)
     {
-        decoded_sign = decode_bits32(payload);
+        if (gl_SubgroupSize == 32)
+            decoded_sign = decode_bits32(payload);
+        else
+            decoded_sign = int(bitfieldExtract(payload, int(index & 31u), 1));
+
         word_offset++;
         payload = payload_data.data[word_offset];
     }
@@ -193,7 +197,14 @@ float decode_payload32(BlockMeta meta, uint block_mask)
 
     for (int q = plane_iterations - 1; q >= 0; q--)
     {
-        decoded_abs = bitfieldInsert(decoded_abs, decode_bits32(payload), q, 1);
+        int decoded;
+
+        if (gl_SubgroupSize == 32)
+            decoded = decode_bits32(payload);
+        else
+            decoded = int(bitfieldExtract(payload, int(index & 31u), 1));
+
+        decoded_abs = bitfieldInsert(decoded_abs, decoded, q, 1);
         word_offset++;
         payload = payload_data.data[word_offset];
     }
@@ -237,11 +248,11 @@ void main()
     {
         v = decode_payload64(meta, block_mask, in_range);
     }
-    else if (gl_SubgroupSize == 32)
+    else
     {
         in_range = subgroupBroadcastFirst(in_range);
         if (in_range)
-            v = decode_payload32(meta, block_mask);
+            v = decode_payload_generic(meta, block_mask, local_index);
         else
             v = 0.0;
     }
