@@ -405,6 +405,19 @@ bool Encoder::Impl::quant(CommandBuffer &cmd)
 		cmd.set_specialization_constant(0, 64);
 		cmd.set_subgroup_size_log2(true, 6, 6);
 	}
+#if 0
+	// Disgustingly slow path for some reason.
+	else if (device->supports_subgroup_size_log2(true, 3, 4))
+	{
+		cmd.set_specialization_constant(0, 256);
+		cmd.set_subgroup_size_log2(true, 3, 4);
+	}
+#endif
+	else if (device->supports_subgroup_size_log2(true, 4, 4))
+	{
+		cmd.set_specialization_constant(0, 16);
+		cmd.set_subgroup_size_log2(true, 4, 4);
+	}
 	else if (device->supports_subgroup_size_log2(true, 5, 5))
 	{
 		cmd.set_specialization_constant(0, 32);

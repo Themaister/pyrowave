@@ -177,6 +177,9 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_, bool encoder
 		if (!device->get_device_features().vk12_features.subgroupBroadcastDynamicId)
 			return false;
 
+		if (device->get_gpu_properties().limits.maxComputeWorkGroupInvocations < 256)
+			return false;
+
 		// This should cover any HW I care about.
 		if (!device->supports_subgroup_size_log2(true, 4, 4) &&
 		    !device->supports_subgroup_size_log2(true, 5, 5) &&
