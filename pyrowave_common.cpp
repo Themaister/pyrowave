@@ -139,7 +139,7 @@ void WaveletBuffers::init_block_meta()
 	assert(size_t(block_count_16x16) == block_meta_16x16.size());
 }
 
-bool WaveletBuffers::init(Device *device_, int width_, int height_)
+bool WaveletBuffers::init(Device *device_, int width_, int height_, bool encoder_features)
 {
 	device = device_;
 	width = width_;
@@ -153,8 +153,52 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_)
 	init_samplers();
 	allocate_images();
 
-	if (!device->supports_subgroup_size_log2(true, 5, 5) && !device->supports_subgroup_size_log2(true, 6, 6))
-		return false;
+	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
+
+	if (encoder_features)
+	{
+		constexpr VkSubgroupFeatureFlags required_features =
+				VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+				VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+				VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+				VK_SUBGROUP_FEATURE_VOTE_BIT |
+				VK_SUBGROUP_FEATURE_QUAD_BIT |
+				VK_SUBGROUP_FEATURE_BALLOT_BIT |
+				VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
+				VK_SUBGROUP_FEATURE_BASIC_BIT;
+
+		if ((ops & required_features) != required_features)
+		{
+			LOGE("There are missing subgroup features. Device supports #%x, but requires #%x.\n",
+			     ops, required_features);
+			return false;
+		}
+
+		// This should cover any HW I care about.
+		if (!device->supports_subgroup_size_log2(true, 4, 4) &&
+		    !device->supports_subgroup_size_log2(true, 5, 5) &&
+		    !device->supports_subgroup_size_log2(true, 6, 6))
+			return false;
+	}
+	else
+	{
+		constexpr VkSubgroupFeatureFlags required_features =
+				VK_SUBGROUP_FEATURE_VOTE_BIT |
+				VK_SUBGROUP_FEATURE_QUAD_BIT |
+				VK_SUBGROUP_FEATURE_BALLOT_BIT |
+				VK_SUBGROUP_FEATURE_BASIC_BIT;
+
+		if ((ops & required_features) != required_features)
+		{
+			LOGE("There are missing subgroup features. Device supports #%x, but requires #%x.\n",
+			     ops, required_features);
+			return false;
+		}
+
+		// The decoder is more lenient.
+		if (!device->supports_subgroup_size_log2(true, 2, 6))
+			return false;
+	}
 
 	init_block_meta();
 

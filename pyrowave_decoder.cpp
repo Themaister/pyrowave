@@ -497,7 +497,7 @@ void Decoder::Impl::clear()
 
 bool Decoder::init(Vulkan::Device *device, int width, int height)
 {
-	if (!impl->init(device, width, height))
+	if (!impl->init(device, width, height, false))
 		return false;
 	clear();
 	return true;

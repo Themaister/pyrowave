@@ -867,7 +867,7 @@ Encoder::Encoder()
 
 bool Encoder::init(Device *device, int width_, int height_)
 {
-	return impl->init(device, width_, height_);
+	return impl->init(device, width_, height_, true);
 }
 
 bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
