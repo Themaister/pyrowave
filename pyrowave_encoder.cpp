@@ -14,6 +14,17 @@ namespace PyroWave
 using namespace Granite;
 using namespace Vulkan;
 
+static constexpr int BlockSpaceSubdivision = 16;
+static constexpr int NumRDOBuckets = 128;
+static constexpr int RDOBucketOffset = 64;
+
+static int compute_block_count_per_subdivision(int num_blocks)
+{
+	int per_subdivision = align(num_blocks, BlockSpaceSubdivision) / BlockSpaceSubdivision;
+	per_subdivision = int(Util::next_pow2(per_subdivision));
+	return per_subdivision;
+}
+
 struct QuantizerPushData
 {
 	ivec2 resolution;
@@ -48,6 +59,8 @@ struct AnalyzeRateControlPushData
 	int32_t block_offset_64x64;
 	int32_t block_stride_64x64;
 	uint32_t total_wg_count;
+	uint32_t num_blocks_aligned;
+	uint32_t block_index_shamt;
 };
 
 struct RDOperation
@@ -167,7 +180,9 @@ void Encoder::Impl::init_block_meta()
 	quant_buffer = device->create_buffer(info);
 	device->set_name(*quant_buffer, "quant-buffer");
 
-	info.size = block_count_64x64 * 128 * sizeof(RDOperation) + 1024;
+	info.size = RDOBucketOffset;
+	info.size += NumRDOBuckets * BlockSpaceSubdivision * sizeof(uint32_t);
+	info.size += NumRDOBuckets * compute_block_count_per_subdivision(block_count_64x64) * BlockSpaceSubdivision * sizeof(RDOperation);
 	bucket_buffer = device->create_buffer(info);
 	device->set_name(*bucket_buffer, "bucket-buffer");
 }
@@ -285,15 +300,15 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 	struct
 	{
 		uint32_t target_payload_size;
-		uint32_t num_blocks;
+		uint32_t num_blocks_per_subdivision;
 	} push = {};
 
 	push.target_payload_size = target_payload_size / sizeof(uint32_t);
-	push.num_blocks = block_count_64x64;
+	push.num_blocks_per_subdivision = compute_block_count_per_subdivision(block_count_64x64);
 	cmd.push_constants(&push, 0, sizeof(push));
 	cmd.set_storage_buffer(0, 0, *bucket_buffer);
 	cmd.set_storage_buffer(0, 1, *quant_buffer);
-	cmd.dispatch(128, 1, 1);
+	cmd.dispatch(NumRDOBuckets * BlockSpaceSubdivision, 1, 1);
 
 	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
@@ -353,6 +368,8 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				push.block_offset_64x64 = block_meta[component][level][band].block_offset_64x64;
 				push.block_stride_64x64 = block_meta[component][level][band].block_stride_64x64;
 				push.total_wg_count = block_count_64x64;
+				push.num_blocks_aligned = compute_block_count_per_subdivision(block_count_64x64) * BlockSpaceSubdivision;
+				push.block_index_shamt = Util::floor_log2(compute_block_count_per_subdivision(block_count_64x64));
 
 				cmd.push_constants(&push, 0, sizeof(push));
 

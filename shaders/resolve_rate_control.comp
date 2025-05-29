@@ -14,10 +14,12 @@ struct RDOperation
     uint block_offset_saving;
 };
 
+const int BLOCK_SPACE_SUBDIVISION = 16;
+
 layout(set = 0, binding = 0) readonly buffer Buckets
 {
     layout(offset = 4) int consumed_payload;
-    layout(offset = 512) int total_savings_per_bucket[128];
+    layout(offset = 64) int total_savings_per_bucket[128 * BLOCK_SPACE_SUBDIVISION];
     RDOperation rdo_operations[];
 } buckets;
 
@@ -29,7 +31,7 @@ layout(set = 0, binding = 1) buffer QuantList
 layout(push_constant) uniform Registers
 {
     uint target_payload_size;
-    uint num_blocks;
+    uint num_blocks_per_subdivision;
 } registers;
 
 void main()
@@ -57,11 +59,11 @@ void main()
 
     uint total_saved = 0;
 
-    for (uint i = 0; i < registers.num_blocks && total_saved < required_savings_per_bucket; i += gl_SubgroupSize)
+    for (uint i = 0; i < registers.num_blocks_per_subdivision && total_saved < required_savings_per_bucket; i += gl_SubgroupSize)
     {
         RDOperation op = RDOperation(0, 0);
-        if (i + gl_SubgroupInvocationID < registers.num_blocks)
-            op = buckets.rdo_operations[gl_WorkGroupID.x * registers.num_blocks + i + gl_SubgroupInvocationID];
+        if (i + gl_SubgroupInvocationID < registers.num_blocks_per_subdivision)
+            op = buckets.rdo_operations[gl_WorkGroupID.x * registers.num_blocks_per_subdivision + i + gl_SubgroupInvocationID];
 
         uint saving = bitfieldExtract(op.block_offset_saving, 16, 16);
         uint block_offset = bitfieldExtract(op.block_offset_saving, 0, 16);
