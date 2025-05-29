@@ -137,7 +137,7 @@ static inline uint8_t encode_quant(float decoder_q_scale)
 
 struct WaveletBuffers
 {
-	bool init(Vulkan::Device *device, int width, int height, bool encoder_features);
+	bool init(Vulkan::Device *device, int width, int height);
 
 	Vulkan::Device *device = nullptr;
 	Vulkan::ImageHandle wavelet_img;

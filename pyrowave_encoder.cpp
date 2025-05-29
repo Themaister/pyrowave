@@ -880,7 +880,37 @@ Encoder::Encoder()
 
 bool Encoder::init(Device *device, int width_, int height_)
 {
-	return impl->init(device, width_, height_, true);
+	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
+	constexpr VkSubgroupFeatureFlags required_features =
+			VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+			VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+			VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+			VK_SUBGROUP_FEATURE_VOTE_BIT |
+			VK_SUBGROUP_FEATURE_QUAD_BIT |
+			VK_SUBGROUP_FEATURE_BALLOT_BIT |
+			VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
+			VK_SUBGROUP_FEATURE_BASIC_BIT;
+
+	if ((ops & required_features) != required_features)
+	{
+		LOGE("There are missing subgroup features. Device supports #%x, but requires #%x.\n",
+		     ops, required_features);
+		return false;
+	}
+
+	if (!device->get_device_features().vk12_features.subgroupBroadcastDynamicId)
+		return false;
+
+	if (device->get_gpu_properties().limits.maxComputeWorkGroupInvocations < 256)
+		return false;
+
+	// This should cover any HW I care about.
+	if (!device->supports_subgroup_size_log2(true, 4, 4) &&
+	    !device->supports_subgroup_size_log2(true, 5, 5) &&
+	    !device->supports_subgroup_size_log2(true, 6, 6))
+		return false;
+
+	return impl->init(device, width_, height_);
 }
 
 bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)

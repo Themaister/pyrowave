@@ -505,7 +505,25 @@ void Decoder::Impl::clear()
 
 bool Decoder::init(Vulkan::Device *device, int width, int height)
 {
-	if (!impl->init(device, width, height, false))
+	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
+	constexpr VkSubgroupFeatureFlags required_features =
+			VK_SUBGROUP_FEATURE_VOTE_BIT |
+			VK_SUBGROUP_FEATURE_QUAD_BIT |
+			VK_SUBGROUP_FEATURE_BALLOT_BIT |
+			VK_SUBGROUP_FEATURE_BASIC_BIT;
+
+	if ((ops & required_features) != required_features)
+	{
+		LOGE("There are missing subgroup features. Device supports #%x, but requires #%x.\n",
+		     ops, required_features);
+		return false;
+	}
+
+	// The decoder is more lenient.
+	if (!device->supports_subgroup_size_log2(true, 2, 6))
+		return false;
+
+	if (!impl->init(device, width, height))
 		return false;
 	clear();
 	return true;
