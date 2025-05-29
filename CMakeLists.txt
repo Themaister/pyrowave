@@ -44,7 +44,11 @@ if (PYROWAVE_STANDALONE)
     add_granite_offline_tool(pyrowave-sandbox sandbox.cpp)
     target_link_libraries(pyrowave-sandbox PRIVATE pyrowave)
     target_compile_definitions(pyrowave-sandbox PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
-    target_link_libraries(pyrowave-sandbox PRIVATE granite-stb granite-renderer pyrowave-utils)
+    target_link_libraries(pyrowave-sandbox PRIVATE granite-renderer pyrowave-utils)
+
+    add_granite_offline_tool(pyrowave-bench bench.cpp)
+    target_link_libraries(pyrowave-bench PRIVATE pyrowave)
+    target_link_libraries(pyrowave-bench PRIVATE granite-vulkan pyrowave-utils)
 
     add_granite_offline_tool(pyrowave-psnr psnr.cpp)
     target_link_libraries(pyrowave-psnr PRIVATE pyrowave-utils)
