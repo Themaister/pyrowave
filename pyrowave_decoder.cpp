@@ -244,7 +244,7 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 			last_seq = header->sequence;
 		}
 
-		if (header->block_index >= block_count_64x64)
+		if (header->block_index >= uint32_t(block_count_64x64))
 		{
 			LOGE("block_index %u is out of bounds (>= %d).\n", header->block_index, block_count_64x64);
 			return false;
