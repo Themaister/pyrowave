@@ -25,13 +25,13 @@ shared float shared_block_y[gl_WorkGroupSize.y][BLOCK_SIZE + 2 * APRON][(BLOCK_S
 vec2 load_shared_component(uint y, uint x, uint c) { return vec2(shared_block_x[c][y][x], shared_block_y[c][y][x]); }
 void store_shared_component(uint y, uint x, uint c, vec2 v) { shared_block_x[c][y][x] = v.x; shared_block_y[c][y][x] = v.y; }
 #else
-shared uint shared_block[gl_WorkGroupSize.y][BLOCK_SIZE + 2 * APRON][(BLOCK_SIZE + 2 * APRON) / 2 + 1];
-vec2 load_shared_component(uint y, uint x, uint c) { return unpackSnorm2x16(shared_block[c][y][x]); }
-void store_shared_component(uint y, uint x, uint c, vec2 v) { shared_block[c][y][x] = packSnorm2x16(v); }
+shared f16vec2 shared_block[gl_WorkGroupSize.y][BLOCK_SIZE + 2 * APRON][(BLOCK_SIZE + 2 * APRON) / 2 + 1];
+f16vec2 load_shared_component(uint y, uint x, uint c) { return shared_block[c][y][x]; }
+void store_shared_component(uint y, uint x, uint c, f16vec2 v) { shared_block[c][y][x] = v; }
 #endif
 
-vec2 load_shared(uint y, uint x) { return load_shared_component(y, x, component); }
-void store_shared(uint y, uint x, vec2 v) { store_shared_component(y, x, component, v); }
+f16vec2 load_shared(uint y, uint x) { return load_shared_component(y, x, component); }
+void store_shared(uint y, uint x, f16vec2 v) { store_shared_component(y, x, component, v); }
 
 bvec2 band(bvec2 a, bvec2 b)
 {
