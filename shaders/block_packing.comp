@@ -144,9 +144,9 @@ uint copy_words(inout uint output_offset, inout uint input_offset, uint count)
 
 uint modify_quant_code(uint code, int quant)
 {
-    int e = int(bitfieldExtract(code, 4, 4));
+    int e = int(bitfieldExtract(code, 3, 5));
     e = max(e - quant, 0);
-    code = bitfieldInsert(code, e, 4, 4);
+    code = bitfieldInsert(code, e, 3, 5);
     return code;
 }
 

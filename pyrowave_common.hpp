@@ -114,12 +114,14 @@ static inline int align(int value, int align)
 	return (value + align - 1) & ~(align - 1);
 }
 
+static constexpr int MaxScaleExp = 4;
+
 static inline float decode_quant(uint8_t quant_code)
 {
 	// Custom FP formulation for numbers in (0, 2) range.
-	int e = -(quant_code >> 4);
-	int m = quant_code & 0xf;
-	float inv_quant = (1.0f / (16.0f * 64.0f * 1024.0f)) * float((16 + m) * (1 << (16 + e)));
+	int e = MaxScaleExp - (quant_code >> 3);
+	int m = quant_code & 0x7;
+	float inv_quant = (1.0f / (8.0f * 1024.0f * 1024.0f)) * float((8 + m) * (1 << (20 + e)));
 	return inv_quant;
 }
 
@@ -128,11 +130,11 @@ static inline uint8_t encode_quant(float decoder_q_scale)
 	uint32_t v;
 	memcpy(&v, &decoder_q_scale, sizeof(decoder_q_scale));
 
-	int e = ((v >> 23) & 0xff) - 127;
-	int m = (v >> 19) & 0xf;
+	int e = ((v >> 23) & 0xff) - 127 - MaxScaleExp;
+	int m = (v >> 20) & 0x7;
 	e = -e;
-	assert(e >= 0 && e <= 15);
-	return (e << 4) | m;
+	assert(e >= 0 && e <= 20);
+	return (e << 3) | m;
 }
 
 struct WaveletBuffers
