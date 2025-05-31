@@ -394,7 +394,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 		if (input_level == 0)
 		{
-			cmd.set_storage_texture(0, 3, *views.planes[0]);
+			cmd.set_storage_texture(0, 1, *views.planes[0]);
 			cmd.set_specialization_constant(0, /*mode == Mode::RGB ? 3 :*/ 1);
 			cmd.begin_region("iDWT final");
 
@@ -408,8 +408,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 #endif
 			{
 				cmd.set_specialization_constant(1, true);
-				for (int binding = 0; binding < NumComponents; binding++)
-					cmd.set_texture(0, binding, *component_layer_views[0][input_level], *mirror_repeat_sampler);
+				cmd.set_texture(0, 0, *component_layer_views[0][input_level], *mirror_repeat_sampler);
 			}
 
 			cmd.dispatch((push.resolution.x + 15) / 16, (push.resolution.y + 15) / 16, 1);
@@ -420,16 +419,15 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 			cmd.set_specialization_constant(0, 1);
 			for (int c = 0; c < NumComponents; c++)
 			{
-				for (int binding = 0; binding < NumComponents; binding++)
-					cmd.set_texture(0, binding, *component_layer_views[c][input_level], *mirror_repeat_sampler);
+				cmd.set_texture(0, 0, *component_layer_views[c][input_level], *mirror_repeat_sampler);
 
 				if (/*mode == Mode::YCbCr_420 &&*/ c != 0 && input_level == 1)
 				{
-					cmd.set_storage_texture(0, 3, *views.planes[c]);
+					cmd.set_storage_texture(0, 1, *views.planes[c]);
 					cmd.set_specialization_constant(1, true);
 				}
 				else
-					cmd.set_storage_texture(0, 3, *component_ll_views[c][input_level - 1]);
+					cmd.set_storage_texture(0, 1, *component_ll_views[c][input_level - 1]);
 
 				char label[64];
 				snprintf(label, sizeof(label), "iDWT level %u, component %u", input_level - 1, c);

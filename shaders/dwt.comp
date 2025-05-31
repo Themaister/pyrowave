@@ -2,14 +2,12 @@
 // Copyright (c) 2025 Hans-Kristian Arntzen
 // SPDX-License-Identifier: MIT
 #extension GL_KHR_shader_subgroup_basic : require
-#extension GL_KHR_shader_subgroup_quad : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
-#extension GL_EXT_shader_subgroup_extended_types_float16 : require
 
-layout(local_size_x = 128, local_size_y_id = 0) in;
+layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform mediump sampler2D uTexture;
-layout(set = 0, binding = 1) writeonly uniform mediump image2DArray uOutput[3];
+layout(set = 0, binding = 1) writeonly uniform mediump image2DArray uOutput;
 
 layout(constant_id = 1) const bool DCShift = false;
 
@@ -35,134 +33,135 @@ vec2 generate_mirror_uv(ivec2 coord)
     return vec2(coord) * inv_resolution;
 }
 
-#define DECL_LOAD_COMPONENT(COMP) \
-void load_image_with_apron##COMP() \
-{ \
-    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * ivec2(BLOCK_SIZE, BLOCK_SIZE) - APRON; \
-    ivec2 local_coord0 = 2 * unswizzle16x8(local_index); \
-    ivec2 coord0 = base_coord + local_coord0; \
-\
-    f16vec4 texels0 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0), COMP)).wzxy; \
-    f16vec4 texels1 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(0, 16)), COMP)).wzxy; \
-    if (DCShift) { texels0 -= float16_t(128.0 / 255.0); texels1 -= float16_t(128.0 / 255.0); } \
-\
-    store_shared(local_coord0.y + 0, local_coord0.x >> 1, texels0.xy); \
-    store_shared(local_coord0.y + 1, local_coord0.x >> 1, texels0.zw); \
-    store_shared(local_coord0.y + 16, local_coord0.x >> 1, texels1.xy); \
-    store_shared(local_coord0.y + 17, local_coord0.x >> 1, texels1.zw); \
-\
-    ivec2 local_coord_horiz = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), 2 * (local_index / 4u)); \
-    if (local_coord_horiz.y < BLOCK_SIZE + APRON * 2) \
-    { \
-        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord_horiz), COMP)).wzxy; \
-        if (DCShift) { texels -= float16_t(128.0 / 255.0); } \
-        store_shared(local_coord_horiz.y + 0, local_coord_horiz.x >> 1, texels.xy); \
-        store_shared(local_coord_horiz.y + 1, local_coord_horiz.x >> 1, texels.zw); \
-    } \
-\
-    ivec2 local_coord_vert = local_coord_horiz.yx; \
-    if (local_coord_vert.x < BLOCK_SIZE) \
-    { \
-        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord_vert), COMP)).wzxy; \
-        if (DCShift) { texels -= float16_t(128.0 / 255.0); } \
-        store_shared(local_coord_vert.y + 0, local_coord_vert.x >> 1, texels.xy); \
-        store_shared(local_coord_vert.y + 1, local_coord_vert.x >> 1, texels.zw); \
-    } \
-}
-DECL_LOAD_COMPONENT(0)
-DECL_LOAD_COMPONENT(1)
-DECL_LOAD_COMPONENT(2)
-
-#if 0
-const mat3x4 rgb_to_bt709 = mat3x4(
-    vec4(0.2126, 0.7152, 0.0722, -0.5),
-    vec4(-0.114572, -0.385428, 0.5, 0.0),
-    vec4(0.5, -0.454153, -0.0458471, 0.0));
-
-void transform_ycbcr()
+void load_image_with_apron()
 {
-    ivec2 coord = unswizzle16x8(local_index);
-    vec2 r[(BLOCK_SIZE + 2 * APRON) / 8];
-    vec2 g[(BLOCK_SIZE + 2 * APRON) / 8];
-    vec2 b[(BLOCK_SIZE + 2 * APRON) / 8];
+    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * ivec2(BLOCK_SIZE, BLOCK_SIZE) - APRON;
+    ivec2 local_coord0 = 2 * unswizzle8x8(local_index);
+    ivec2 coord0 = base_coord + local_coord0;
 
-    for (int y = coord.y, index = 0; y < BLOCK_SIZE + 2 * APRON; y += 8, index++)
+    f16vec4 texels0 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0))).wzxy;
+    f16vec4 texels1 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 0)))).wzxy;
+    f16vec4 texels2 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(0, 16)))).wzxy;
+    f16vec4 texels3 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 16)))).wzxy;
+    if (DCShift) { texels0 -= 0.5hf; texels1 -= 0.5hf; texels2 -= 0.5hf; texels3 -= 0.5hf; }
+
+    int local_coord0_y_half = local_coord0.y >> 1;
+
+    // Pack two lines together in one vec2. This allows packed FP16 math easily by processing two lines in parallel.
+    store_shared(local_coord0_y_half + 0, local_coord0.x + 0, texels0.xz);
+    store_shared(local_coord0_y_half + 0, local_coord0.x + 1, texels0.yw);
+    store_shared(local_coord0_y_half + 0, local_coord0.x + 16, texels1.xz);
+    store_shared(local_coord0_y_half + 0, local_coord0.x + 17, texels1.yw);
+    store_shared(local_coord0_y_half + 8, local_coord0.x + 0, texels2.xz);
+    store_shared(local_coord0_y_half + 8, local_coord0.x + 1, texels2.yw);
+    store_shared(local_coord0_y_half + 8, local_coord0.x + 16, texels3.xz);
+    store_shared(local_coord0_y_half + 8, local_coord0.x + 17, texels3.yw);
+
+    // Load the top-right apron
     {
-        r[index] = load_shared_component(y, coord.x, 0);
-        g[index] = load_shared_component(y, coord.x, 1);
-        b[index] = load_shared_component(y, coord.x, 2);
+        ivec2 local_coord = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), 2 * (local_index / 4u));
+        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (DCShift) { texels -= 0.5hf; }
+        store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
+        store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
     }
 
-    barrier();
-
-    for (int y = coord.y, index = 0; index < (BLOCK_SIZE + 2 * APRON) / 8; y += 8, index++)
+    // Load the bottom-left apron
     {
-        vec4 conv = rgb_to_bt709[component];
-        vec2 v = r[index] * conv.r + g[index] * conv.g + b[index] * conv.b + conv.a;
-        store_shared(y, coord.x, v);
+        ivec2 local_coord = ivec2(2 * (local_index % 16u), BLOCK_SIZE + 2 * (local_index / 16u));
+        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (DCShift) { texels -= 0.5hf; }
+        store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
+        store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
     }
 
-    coord = unswizzle4x32(local_index);
-
-    for (int y = coord.y, index = 0; index < (BLOCK_SIZE + 2 * APRON + 31) / 32; y += 32, index++)
+    if (local_index < 16)
     {
-        if (index == 0 || y < BLOCK_SIZE + 2 * APRON)
-        {
-            r[index] = load_shared_component(y, coord.x + 16, 0);
-            g[index] = load_shared_component(y, coord.x + 16, 1);
-            b[index] = load_shared_component(y, coord.x + 16, 2);
-        }
+        // Load the bottom-right apron
+        ivec2 local_coord = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), BLOCK_SIZE + 2 * (local_index / 4u));
+        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (DCShift) { texels -= 0.5hf; }
+        store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
+        store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
     }
-
-    barrier();
-
-    for (int y = coord.y, index = 0; index < (BLOCK_SIZE + 2 * APRON + 31) / 32; y += 32, index++)
-    {
-        if (index == 0 || y < BLOCK_SIZE + 2 * APRON)
-        {
-            vec4 conv = rgb_to_bt709[component];
-            vec2 v = r[index] * conv.r + g[index] * conv.g + b[index] * conv.b + conv.a;
-            store_shared(y, coord.x + 16, v);
-        }
-    }
-
-    barrier();
 }
-#endif
 
-void forward_transform(bool active_lane, int y_offset, bool transpose_output)
+void forward_transform8x2()
 {
     const int SIZE = 8;
     const int PADDED_SIZE = SIZE + 2 * APRON;
-    float16_t values[PADDED_SIZE];
+    const int PADDED_SIZE_HALF = PADDED_SIZE / 2;
+    f16vec2 values[PADDED_SIZE];
 
-    uint shuffled_index;
-    if (transpose_output)
-        shuffled_index = ((local_index & 6u) >> 1) | ((local_index & 1u) << 2) | (local_index & ~7u);
-    else
-        shuffled_index = local_index;
+    ivec2 local_coord = ivec2(8 * (local_index % 4u), local_index / 4u);
 
-    ivec2 local_coord = ivec2(8 * (shuffled_index % 4u), shuffled_index / 4u + y_offset);
+    for (int i = 0; i < PADDED_SIZE; i++)
+    {
+        f16vec2 v = load_shared(local_coord.y, local_coord.x + i);
+        values[i] = v;
+    }
+
+    // CDF 9/7 lifting steps.
+    // Arith go brrr.
+    for (int i = 1; i < PADDED_SIZE - 1; i += 2)
+        values[i] += ALPHA * (values[i - 1] + values[i + 1]);
+    for (int i = 2; i < PADDED_SIZE - 2; i += 2)
+        values[i] += BETA * (values[i - 1] + values[i + 1]);
+    for (int i = 3; i < PADDED_SIZE - 3; i += 2)
+        values[i] += GAMMA * (values[i - 1] + values[i + 1]);
+    for (int i = 4; i < PADDED_SIZE - 4; i += 2)
+        values[i] += DELTA * (values[i - 1] + values[i + 1]);
+
+    // Avoid WAR hazard.
+    barrier();
+
+    for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
+    {
+        f16vec2 a = values[2 * i + 0];
+        f16vec2 b = values[2 * i + 1];
+
+        // Filter kernel rescale.
+        a *= inv_K;
+        b *= K;
+
+        // Transpose the 2x2 block.
+        f16vec2 t0 = f16vec2(a.x, b.x);
+        f16vec2 t1 = f16vec2(a.y, b.y);
+
+        // Transpose write
+        int y_coord = (local_coord.x >> 1) + (i - APRON_HALF);
+        store_shared(y_coord, 2 * local_coord.y + 0, t0);
+        store_shared(y_coord, 2 * local_coord.y + 1, t1);
+    }
+}
+
+void forward_transform4x2(bool active_lane, int y_offset)
+{
+    const int SIZE = 4;
+    const int PADDED_SIZE = SIZE + 2 * APRON;
+    const int PADDED_SIZE_HALF = PADDED_SIZE / 2;
+    f16vec2 values[PADDED_SIZE];
+
+    ivec2 local_coord = ivec2(4 * (local_index % 8u), local_index / 8u + y_offset);
 
     if (active_lane)
     {
-        for (int i = 0; i < PADDED_SIZE / 2; i++)
+        for (int i = 0; i < PADDED_SIZE; i++)
         {
-            f16vec2 v = load_shared(local_coord.y, (local_coord.x >> 1) + i);
-            values[2 * i + 0] = v.x;
-            values[2 * i + 1] = v.y;
+            f16vec2 v = load_shared(local_coord.y, local_coord.x + i);
+            values[i] = v;
         }
 
         // CDF 9/7 lifting steps.
         // Arith go brrr.
         for (int i = 1; i < PADDED_SIZE - 1; i += 2)
-            values[i] += float16_t(ALPHA) * (values[i - 1] + values[i + 1]);
+            values[i] += ALPHA * (values[i - 1] + values[i + 1]);
         for (int i = 2; i < PADDED_SIZE - 2; i += 2)
-            values[i] += float16_t(BETA) * (values[i - 1] + values[i + 1]);
+            values[i] += BETA * (values[i - 1] + values[i + 1]);
         for (int i = 3; i < PADDED_SIZE - 3; i += 2)
-            values[i] += float16_t(GAMMA) * (values[i - 1] + values[i + 1]);
+            values[i] += GAMMA * (values[i - 1] + values[i + 1]);
         for (int i = 4; i < PADDED_SIZE - 4; i += 2)
-            values[i] += float16_t(DELTA) * (values[i - 1] + values[i + 1]);
+            values[i] += DELTA * (values[i - 1] + values[i + 1]);
     }
 
     // Avoid WAR hazard.
@@ -170,98 +169,64 @@ void forward_transform(bool active_lane, int y_offset, bool transpose_output)
 
     if (active_lane)
     {
-        if (transpose_output)
+        for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
         {
-            for (int i = APRON; i < PADDED_SIZE - APRON; i += 2)
-            {
-                // Filter kernel rescale.
-                values[i] *= float16_t(inv_K);
-                values[i + 1] *= float16_t(K);
+            f16vec2 a = values[2 * i + 0];
+            f16vec2 b = values[2 * i + 1];
 
-                float16_t neighbor0 = subgroupQuadSwapHorizontal(values[i]);
-                float16_t neighbor1 = subgroupQuadSwapHorizontal(values[i + 1]);
+            // Filter kernel rescale.
+            a *= inv_K;
+            b *= K;
 
-                if ((local_coord.y & 1u) == 0u)
-                {
-                    // Transpose to go from horizontal to vertical.
-                    store_shared(local_coord.x + i + (-APRON + 0), local_coord.y >> 1, f16vec2(values[i], neighbor0));
-                    store_shared(local_coord.x + i + (-APRON + 1), local_coord.y >> 1, f16vec2(values[i + 1], neighbor1));
-                }
-            }
-        }
-        else
-        {
-            for (int i = 0; i < 2; i++)
-            {
-                // Filter kernel rescale.
-                values[4 * i + 4] *= float16_t(inv_K);
-                values[4 * i + 5] *= float16_t(K);
-                values[4 * i + 6] *= float16_t(inv_K);
-                values[4 * i + 7] *= float16_t(K);
+            // Transpose the 2x2 block.
+            f16vec2 t0 = f16vec2(a.x, b.x);
+            f16vec2 t1 = f16vec2(a.y, b.y);
 
-                uint y_offset = ((local_coord.y & 1u) << 4u) | (local_coord.y >> 1u);
-                store_shared(y_offset, (local_coord.x >> 2) + i + 0, f16vec2(values[4 * i + 4], values[4 * i + 6]));
-                store_shared(y_offset, (local_coord.x >> 2) + i + 8, f16vec2(values[4 * i + 5], values[4 * i + 7]));
-            }
+            // Transpose write
+            int y_coord = (local_coord.x >> 1) + (i - APRON_HALF);
+            store_shared(y_coord, 2 * local_coord.y + 0, t0);
+            store_shared(y_coord, 2 * local_coord.y + 1, t1);
         }
     }
-
-    barrier();
 }
 
 void main()
 {
-    local_index = (gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID) & (gl_WorkGroupSize.x - 1u);
+    local_index = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
 
-    if (gl_WorkGroupSize.y > 1)
-    {
-        // All POT constant expressions, so should collapse into something nice.
-        uint subgroups_per_component = gl_WorkGroupSize.x / gl_SubgroupSize;
-        component = gl_SubgroupID / subgroups_per_component;
-    }
-    else
-    {
-        component = 0;
-    }
-
-    if (component == 2)
-        load_image_with_apron2();
-    else if (component == 1)
-        load_image_with_apron1();
-    else
-        load_image_with_apron0();
+    load_image_with_apron();
 
     barrier();
 
-#if 0
-    if (gl_WorkGroupSize.y == 3)
-        transform_ycbcr();
-#endif
-
     // Horizontal transform.
-    forward_transform(true, 0, true);
+    forward_transform8x2();
 
     // Also need to transform the apron.
-    forward_transform(local_index < 32, BLOCK_SIZE, true);
+    forward_transform4x2(local_index < 32, BLOCK_SIZE_HALF);
+
+    barrier();
 
     // Vertical transform.
-    forward_transform(true, 0, false);
+    forward_transform8x2();
 
-    ivec2 local_coord = unswizzle16x8(local_index);
-    for (int y = local_coord.y; y < BLOCK_SIZE; y += 8)
+    barrier();
+
+    ivec2 local_coord = unswizzle8x8(local_index);
+    for (int y = local_coord.y; y < BLOCK_SIZE_HALF; y += 8)
     {
-        for (int x = local_coord.x * 2; x < BLOCK_SIZE; x += 32)
+        for (int x = local_coord.x * 2; x < BLOCK_SIZE; x += 16)
         {
-            f16vec2 v = load_shared(y, x >> 1);
-            int layer = (x >> 4) * 2 + (y >> 4);
-            int layer_x = x & 15;
-            int layer_y = y & 15;
-            imageStore(uOutput[component], ivec3(
-                BLOCK_SIZE / 2 * int(gl_WorkGroupID.x) + layer_y,
-                BLOCK_SIZE / 2 * int(gl_WorkGroupID.y) + layer_x, layer), v.xxxx);
-            imageStore(uOutput[component], ivec3(
-                BLOCK_SIZE / 2 * int(gl_WorkGroupID.x) + layer_y,
-                BLOCK_SIZE / 2 * int(gl_WorkGroupID.y) + layer_x + 1, layer), v.yyyy);
+            f16vec2 v0 = load_shared(y, x + 0);
+            f16vec2 v1 = load_shared(y, x + 1);
+
+            int img_x = x >> 1;
+            int img_y = y;
+
+            ivec2 base_image_coord = ivec2(gl_WorkGroupID.xy) * (BLOCK_SIZE / 2) + ivec2(img_x, img_y);
+            imageStore(uOutput, ivec3(base_image_coord, 0), v0.xxxx);
+            imageStore(uOutput, ivec3(base_image_coord, 2), v0.yyyy);
+            imageStore(uOutput, ivec3(base_image_coord, 1), v1.xxxx);
+            imageStore(uOutput, ivec3(base_image_coord, 3), v1.yyyy);
         }
     }
 }
