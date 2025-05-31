@@ -122,7 +122,7 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 	float csf = 2.6f * (0.0192f + 0.114f * cpd) * std::exp(-std::pow(0.114f * cpd, 1.1f));
 
 	// Heavily discount chroma quality.
-	if (component != 0)
+	if (component != 0 && level != DecompositionLevels - 1)
 		csf *= 0.4f;
 
 	// Due to filtering, distortion in lower bands will result in more noise power.
