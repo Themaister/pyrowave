@@ -69,7 +69,14 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 	bool is_mouse_active = false;
 	bool paused = false;
-	bool flicker_test = false;
+
+	enum class Mode
+	{
+		Slide,
+		Flicker,
+		Delta
+	};
+	Mode mode = Mode::Slide;
 
 	bool on_mouse(const MouseMoveEvent &e)
 	{
@@ -93,7 +100,11 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			else if (e.get_key() == Key::Down && bit_rate_mbit > 20)
 				bit_rate_mbit -= 10;
 			else if (e.get_key() == Key::F)
-				flicker_test = !flicker_test;
+				mode = Mode::Flicker;
+			else if (e.get_key() == Key::D)
+				mode = Mode::Delta;
+			else if (e.get_key() == Key::S)
+				mode = Mode::Slide;
 		}
 
 		if (e.get_key_state() == KeyState::Pressed && e.get_key() == Key::Space)
@@ -248,11 +259,12 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 		cmd->begin_render_pass(device.get_swapchain_render_pass(SwapchainRenderPass::ColorOnly));
 		cmd->set_sampler(0, 3, StockSampler::LinearClamp);
 
-		CommandBufferUtil::setup_fullscreen_quad(*cmd, "builtin://shaders/quad.vert", "assets://yuv2rgb.frag");
+		CommandBufferUtil::setup_fullscreen_quad(*cmd, "builtin://shaders/quad.vert", "assets://yuv2rgb.frag",
+		                                         {{ "DELTA", mode == Mode::Delta ? 1 : 0 }});
 
 		x_slide = clamp(x_slide, 50, int(cmd->get_viewport().width) - 50);
 
-		if (flicker_test)
+		if (mode == Mode::Flicker)
 		{
 			if (muglm::fract(elapsed_time * 10.0) < 0.5)
 			{
@@ -279,7 +291,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			                          Font::Alignment::TopLeft);
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}
-		else
+		else if (mode == Mode::Slide)
 		{
 			cmd->set_texture(0, 0, *in_images.views.planes[0]);
 			cmd->set_texture(0, 1, *in_images.views.planes[1]);
@@ -311,6 +323,23 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			flat_renderer.render_quad(vec3(float(x_slide), 0.0f, 0.8f),
 			                          vec2(2.0f, cmd->get_viewport().height),
 			                          vec4(1.0f, 1.0f, 0.0f, 1.0f));
+			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
+		}
+		else
+		{
+			cmd->set_texture(0, 0, *in_images.views.planes[0]);
+			cmd->set_texture(0, 1, *out_images.views.planes[0]);
+			cmd->draw(3);
+
+			flat_renderer.begin();
+			char text[64];
+			snprintf(text, sizeof(text), "DELTA %u mbits | %.3f bpp @ 60 fps%s",
+			         bit_rate_mbit,
+			         double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
+			         paused ? " (paused)" : "");
+			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
+			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(1.0f, 1.0f, 0.0f, 1.0f),
+			                          Font::Alignment::TopLeft);
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}
 
