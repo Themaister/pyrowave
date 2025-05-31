@@ -23,7 +23,7 @@ void main()
 #if DELTA
     float y0 = textureLod(sampler2D(Y0, Samp), vUV, 0.0).x;
     float y1 = textureLod(sampler2D(Y1, Samp), vUV, 0.0).x;
-    FragColor = vec3(sqrt(abs(y0 - y1) * 2.0));
+    FragColor = vec3(abs(y0 - y1) * 10.0);
 #else
     float y = textureLod(sampler2D(Y, Samp), vUV, 0.0).x;
     float cb = textureLod(sampler2D(Cb, Samp), vUV, 0.0).x;
