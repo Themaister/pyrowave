@@ -7,8 +7,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_subgroup_extended_types_float16 : require
 
-layout(local_size_x = 64, local_size_y_id = 0) in;
-layout(constant_id = 1) const bool DCShift = false;
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const bool DCShift = false;
 
 uint local_index;
 

@@ -507,8 +507,8 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 	// Only need simple 2-lane swaps.
 	cmd.set_subgroup_size_log2(true, 2, 7);
-	cmd.set_specialization_constant_mask(3);
-	cmd.set_specialization_constant(1, false);
+	cmd.set_specialization_constant_mask(1);
+	cmd.set_specialization_constant(0, false);
 
 	auto start_dwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -533,8 +533,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 		if (output_level == 0)
 		{
-			cmd.set_specialization_constant(0, /*mode == Mode::RGB ? 3 : */ 1);
-			cmd.set_specialization_constant(1, /*mode == Mode::YCbCr_420*/ 1);
+			cmd.set_specialization_constant(0, /*mode == Mode::YCbCr_420*/ true);
 			cmd.set_texture(0, 0, *views.planes[0], *mirror_repeat_sampler);
 			cmd.set_storage_texture(0, 1, *component_layer_views[0][output_level]);
 
@@ -550,7 +549,6 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 		}
 		else
 		{
-			cmd.set_specialization_constant(0, 1);
 			for (int c = 0; c < NumComponents; c++)
 			{
 				if (c != 0 && output_level == 1)
@@ -562,7 +560,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 					push.inv_resolution.y = 1.0f / float(push.resolution.y);
 					cmd.push_constants(&push, 0, sizeof(push));
 					cmd.set_texture(0, 0, *views.planes[c], *mirror_repeat_sampler);
-					cmd.set_specialization_constant(1, true);
+					cmd.set_specialization_constant(0, true);
 				}
 				else
 				{
@@ -584,7 +582,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 		cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 		            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
-		cmd.set_specialization_constant(1, false);
+		cmd.set_specialization_constant(0, false);
 	}
 
 	auto end_dwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);

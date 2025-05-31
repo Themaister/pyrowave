@@ -9,7 +9,7 @@ layout(local_size_x = 64) in;
 layout(set = 0, binding = 0) uniform mediump sampler2D uTexture;
 layout(set = 0, binding = 1) writeonly uniform mediump image2DArray uOutput;
 
-layout(constant_id = 1) const bool DCShift = false;
+layout(constant_id = 0) const bool DCShift = false;
 
 layout(push_constant) uniform Registers
 {

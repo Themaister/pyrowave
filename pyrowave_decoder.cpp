@@ -389,13 +389,12 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 		push.inv_resolution.x = 1.0f / float(push.resolution.x);
 		push.inv_resolution.y = 1.0f / float(push.resolution.y);
 		cmd.push_constants(&push, 0, sizeof(push));
-		cmd.set_specialization_constant_mask(3);
-		cmd.set_specialization_constant(1, false);
+		cmd.set_specialization_constant_mask(1);
+		cmd.set_specialization_constant(0, false);
 
 		if (input_level == 0)
 		{
 			cmd.set_storage_texture(0, 1, *views.planes[0]);
-			cmd.set_specialization_constant(0, /*mode == Mode::RGB ? 3 :*/ 1);
 			cmd.begin_region("iDWT final");
 
 #if 0
@@ -407,7 +406,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 			else
 #endif
 			{
-				cmd.set_specialization_constant(1, true);
+				cmd.set_specialization_constant(0, true);
 				cmd.set_texture(0, 0, *component_layer_views[0][input_level], *mirror_repeat_sampler);
 			}
 
@@ -416,7 +415,6 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 		}
 		else
 		{
-			cmd.set_specialization_constant(0, 1);
 			for (int c = 0; c < NumComponents; c++)
 			{
 				cmd.set_texture(0, 0, *component_layer_views[c][input_level], *mirror_repeat_sampler);
@@ -424,7 +422,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 				if (/*mode == Mode::YCbCr_420 &&*/ c != 0 && input_level == 1)
 				{
 					cmd.set_storage_texture(0, 1, *views.planes[c]);
-					cmd.set_specialization_constant(1, true);
+					cmd.set_specialization_constant(0, true);
 				}
 				else
 					cmd.set_storage_texture(0, 1, *component_ll_views[c][input_level - 1]);
