@@ -536,8 +536,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 			cmd.set_specialization_constant(0, /*mode == Mode::RGB ? 3 : */ 1);
 			cmd.set_specialization_constant(1, /*mode == Mode::YCbCr_420*/ 1);
 			cmd.set_texture(0, 0, *views.planes[0], *mirror_repeat_sampler);
-			for (int c = 0; c < NumComponents; c++)
-				cmd.set_storage_texture(0, 1 + c, *component_layer_views[c][output_level]);
+			cmd.set_storage_texture(0, 1, *component_layer_views[0][output_level]);
 
 			//if (mode == Mode::RGB)
 			//	cmd.begin_region("DWT RGB -> YCbCr");
@@ -570,8 +569,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 					cmd.set_texture(0, 0, *component_ll_views[c][output_level - 1], *mirror_repeat_sampler);
 				}
 
-				for (int binding = 0; binding < NumComponents; binding++)
-					cmd.set_storage_texture(0, 1 + binding, *component_layer_views[c][output_level]);
+				cmd.set_storage_texture(0, 1, *component_layer_views[c][output_level]);
 
 				char label[64];
 				snprintf(label, sizeof(label), "DWT level %u, component %u", output_level, c);
