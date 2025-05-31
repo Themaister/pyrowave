@@ -83,6 +83,7 @@ struct Encoder::Impl : public WaveletBuffers
 	bool block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers);
 
 	float get_noise_power_normalized_quant_resolution(int level, int component, int band) const;
+	float get_quant_resolution(int level, int component, int band) const;
 	float get_quant_rdo_distortion_scale(int level, int component, int band) const;
 
 	void init_block_meta() override;
@@ -131,6 +132,12 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 
 	// The distortion is scaled in terms of power, not amplitude.
 	return weighted_resolution * weighted_resolution;
+}
+
+float Encoder::Impl::get_quant_resolution(int level, int component, int band) const
+{
+	// FP16 range is limited, and this is more than a good enough initial estimate.
+	return std::min<float>(512.0f, get_noise_power_normalized_quant_resolution(level, component, band));
 }
 
 float Encoder::Impl::get_noise_power_normalized_quant_resolution(int level, int component, int band) const
@@ -231,7 +238,7 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 				packing_push.resolution_64x64_blocks = ivec2((level_width + 63) / 64, (level_height + 63) / 64);
 				packing_push.resolution_16x16_blocks = ivec2((level_width + 15) / 16, (level_height + 15) / 16);
 
-				auto quant_res = get_noise_power_normalized_quant_resolution(level, component, band);
+				auto quant_res = get_quant_resolution(level, component, band);
 				packing_push.quant_resolution_code = encode_quant(1.0f / quant_res);
 				packing_push.sequence_count = sequence_count;
 
@@ -356,7 +363,8 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				auto level_width = wavelet_img->get_width(level);
 				auto level_height  = wavelet_img->get_height(level);
 
-				float quant_res = get_noise_power_normalized_quant_resolution(level, component, band);
+				float quant_res = get_quant_resolution(level, component, band);
+
 				push.resolution.x = level_width;
 				push.resolution.y = level_height;
 				push.resolution_16x16_blocks.x = (level_width + 15) / 16;
@@ -446,7 +454,7 @@ bool Encoder::Impl::quant(CommandBuffer &cmd)
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				float quant_res = get_noise_power_normalized_quant_resolution(level, component, band);
+				float quant_res = get_quant_resolution(level, component, band);
 
 				push.resolution.x = wavelet_img->get_width(level);
 				push.resolution.y = wavelet_img->get_height(level);
