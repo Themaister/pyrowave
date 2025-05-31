@@ -620,15 +620,21 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 	return num_packets;
 }
 
-void Encoder::Impl::report_stats(const void *mapped_meta, const void *) const
+void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
 {
 	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
+	auto *bitstream = static_cast<const uint32_t *>(mapped_bitstream);
 
 	int total_pixels = 0;
 	int total_words = 0;
 
 	static const char *components[] = { "Y", "Cb", "Cr" };
 	static const char *bands[] = { "LL", "HL", "LH", "HH" };
+
+	int sign_histogram[256] = {};
+	int plane_histogram[4][256] = {};
+	int total_signs = 0;
+	int total_planes[4] = {};
 
 	for (int component = 0; component < NumComponents; component++)
 	{
@@ -656,6 +662,54 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *) const
 					{
 						int block_index = block_mapping.block_offset_64x64 + y * block_mapping.block_stride_64x64 + x;
 						words += meta[block_index].num_words;
+
+						auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream + meta[block_index].offset_u32);
+						int blocks_16x16 = int(Util::popcount32(header->ballot));
+
+						int block_16x16 = block_mapping.block_offset_16x16 + block_mapping.block_stride_16x16 * y + x;
+
+						auto &mapping_16x16 = block_meta_16x16[block_16x16];
+						auto *control_words = bitstream + meta[block_index].offset_u32 + 2;
+						auto *payload_words = control_words + blocks_16x16;
+
+						for (int i = 0; i < mapping_16x16.in_bounds_subblocks; i++)
+						{
+							auto q_bits = (*control_words >> 16) & 0xf;
+							auto lsbs = *control_words & 0x5555u;
+							auto msbs = *control_words & 0xaaaau;
+
+							auto msbs_shift = msbs >> 1;
+							auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_16x16.block_mask : 0);
+							msbs |= msbs_shift;
+							auto cost = Util::popcount32(lsbs) +
+							            Util::popcount32(msbs) +
+							            Util::popcount32(sign_mask) +
+							            q_bits * mapping_16x16.in_bounds_subblocks;
+
+							if (cost >= 1)
+							{
+								sign_histogram[(payload_words[0] >> 0) & 0xff]++;
+								sign_histogram[(payload_words[0] >> 8) & 0xff]++;
+								sign_histogram[(payload_words[0] >> 16) & 0xff]++;
+								sign_histogram[(payload_words[0] >> 24) & 0xff]++;
+								total_signs += 4;
+							}
+
+							for (uint32_t j = 0; j < 4; j++)
+							{
+								if (cost >= 2 + j)
+								{
+									plane_histogram[j][(payload_words[j + 1] >> 0) & 0xff]++;
+									plane_histogram[j][(payload_words[j + 1] >> 8) & 0xff]++;
+									plane_histogram[j][(payload_words[j + 1] >> 16) & 0xff]++;
+									plane_histogram[j][(payload_words[j + 1] >> 24) & 0xff]++;
+									total_planes[j] += 4;
+								}
+							}
+
+							payload_words += cost;
+							control_words++;
+						}
 					}
 				}
 
@@ -663,7 +717,7 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *) const
 				double bpp = (bytes * 8.0) / (band_width * band_height);
 
 				LOGI("%s: decomposition level %d, band %s: %.3f bpp\n",
-					 components[component], level, bands[band], bpp);
+				     components[component], level, bands[band], bpp);
 
 				total_words += words;
 
@@ -676,6 +730,34 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *) const
 			LOGI("%s: decomposition level %d: %d bytes\n", components[component], level, total_words_in_level * 4);
 		}
 	}
+
+	double sign_entropy = 0.0;
+	double plane_entropy[4] = {};
+
+	for (int i = 0; i < 256; i++)
+	{
+		if (total_signs && sign_histogram[i])
+		{
+			auto p = double(sign_histogram[i]) / double(total_signs);
+			sign_entropy -= p * log2(p);
+		}
+
+		for (int j = 0; j < 4; j++)
+		{
+			if (total_planes[j] && plane_histogram[j][i])
+			{
+				auto p = double(plane_histogram[j][i]) / double(total_planes[j]);
+				plane_entropy[j] -= p * log2(p);
+			}
+		}
+	}
+
+	LOGI("    S/M/M-1/M-2/M-3 entropy: %.3f / %.3f / %.3f / %.3f / %.3f %%\n",
+	     100.0 * sign_entropy / 8.0,
+	     100.0 * plane_entropy[0] / 8.0,
+	     100.0 * plane_entropy[1] / 8.0,
+	     100.0 * plane_entropy[2] / 8.0,
+	     100.0 * plane_entropy[3] / 8.0);
 
 	LOGI("Overall: %.3f bpp\n", (total_words * 32.0) / total_pixels);
 }
