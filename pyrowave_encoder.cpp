@@ -631,10 +631,9 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 	static const char *components[] = { "Y", "Cb", "Cr" };
 	static const char *bands[] = { "LL", "HL", "LH", "HH" };
 
-	int sign_histogram[256] = {};
-	int plane_histogram[4][256] = {};
-	int total_signs = 0;
-	int total_planes[4] = {};
+	constexpr int MaxPlanes = 16;
+	int plane_histogram[MaxPlanes][256] = {};
+	int total_planes[MaxPlanes] = {};
 
 	for (int component = 0; component < NumComponents; component++)
 	{
@@ -656,60 +655,53 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 				auto &block_mapping = block_meta[component][level][band];
 
 				int words = 0;
-				for (int y = 0; y < blocks_y_64x64; y++)
+				for (int block_y = 0; block_y < blocks_y_64x64; block_y++)
 				{
-					for (int x = 0; x < blocks_x_64x64; x++)
+					for (int block_x = 0; block_x < blocks_x_64x64; block_x++)
 					{
-						int block_index = block_mapping.block_offset_64x64 + y * block_mapping.block_stride_64x64 + x;
+						int block_index = block_mapping.block_offset_64x64 + block_y * block_mapping.block_stride_64x64 + block_x;
+						if (meta[block_index].num_words == 0)
+							continue;
+
+						const auto &mapping = block_64x64_to_16x16_mapping[block_index];
+
 						words += meta[block_index].num_words;
 
 						auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream + meta[block_index].offset_u32);
 						int blocks_16x16 = int(Util::popcount32(header->ballot));
 
-						int block_16x16 = block_mapping.block_offset_16x16 + block_mapping.block_stride_16x16 * y + x;
-
-						auto &mapping_16x16 = block_meta_16x16[block_16x16];
 						auto *control_words = bitstream + meta[block_index].offset_u32 + 2;
 						auto *payload_words = control_words + blocks_16x16;
 
-						for (int i = 0; i < mapping_16x16.in_bounds_subblocks; i++)
-						{
+						Util::for_each_bit(header->ballot, [&](unsigned bit) {
+							int x = int(bit & 3);
+							int y = int(bit >> 2);
+							int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * y + x;
+							auto &mapping_16x16 = block_meta_16x16[block_16x16];
 							auto q_bits = (*control_words >> 16) & 0xf;
-							auto lsbs = *control_words & 0x5555u;
-							auto msbs = *control_words & 0xaaaau;
 
-							auto msbs_shift = msbs >> 1;
-							auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_16x16.block_mask : 0);
-							msbs |= msbs_shift;
-							auto cost = Util::popcount32(lsbs) +
-							            Util::popcount32(msbs) +
-							            Util::popcount32(sign_mask) +
-							            q_bits * mapping_16x16.in_bounds_subblocks;
+							Util::for_each_bit(mapping_16x16.block_mask, [&](unsigned bit_offset) {
+								auto num_planes = q_bits + ((*control_words >> bit_offset) & 0x3);
+								if (num_planes != 0)
+									num_planes++;
 
-							if (cost >= 1)
-							{
-								sign_histogram[(payload_words[0] >> 0) & 0xff]++;
-								sign_histogram[(payload_words[0] >> 8) & 0xff]++;
-								sign_histogram[(payload_words[0] >> 16) & 0xff]++;
-								sign_histogram[(payload_words[0] >> 24) & 0xff]++;
-								total_signs += 4;
-							}
-
-							for (uint32_t j = 0; j < 4; j++)
-							{
-								if (cost >= 2 + j)
+								for (uint32_t j = 0; j < num_planes; j++)
 								{
-									plane_histogram[j][(payload_words[j + 1] >> 0) & 0xff]++;
-									plane_histogram[j][(payload_words[j + 1] >> 8) & 0xff]++;
-									plane_histogram[j][(payload_words[j + 1] >> 16) & 0xff]++;
-									plane_histogram[j][(payload_words[j + 1] >> 24) & 0xff]++;
+									plane_histogram[j][(payload_words[j] >> 0) & 0xff]++;
+									plane_histogram[j][(payload_words[j] >> 8) & 0xff]++;
+									plane_histogram[j][(payload_words[j] >> 16) & 0xff]++;
+									plane_histogram[j][(payload_words[j] >> 24) & 0xff]++;
 									total_planes[j] += 4;
 								}
-							}
+								payload_words += num_planes;
+							});
 
-							payload_words += cost;
 							control_words++;
-						}
+						});
+
+						auto payload_offset = payload_words - (bitstream + meta[block_index].offset_u32 + meta[block_index].num_words);
+						if (payload_offset != 0)
+							abort();
 					}
 				}
 
@@ -731,18 +723,11 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 		}
 	}
 
-	double sign_entropy = 0.0;
-	double plane_entropy[4] = {};
+	double plane_entropy[MaxPlanes] = {};
 
 	for (int i = 0; i < 256; i++)
 	{
-		if (total_signs && sign_histogram[i])
-		{
-			auto p = double(sign_histogram[i]) / double(total_signs);
-			sign_entropy -= p * log2(p);
-		}
-
-		for (int j = 0; j < 4; j++)
+		for (int j = 0; j < MaxPlanes; j++)
 		{
 			if (total_planes[j] && plane_histogram[j][i])
 			{
@@ -752,12 +737,11 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 		}
 	}
 
-	LOGI("    S/M/M-1/M-2/M-3 entropy: %.3f / %.3f / %.3f / %.3f / %.3f %%\n",
-	     100.0 * sign_entropy / 8.0,
-	     100.0 * plane_entropy[0] / 8.0,
-	     100.0 * plane_entropy[1] / 8.0,
-	     100.0 * plane_entropy[2] / 8.0,
-	     100.0 * plane_entropy[3] / 8.0);
+	for (int i = 0; i < MaxPlanes; i++)
+	{
+		LOGI("    Plane %d entropy: %.3f %%\n", i, 100.0 * plane_entropy[i] / 8.0);
+		LOGI("    Plane %d bytes: %d\n", i, total_planes[i]);
+	}
 
 	LOGI("Overall: %.3f bpp\n", (total_words * 32.0) / total_pixels);
 }
