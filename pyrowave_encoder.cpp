@@ -95,6 +95,7 @@ struct Encoder::Impl : public WaveletBuffers
 	                 const void *mapped_meta, const void *mapped_bitstream) const;
 
 	void report_stats(const void *mapped_meta, const void *mapped_bitstream) const;
+	void analyze_alternative_packing(const void *mapped_meta, const void *mapped_bitstream) const;
 
 	bool validate_bitstream(const uint32_t *bitstream, const BitstreamPacket *meta, uint32_t block_index) const;
 
@@ -620,6 +621,110 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 	return num_packets;
 }
 
+void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const void *mapped_bitstream) const
+{
+	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
+	auto *bitstream = static_cast<const uint32_t *>(mapped_bitstream);
+
+	int num_active_64x64_blocks = 0;
+	int num_active_16x16_blocks = 0;
+	int small_block_cost = 0;
+
+	for (int component = 0; component < NumComponents; component++)
+	{
+		for (int level = 0; level < DecompositionLevels; level++)
+		{
+			// Ignore top-level CbCr when doing 420 subsampling.
+			if (level == 0 && component != 0)
+				continue;
+
+			auto band_width = wavelet_img->get_width(level);
+			auto band_height = wavelet_img->get_height(level);
+			int blocks_x_64x64 = (band_width + 63) / 64;
+			int blocks_y_64x64 = (band_height + 63) / 64;
+
+			for (int band = 3; band >= (level == DecompositionLevels - 1 ? 0 : 1); band--)
+			{
+				auto &block_mapping = block_meta[component][level][band];
+
+				for (int block_y = 0; block_y < blocks_y_64x64; block_y++)
+				{
+					for (int block_x = 0; block_x < blocks_x_64x64; block_x++)
+					{
+						int block_index = block_mapping.block_offset_64x64 + block_y * block_mapping.block_stride_64x64 + block_x;
+						if (meta[block_index].num_words == 0)
+							continue;
+
+						const auto &mapping = block_64x64_to_16x16_mapping[block_index];
+
+						auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream + meta[block_index].offset_u32);
+						int blocks_16x16 = int(Util::popcount32(header->ballot));
+
+						auto *control_words = bitstream + meta[block_index].offset_u32 + 2;
+						auto *payload_words = control_words + blocks_16x16;
+
+						Util::for_each_bit(header->ballot, [&](unsigned bit) {
+							int x = int(bit & 3);
+							int y = int(bit >> 2);
+							int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * y + x;
+							auto &mapping_16x16 = block_meta_16x16[block_16x16];
+							auto q_bits = (*control_words >> 16) & 0xf;
+
+							Util::for_each_bit(mapping_16x16.block_mask, [&](unsigned bit_offset) {
+								auto num_planes = q_bits + ((*control_words >> bit_offset) & 0x3);
+								if (num_planes != 0)
+									num_planes++;
+
+								uint32_t significant_plane[4];
+								for (auto &p : significant_plane)
+									p = UINT32_MAX;
+
+								for (uint32_t j = 1; j < num_planes - q_bits; j++)
+								{
+									for (uint32_t k = 0; k < 4; k++)
+									{
+										bool significant = ((payload_words[j] >> (8 * k)) & 0xff) != 0;
+										if (significant)
+											significant_plane[k] = std::min<uint32_t>(j - 1, significant_plane[j]);
+									}
+								}
+
+								const auto cost = [&](uint32_t s) {
+									if (s == UINT32_MAX)
+										return q_bits ? q_bits + 1 : 0;
+									return num_planes - uint32_t(s);
+								};
+
+								unsigned repacked_cost = 0;
+								for (uint32_t k = 0; k < 4; k++)
+									repacked_cost += cost(significant_plane[k]);
+
+								assert(repacked_cost <= num_planes * 4);
+
+								small_block_cost += repacked_cost;
+								payload_words += num_planes;
+							});
+
+							control_words++;
+							num_active_16x16_blocks++;
+						});
+
+						auto payload_offset = payload_words - (bitstream + meta[block_index].offset_u32 + meta[block_index].num_words);
+						if (payload_offset != 0)
+							abort();
+
+						num_active_64x64_blocks++;
+					}
+				}
+			}
+		}
+	}
+
+	LOGI("64x64 blocks cost: %d (byte cost %zu)\n", num_active_64x64_blocks, num_active_64x64_blocks * 4 * sizeof(BitstreamHeader));
+	LOGI("Num active 16x16 blocks %d (byte cost %u):\n", num_active_16x16_blocks, num_active_16x16_blocks * 16);
+	LOGI("Small block cost: %d\n", small_block_cost);
+}
+
 void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
 {
 	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
@@ -744,6 +849,8 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 	}
 
 	LOGI("Overall: %.3f bpp\n", (total_words * 32.0) / total_pixels);
+
+	analyze_alternative_packing(mapped_meta, mapped_bitstream);
 }
 
 bool Encoder::Impl::validate_bitstream(
