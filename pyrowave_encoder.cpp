@@ -675,15 +675,15 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 								if (num_planes != 0)
 									num_planes++;
 
-								uint32_t significant_plane[4];
+								uint32_t significant_plane[2];
 								for (auto &p : significant_plane)
 									p = UINT32_MAX;
 
 								for (uint32_t j = 1; j < num_planes - q_bits; j++)
 								{
-									for (uint32_t k = 0; k < 4; k++)
+									for (uint32_t k = 0; k < 2; k++)
 									{
-										bool significant = ((payload_words[j] >> (8 * k)) & 0xff) != 0;
+										bool significant = ((payload_words[j] >> (16 * k)) & 0xffff) != 0;
 										if (significant)
 											significant_plane[k] = std::min<uint32_t>(j - 1, significant_plane[j]);
 									}
@@ -696,8 +696,8 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 								};
 
 								unsigned repacked_cost = 0;
-								for (uint32_t k = 0; k < 4; k++)
-									repacked_cost += cost(significant_plane[k]);
+								for (uint32_t k = 0; k < 2; k++)
+									repacked_cost += 2 * cost(significant_plane[k]);
 
 								assert(repacked_cost <= num_planes * 4);
 
@@ -720,8 +720,8 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 		}
 	}
 
-	LOGI("64x64 blocks cost: %d (byte cost %zu)\n", num_active_64x64_blocks, num_active_64x64_blocks * 4 * sizeof(BitstreamHeader));
-	LOGI("Num active 16x16 blocks %d (byte cost %u):\n", num_active_16x16_blocks, num_active_16x16_blocks * 16);
+	LOGI("64x64 blocks cost: %d (byte cost %zu)\n", num_active_64x64_blocks, num_active_64x64_blocks * 2 * sizeof(BitstreamHeader));
+	LOGI("Num active 16x16 blocks %d (byte cost %u):\n", num_active_16x16_blocks, num_active_16x16_blocks * 4 * 2);
 	LOGI("Small block cost: %d\n", small_block_cost);
 }
 
