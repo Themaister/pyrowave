@@ -621,14 +621,105 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 	return num_packets;
 }
 
+static int max_magnitude(const int (&values)[64][64], int off_x, int off_y, int w, int h)
+{
+	int max_magnitude = 0;
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++)
+			max_magnitude = std::max<int>(max_magnitude, std::abs(values[off_y + y][off_x + x]));
+	return max_magnitude;
+}
+
+static int num_significant_values(const int (&values)[64][64], int off_x, int off_y, int w, int h)
+{
+	int num_significant = 0;
+	for (int y = 0; y < h; y++)
+		for (int x = 0; x < w; x++)
+			if (values[off_y + y][off_x + x] != 0)
+				num_significant++;
+	return num_significant;
+}
+
+static bool has_significant_value(const int (&values)[64][64], int off_x, int off_y, int w, int h)
+{
+	return max_magnitude(values, off_x, off_y, w, h) != 0;
+}
+
+template <int PacketBlockWidth, int PacketBlockHeight, int SubBlockWidth, int SubBlockHeight>
+static int analyze_cost(const int (&values)[64][64])
+{
+	int cost = 0;
+
+	for (int y = 0; y < 64; y += PacketBlockHeight)
+		for (int x = 0; x < 64; x += PacketBlockWidth)
+			if (has_significant_value(values, x, y, PacketBlockWidth, PacketBlockHeight))
+				cost += 8;
+
+	constexpr int BlockWidth = PacketBlockWidth / 4;
+	constexpr int BlockHeight = PacketBlockHeight / 4;
+
+	constexpr int PixelsInSubBlock = SubBlockWidth * SubBlockHeight;
+	static_assert(PixelsInSubBlock * 8 == BlockWidth * BlockHeight, "Bad config");
+
+	for (int y = 0; y < 64; y += BlockHeight)
+	{
+		for (int x = 0; x < 64; x += BlockWidth)
+		{
+			int mag = max_magnitude(values, x, y, BlockWidth, BlockHeight);
+
+			if (mag != 0)
+			{
+				// Need 16x8 block
+				cost += 3;
+			}
+			else
+				continue;
+
+			constexpr int MaxDeltaQ = 3;
+
+			uint32_t q_bits = 0;
+			{
+				uint32_t num_magnitude_bits = 32 - Util::leading_zeroes(mag);
+				if (num_magnitude_bits > MaxDeltaQ)
+					q_bits = num_magnitude_bits - MaxDeltaQ;
+			}
+
+			int num_sign_bits = num_significant_values(values, x, y, BlockWidth, BlockHeight);
+			num_sign_bits = (num_sign_bits + PixelsInSubBlock - 1) & ~(PixelsInSubBlock - 1);
+			cost += num_sign_bits / 8;
+
+			constexpr int NumSubBlocksX = BlockWidth / SubBlockWidth;
+			constexpr int NumSubBlocksY = BlockHeight / SubBlockHeight;
+
+			for (int subblock_y = 0; subblock_y < NumSubBlocksY; subblock_y++)
+			{
+				for (int subblock_x = 0; subblock_x < NumSubBlocksX; subblock_x++)
+				{
+					int subblock_mag = max_magnitude(values,
+					                                 x + subblock_x * SubBlockWidth,
+					                                 y + subblock_y * SubBlockHeight,
+					                                 SubBlockWidth, SubBlockHeight);
+
+					uint32_t num_magnitude_bits = subblock_mag != 0 ? (32 - Util::leading_zeroes(subblock_mag)) : 0;
+					num_magnitude_bits = std::max(num_magnitude_bits, q_bits);
+					cost += (SubBlockWidth * SubBlockHeight / 8) * num_magnitude_bits;
+				}
+			}
+		}
+	}
+
+	return cost;
+}
+
 void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const void *mapped_bitstream) const
 {
 	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
 	auto *bitstream = static_cast<const uint32_t *>(mapped_bitstream);
 
-	int num_active_64x64_blocks = 0;
-	int num_active_16x16_blocks = 0;
-	int small_block_cost = 0;
+	int cost_32x32_horiz = 0;
+	int cost_32x32_vert = 0;
+	int cost_64x32 = 0;
+	int cost_64x64 = 0;
 
 	for (int component = 0; component < NumComponents; component++)
 	{
@@ -655,6 +746,8 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 						if (meta[block_index].num_words == 0)
 							continue;
 
+						int dequant_values[64][64] = {};
+
 						const auto &mapping = block_64x64_to_16x16_mapping[block_index];
 
 						auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream + meta[block_index].offset_u32);
@@ -664,65 +757,69 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 						auto *payload_words = control_words + blocks_16x16;
 
 						Util::for_each_bit(header->ballot, [&](unsigned bit) {
-							int x = int(bit & 3);
-							int y = int(bit >> 2);
-							int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * y + x;
+							int block_16x16_x = int(bit & 3);
+							int block_16x16_y = int(bit >> 2);
+							int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * block_16x16_y + block_16x16_x;
 							auto &mapping_16x16 = block_meta_16x16[block_16x16];
 							auto q_bits = (*control_words >> 16) & 0xf;
 
 							Util::for_each_bit(mapping_16x16.block_mask, [&](unsigned bit_offset) {
 								auto num_planes = q_bits + ((*control_words >> bit_offset) & 0x3);
-								if (num_planes != 0)
-									num_planes++;
+								if (num_planes == 0)
+									return;
+								num_planes++;
 
-								uint32_t significant_plane[2];
-								for (auto &p : significant_plane)
-									p = UINT32_MAX;
+								int subblock_x = int(bit_offset >> 3u) & 1;
+								int subblock_y = int(bit_offset >> 1u) & 3;
 
-								for (uint32_t j = 1; j < num_planes - q_bits; j++)
+								int base_x = block_16x16_x * 16 + subblock_x * 8;
+								int base_y = block_16x16_y * 16 + subblock_y * 4;
+
+								for (int y = 0; y < 4; y++)
 								{
-									for (uint32_t k = 0; k < 2; k++)
+									for (int x = 0; x < 8; x++)
 									{
-										bool significant = ((payload_words[j] >> (16 * k)) & 0xffff) != 0;
-										if (significant)
-											significant_plane[k] = std::min<uint32_t>(j - 1, significant_plane[j]);
+										int swizzled = 0;
+										swizzled |= ((x >> 0) & 1) << 0;
+										swizzled |= ((y >> 0) & 3) << 1;
+										swizzled |= ((x >> 1) & 3) << 3;
+										assert(swizzled < 32);
+
+										for (uint32_t plane = 1; plane < num_planes; plane++)
+										{
+											dequant_values[base_y + y][base_x + x] <<= 1;
+											dequant_values[base_y + y][base_x + x] |= int(payload_words[plane] >> swizzled) & 1;
+										}
+
+										if ((payload_words[0] & (1u << swizzled)) != 0)
+											dequant_values[base_y + y][base_x + x] *= -1;
 									}
 								}
 
-								const auto cost = [&](uint32_t s) {
-									if (s == UINT32_MAX)
-										return q_bits ? q_bits + 1 : 0;
-									return num_planes - uint32_t(s);
-								};
-
-								unsigned repacked_cost = 0;
-								for (uint32_t k = 0; k < 2; k++)
-									repacked_cost += 2 * cost(significant_plane[k]);
-
-								assert(repacked_cost <= num_planes * 4);
-
-								small_block_cost += repacked_cost;
 								payload_words += num_planes;
 							});
 
 							control_words++;
-							num_active_16x16_blocks++;
 						});
+
+						cost_32x32_horiz += analyze_cost<32, 32, 4, 2>(dequant_values);
+						cost_32x32_vert += analyze_cost<32, 32, 2, 4>(dequant_values);
+						cost_64x32 += analyze_cost<64, 32, 4, 4>(dequant_values);
+						cost_64x64 += analyze_cost<64, 64, 8, 4>(dequant_values);
 
 						auto payload_offset = payload_words - (bitstream + meta[block_index].offset_u32 + meta[block_index].num_words);
 						if (payload_offset != 0)
 							abort();
-
-						num_active_64x64_blocks++;
 					}
 				}
 			}
 		}
 	}
 
-	LOGI("64x64 blocks cost: %d (byte cost %zu)\n", num_active_64x64_blocks, num_active_64x64_blocks * 2 * sizeof(BitstreamHeader));
-	LOGI("Num active 16x16 blocks %d (byte cost %u):\n", num_active_16x16_blocks, num_active_16x16_blocks * 4 * 2);
-	LOGI("Small block cost: %d\n", small_block_cost);
+	LOGI("32x32 (4x2) cost: %d bytes\n", cost_32x32_horiz);
+	LOGI("32x32 (2x4) cost: %d bytes\n", cost_32x32_vert);
+	LOGI("64x32 cost: %d bytes\n", cost_64x32);
+	LOGI("64x64 cost: %d bytes\n", cost_64x64);
 }
 
 void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
