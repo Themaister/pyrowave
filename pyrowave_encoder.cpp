@@ -658,22 +658,24 @@ static int analyze_cost(const int (&values)[64][64])
 	constexpr int BlockWidth = PacketBlockWidth / 4;
 	constexpr int BlockHeight = PacketBlockHeight / 4;
 
-	constexpr int PixelsInSubBlock = SubBlockWidth * SubBlockHeight;
-	static_assert(PixelsInSubBlock * 8 == BlockWidth * BlockHeight, "Bad config");
-
 	for (int y = 0; y < 64; y += BlockHeight)
 	{
 		for (int x = 0; x < 64; x += BlockWidth)
 		{
 			int mag = max_magnitude(values, x, y, BlockWidth, BlockHeight);
 
+			constexpr int NumSubBlocksX = BlockWidth / SubBlockWidth;
+			constexpr int NumSubBlocksY = BlockHeight / SubBlockHeight;
+
 			if (mag != 0)
 			{
-				// Need 16x8 block
-				cost += 3;
+				cost += 2 * NumSubBlocksX * NumSubBlocksY / 8; // 2 bits to encode planes.
+				cost += 1; // 4 bits to encode Q_bits, 4 bits to encode quant scale per block.
 			}
 			else
+			{
 				continue;
+			}
 
 			constexpr int MaxDeltaQ = 3;
 
@@ -684,12 +686,7 @@ static int analyze_cost(const int (&values)[64][64])
 					q_bits = num_magnitude_bits - MaxDeltaQ;
 			}
 
-			int num_sign_bits = num_significant_values(values, x, y, BlockWidth, BlockHeight);
-			num_sign_bits = (num_sign_bits + PixelsInSubBlock - 1) & ~(PixelsInSubBlock - 1);
-			cost += num_sign_bits / 8;
-
-			constexpr int NumSubBlocksX = BlockWidth / SubBlockWidth;
-			constexpr int NumSubBlocksY = BlockHeight / SubBlockHeight;
+			int weight_bits = 0;
 
 			for (int subblock_y = 0; subblock_y < NumSubBlocksY; subblock_y++)
 			{
@@ -702,9 +699,13 @@ static int analyze_cost(const int (&values)[64][64])
 
 					uint32_t num_magnitude_bits = subblock_mag != 0 ? (32 - Util::leading_zeroes(subblock_mag)) : 0;
 					num_magnitude_bits = std::max(num_magnitude_bits, q_bits);
-					cost += (SubBlockWidth * SubBlockHeight / 8) * num_magnitude_bits;
+					weight_bits += SubBlockWidth * SubBlockHeight * num_magnitude_bits;
 				}
 			}
+
+			int num_sign_bits = num_significant_values(values, x, y, BlockWidth, BlockHeight);
+			//cost += 4 * ((weight_bits + num_sign_bits + 31) / 32);
+			cost += ((weight_bits + num_sign_bits + 7) / 8);
 		}
 	}
 
@@ -716,6 +717,7 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
 	auto *bitstream = static_cast<const uint32_t *>(mapped_bitstream);
 
+	int cost_32x32_quad = 0;
 	int cost_32x32_horiz = 0;
 	int cost_32x32_vert = 0;
 	int cost_64x32 = 0;
@@ -802,6 +804,7 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 							control_words++;
 						});
 
+						cost_32x32_quad += analyze_cost<32, 32, 2, 2>(dequant_values);
 						cost_32x32_horiz += analyze_cost<32, 32, 4, 2>(dequant_values);
 						cost_32x32_vert += analyze_cost<32, 32, 2, 4>(dequant_values);
 						cost_64x32 += analyze_cost<64, 32, 4, 4>(dequant_values);
@@ -816,6 +819,7 @@ void Encoder::Impl::analyze_alternative_packing(const void *mapped_meta, const v
 		}
 	}
 
+	LOGI("32x32 (2x2) cost: %d bytes\n", cost_32x32_quad);
 	LOGI("32x32 (4x2) cost: %d bytes\n", cost_32x32_horiz);
 	LOGI("32x32 (2x4) cost: %d bytes\n", cost_32x32_vert);
 	LOGI("64x32 cost: %d bytes\n", cost_64x32);
