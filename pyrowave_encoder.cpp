@@ -29,7 +29,7 @@ struct QuantizerPushData
 {
 	ivec2 resolution;
 	vec2 inv_resolution;
-	float input_layer;
+	int32_t input_layer;
 	float quant_resolution;
 	int32_t block_offset;
 	int32_t block_stride;

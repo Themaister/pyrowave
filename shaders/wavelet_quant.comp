@@ -7,6 +7,9 @@
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_KHR_shader_subgroup_vote : require
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
 #include "dwt_quant_scale.h"
 #include "constants.h"
@@ -15,10 +18,10 @@ layout(local_size_x_id = 0) in;
 
 layout(set = 0, binding = 0) uniform sampler2DArray uTexture;
 
-struct DeadZone
+struct QuantStats
 {
-    float total;
-    int count;
+    float16_t square_error;
+    uint16_t payload_cost;
 };
 
 struct BlockMeta
@@ -27,20 +30,27 @@ struct BlockMeta
     uint offset;
 };
 
-layout(set = 0, binding = 1) buffer SSBOMeta
+// Fit into 64 bytes.
+struct BlockStats
+{
+    uint num_planes;
+    QuantStats errors[15];
+};
+
+layout(set = 0, binding = 1) writeonly buffer SSBOMeta
 {
     BlockMeta meta[];
 } block_meta;
 
-layout(set = 0, binding = 2) buffer SSBODeadZones
+layout(set = 0, binding = 2) writeonly buffer SSBOBlockStats
 {
-    DeadZone data[];
-} block_deadzones;
+    BlockStats stats[];
+} block_stats;
 
 layout(set = 0, binding = 3) buffer Payloads
 {
     layout(offset = 0) uint counter;
-    layout(offset = 8) uint data[];
+    layout(offset = 8) uint8_t data[];
 } payload_data;
 
 #include "dwt_swizzle.h"
@@ -49,7 +59,7 @@ layout(push_constant) uniform Registers
 {
     ivec2 resolution;
     vec2 inv_resolution;
-    float input_layer;
+    int input_layer;
     float quant_resolution;
     int block_offset;
     int block_stride;
@@ -67,18 +77,17 @@ int max4(ivec4 v)
     return max(v2.x, v2.y);
 }
 
-void encode_bits(uvec4 payload, uint offset)
+void encode_bits(uint payload, uint offset)
 {
-    uvec4 upayload = payload << (4 * (gl_SubgroupInvocationID & 7u) + uvec4(0, 1, 2, 3));
-    uint encoded = upayload.x | upayload.y | upayload.z | upayload.w;
+    uint encoded = payload << (gl_SubgroupInvocationID & 7u);
     encoded |= subgroupShuffleXor(encoded, 1);
     encoded |= subgroupShuffleXor(encoded, 2);
     encoded |= subgroupShuffleXor(encoded, 4);
     if ((gl_SubgroupInvocationID & 7u) == 0u)
-        payload_data.data[offset] = encoded;
+        payload_data.data[offset] = uint8_t(encoded);
 }
 
-int compute_block8x4_max(int v)
+int compute_block4x2_max(int v)
 {
     v = max(v, subgroupShuffleXor(v, 1));
     v = max(v, subgroupShuffleXor(v, 2));
@@ -95,73 +104,6 @@ int scan_strided(int v)
     }
 
     return v;
-}
-
-DeadZone compute_deadzone(vec4 abs_texels, bvec4 quant_zero)
-{
-    uint count =
-        subgroupBallotBitCount(subgroupBallot(quant_zero.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero.w));
-
-    abs_texels = mix(vec4(0.0), abs_texels, quant_zero);
-    float total_zero = subgroupAdd(abs_texels.x + abs_texels.y + abs_texels.z + abs_texels.w);
-    return DeadZone(total_zero, int(count));
-}
-
-DeadZone compute_deadzone(vec4 abs_texels0, bvec4 quant_zero0, vec4 abs_texels1, bvec4 quant_zero1)
-{
-    uint count =
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.w)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.w));
-
-    abs_texels0 = mix(vec4(0.0), abs_texels0, quant_zero0);
-    abs_texels1 = mix(vec4(0.0), abs_texels1, quant_zero1);
-
-    abs_texels0 += abs_texels1;
-    float total_zero = subgroupAdd(abs_texels0.x + abs_texels0.y + abs_texels0.z + abs_texels0.w);
-    return DeadZone(total_zero, int(count));
-}
-
-DeadZone compute_deadzone(
-    vec4 abs_texels0, bvec4 quant_zero0,
-    vec4 abs_texels1, bvec4 quant_zero1,
-    vec4 abs_texels2, bvec4 quant_zero2,
-    vec4 abs_texels3, bvec4 quant_zero3)
-{
-    uint count =
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero0.w)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero1.w)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero2.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero2.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero2.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero2.w)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero3.x)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero3.y)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero3.z)) +
-        subgroupBallotBitCount(subgroupBallot(quant_zero3.w));
-
-    abs_texels0 = mix(vec4(0.0), abs_texels0, quant_zero0);
-    abs_texels1 = mix(vec4(0.0), abs_texels1, quant_zero1);
-    abs_texels2 = mix(vec4(0.0), abs_texels2, quant_zero2);
-    abs_texels3 = mix(vec4(0.0), abs_texels3, quant_zero3);
-
-    abs_texels0 += abs_texels1 + abs_texels2 + abs_texels3;
-    float total_zero = subgroupAdd(abs_texels0.x + abs_texels0.y + abs_texels0.z + abs_texels0.w);
-    return DeadZone(total_zero, int(count));
 }
 
 void compute_quant_scale(float max_wave_texels, out uint quant_code, out float quant_scale)
@@ -182,301 +124,111 @@ void compute_quant_scale(float max_wave_texels, out uint quant_code, out float q
     }
 }
 
-void encode_payload16(
-    vec4 texels0, vec4 texels1, vec4 texels2, vec4 texels3,
-    bool in_range0, bool in_range1, bool in_range2, bool in_range3)
+float compute_square_error(float v, int q, out uint num_significant_values)
 {
-    float max_wave_texels = subgroupMax(max4(vec4(
-        max4(abs(texels0)), max4(abs(texels1)), max4(abs(texels2)), max4(abs(texels3)))));
-
-    float quant_scale;
-    uint quant_code;
-    compute_quant_scale(max_wave_texels, quant_code, quant_scale);
-    texels0 *= quant_scale;
-    texels1 *= quant_scale;
-    texels2 *= quant_scale;
-    texels3 *= quant_scale;
-
-    ivec4 quant_texels0 = ivec4(texels0);
-    ivec4 quant_texels1 = ivec4(texels1);
-    ivec4 quant_texels2 = ivec4(texels2);
-    ivec4 quant_texels3 = ivec4(texels3);
-    ivec4 abs_quant_texels0 = abs(quant_texels0);
-    ivec4 abs_quant_texels1 = abs(quant_texels1);
-    ivec4 abs_quant_texels2 = abs(quant_texels2);
-    ivec4 abs_quant_texels3 = abs(quant_texels3);
-    int max_thread_texel0 = max4(abs_quant_texels0);
-    int max_thread_texel1 = max4(abs_quant_texels1);
-    int max_thread_texel2 = max4(abs_quant_texels2);
-    int max_thread_texel3 = max4(abs_quant_texels3);
-    int max_absolute_value = subgroupMax(max4(
-        ivec4(max_thread_texel0, max_thread_texel1, max_thread_texel2, max_thread_texel3)));
-
-    // The entire block quantizes to zero.
-    if (max_absolute_value == 0)
-    {
-        if (subgroupElect())
-            block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] = BlockMeta(0, 0);
-        return;
-    }
-
-    DeadZone deadzone = compute_deadzone(
-        abs(texels0), equal(quant_texels0, ivec4(in_range0 ? 0 : 0x7fffffff)),
-        abs(texels1), equal(quant_texels1, ivec4(in_range1 ? 0 : 0x7fffffff)),
-        abs(texels2), equal(quant_texels2, ivec4(in_range2 ? 0 : 0x7fffffff)),
-        abs(texels3), equal(quant_texels3, ivec4(in_range3 ? 0 : 0x7fffffff)));
-
-    int msb = findMSB(max_absolute_value);
-    int block8x4_0 = compute_block8x4_max(max_thread_texel0);
-    int block8x4_1 = compute_block8x4_max(max_thread_texel1);
-    int block8x4_2 = compute_block8x4_max(max_thread_texel2);
-    int block8x4_3 = compute_block8x4_max(max_thread_texel3);
-    int block8x4_0_shifted = block8x4_0;
-    int block8x4_1_shifted = block8x4_1;
-    int block8x4_2_shifted = block8x4_2;
-    int block8x4_3_shifted = block8x4_3;
-    int quality_planes = 0;
-
-    int encode_cost0 = block8x4_0 > 0 ? 1 : 0;
-    int encode_cost1 = block8x4_1 > 0 ? 1 : 0;
-    int encode_cost2 = block8x4_2 > 0 ? 1 : 0;
-    int encode_cost3 = block8x4_3 > 0 ? 1 : 0;
-
-    if (msb >= 3)
-    {
-        quality_planes = msb - 2;
-        // Must encode the sign plane if we have quality planes.
-        encode_cost0 = quality_planes + 1;
-        encode_cost1 = quality_planes + 1;
-        encode_cost2 = quality_planes + 1;
-        encode_cost3 = quality_planes + 1;
-        block8x4_0_shifted >>= quality_planes;
-        block8x4_1_shifted >>= quality_planes;
-        block8x4_2_shifted >>= quality_planes;
-        block8x4_3_shifted >>= quality_planes;
-    }
-
-    if (!in_range0)
-    {
-        encode_cost0 = 0;
-        block8x4_0_shifted = 0;
-    }
-
-    if (!in_range1)
-    {
-        encode_cost1 = 0;
-        block8x4_1_shifted = 0;
-    }
-
-    if (!in_range2)
-    {
-        encode_cost2 = 0;
-        block8x4_2_shifted = 0;
-    }
-
-    if (!in_range3)
-    {
-        encode_cost3 = 0;
-        block8x4_3_shifted = 0;
-    }
-
-    encode_cost0 += findMSB(block8x4_0_shifted) + 1;
-    encode_cost1 += findMSB(block8x4_1_shifted) + 1;
-    encode_cost2 += findMSB(block8x4_2_shifted) + 1;
-    encode_cost3 += findMSB(block8x4_3_shifted) + 1;
-
-    uint encode_cost_scan0 = scan_strided(encode_cost0);
-    uint encode_cost_scan1 = scan_strided(encode_cost1);
-    uint encode_cost_scan2 = scan_strided(encode_cost2);
-    uint encode_cost_scan3 = scan_strided(encode_cost3);
-    encode_cost_scan1 += subgroupBroadcast(encode_cost_scan0, 15);
-    encode_cost_scan2 += subgroupBroadcast(encode_cost_scan1, 15);
-    encode_cost_scan3 += subgroupBroadcast(encode_cost_scan2, 15);
-
-    uint global_offset = 0;
-
-    // For feedback, and allocation of payload.
-    if (gl_SubgroupInvocationID == 15)
-        global_offset = atomicAdd(payload_data.counter, encode_cost_scan3);
-    global_offset = subgroupBroadcast(global_offset, 15);
-
-    // First, encode the code word.
-    uint code_word = quality_planes << Q_PLANES_OFFSET;
-    code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
-    uint plane_code0 = findMSB(block8x4_0_shifted) + 1;
-    uint plane_code1 = findMSB(block8x4_1_shifted) + 1;
-    uint plane_code2 = findMSB(block8x4_2_shifted) + 1;
-    uint plane_code3 = findMSB(block8x4_3_shifted) + 1;
-    uint plane_code = plane_code0 | (plane_code1 << 4) | (plane_code2 << 8) | (plane_code3 << 12);
-
-    code_word |= subgroupBroadcast(plane_code, 0) << 0;
-    code_word |= subgroupBroadcast(plane_code, 8) << 2;
-
-    if (subgroupElect())
-    {
-        block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            BlockMeta(code_word, global_offset);
-        block_deadzones.data[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            deadzone;
-    }
-
-    if (in_range0)
-    {
-        uint word_offset0 = encode_cost_scan0 - encode_cost0 + global_offset;
-        bool need_sign0 = block8x4_0_shifted != 0 || quality_planes != 0;
-
-        if (need_sign0)
-        {
-            encode_bits(ivec4(lessThan(texels0, vec4(0.0))), word_offset0);
-            word_offset0++;
-        }
-
-        int plane_iterations0 = quality_planes + int(plane_code0);
-        for (int q = plane_iterations0 - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels0), q, 1), word_offset0);
-            word_offset0++;
-        }
-    }
-
-    if (in_range1)
-    {
-        uint word_offset1 = encode_cost_scan1 - encode_cost1 + global_offset;
-        bool need_sign1 = block8x4_1_shifted != 0 || quality_planes != 0;
-
-        if (need_sign1)
-        {
-            encode_bits(ivec4(lessThan(texels1, vec4(0.0))), word_offset1);
-            word_offset1++;
-        }
-
-        int plane_iterations1 = quality_planes + int(plane_code1);
-        for (int q = plane_iterations1 - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels1), q, 1), word_offset1);
-            word_offset1++;
-        }
-    }
-
-    if (in_range2)
-    {
-        uint word_offset2 = encode_cost_scan2 - encode_cost2 + global_offset;
-        bool need_sign2 = block8x4_2_shifted != 0 || quality_planes != 0;
-
-        if (need_sign2)
-        {
-            encode_bits(ivec4(lessThan(texels2, vec4(0.0))), word_offset2);
-            word_offset2++;
-        }
-
-        int plane_iterations2 = quality_planes + int(plane_code2);
-        for (int q = plane_iterations2 - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels2), q, 1), word_offset2);
-            word_offset2++;
-        }
-    }
-
-    if (in_range3)
-    {
-        uint word_offset3 = encode_cost_scan3 - encode_cost3 + global_offset;
-        bool need_sign3 = block8x4_3_shifted != 0 || quality_planes != 0;
-
-        if (need_sign3)
-        {
-            encode_bits(ivec4(lessThan(texels3, vec4(0.0))), word_offset3);
-            word_offset3++;
-        }
-
-        int plane_iterations3 = quality_planes + int(plane_code3);
-        for (int q = plane_iterations3 - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels3), q, 1), word_offset3);
-            word_offset3++;
-        }
-    }
+    v = abs(v);
+    float iv = float(int(v) >> q);
+    num_significant_values = subgroupBallotBitCount(subgroupBallot(iv != 0));
+    if (iv != 0.0)
+        iv += 0.5;
+    iv = ldexp(iv, q);
+    float err = v - iv;
+    return subgroupAdd(err * err);
 }
 
-void encode_payload32(vec4 texels0, vec4 texels1, bool in_range0, bool in_range1)
+struct QuantResult
 {
-    float max_wave_texels = subgroupMax(max(max4(abs(texels0)), max4(abs(texels1))));
+    float square_error;
+    int encode_cost_early;
+    int block4x2_shifted;
+    int encode_cost_late_bits;
+    int quality_planes;
+};
+
+QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float inv_quant, bool in_range)
+{
+    block4x2_max >>= q;
+
+    uint num_significants;
+    QuantResult result;
+
+    result.square_error = compute_square_error(v, q, num_significants) * inv_quant * inv_quant;
+    result.block4x2_shifted = block4x2_max;
+
+    result.encode_cost_early = block4x2_max > 0 ? 1 : 0;
+    msb -= q;
+
+    result.quality_planes = 0;
+
+    if (msb >= 3)
+    {
+        result.quality_planes = msb - 2;
+        // Must encode the sign plane if we have quality planes.
+        result.encode_cost_early = result.quality_planes + 1;
+        result.block4x2_shifted >>= result.quality_planes;
+    }
+
+    if (!in_range)
+    {
+        result.encode_cost_early = 0;
+        result.block4x2_shifted = 0;
+    }
+
+    result.encode_cost_early += findMSB(result.block4x2_shifted) + 1;
+    result.encode_cost_late_bits = subgroupAdd(max(result.encode_cost_early - 1, 0)) + int(num_significants);
+    return result;
+}
+
+void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1)
+{
+    float max_wave_texels = subgroupMax(max(abs(texel0), abs(texel1)));
     float quant_scale;
     uint quant_code;
     compute_quant_scale(max_wave_texels, quant_code, quant_scale);
-    texels0 *= quant_scale;
-    texels1 *= quant_scale;
+    texel0 *= quant_scale;
+    texel1 *= quant_scale;
 
-    ivec4 quant_texels0 = ivec4(texels0);
-    ivec4 quant_texels1 = ivec4(texels1);
-    ivec4 abs_quant_texels0 = abs(quant_texels0);
-    ivec4 abs_quant_texels1 = abs(quant_texels1);
-    int max_thread_texel0 = max4(abs_quant_texels0);
-    int max_thread_texel1 = max4(abs_quant_texels1);
-    int max_absolute_value = subgroupMax(max(max_thread_texel0, max_thread_texel1));
+    float overall_quant_scale = registers.quant_resolution * quant_scale;
+    float inv_quant = 1.0 / overall_quant_scale;
+
+    int quant_texel0 = int(texel0);
+    int quant_texel1 = int(texel1);
+    int abs_quant_texel0 = abs(quant_texel0);
+    int abs_quant_texel1 = abs(quant_texel1);
+    int max_absolute_value = subgroupMax(max(abs_quant_texel0, abs_quant_texel1));
+
+    uint block_index = registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x;
 
     // The entire block quantizes to zero.
     if (max_absolute_value == 0)
     {
         if (subgroupElect())
-            block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] = BlockMeta(0, 0);
+            block_meta.meta[block_index] = BlockMeta(0, 0);
         return;
     }
 
-    DeadZone deadzone = compute_deadzone(
-        abs(texels0), equal(quant_texels0, ivec4(in_range0 ? 0 : 0x7fffffff)),
-        abs(texels1), equal(quant_texels1, ivec4(in_range1 ? 0 : 0x7fffffff)));
-
     int msb = findMSB(max_absolute_value);
-    int block8x4_0 = compute_block8x4_max(max_thread_texel0);
-    int block8x4_1 = compute_block8x4_max(max_thread_texel1);
-    int block8x4_0_shifted = block8x4_0;
-    int block8x4_1_shifted = block8x4_1;
-    int quality_planes = 0;
+    int block4x2_0 = compute_block4x2_max(abs_quant_texel0);
+    int block4x2_1 = compute_block4x2_max(abs_quant_texel1);
 
-    int encode_cost0 = block8x4_0 > 0 ? 1 : 0;
-    int encode_cost1 = block8x4_1 > 0 ? 1 : 0;
-
-    if (msb >= 3)
-    {
-        quality_planes = msb - 2;
-        // Must encode the sign plane if we have quality planes.
-        encode_cost0 = quality_planes + 1;
-        encode_cost1 = quality_planes + 1;
-        block8x4_0_shifted >>= quality_planes;
-        block8x4_1_shifted >>= quality_planes;
-    }
-
-    if (!in_range0)
-    {
-        encode_cost0 = 0;
-        block8x4_0_shifted = 0;
-    }
-
-    if (!in_range1)
-    {
-        encode_cost1 = 0;
-        block8x4_1_shifted = 0;
-    }
-
-    encode_cost0 += findMSB(block8x4_0_shifted) + 1;
-    encode_cost1 += findMSB(block8x4_1_shifted) + 1;
-
-    uint encode_cost_scan0 = scan_strided(encode_cost0);
-    uint encode_cost_scan1 = scan_strided(encode_cost1);
-    encode_cost_scan1 += subgroupBroadcast(encode_cost_scan0, 31);
+    QuantResult result0 = compute_quant_stats(texel0, 0, msb, block4x2_0, inv_quant, in_range0);
+    QuantResult result1 = compute_quant_stats(texel1, 0, msb, block4x2_1, inv_quant, in_range1);
+    int scan0 = scan_strided(result0.encode_cost_early);
+    int scan1 = scan_strided(result1.encode_cost_early);
+    scan1 += subgroupBroadcast(scan0, gl_SubgroupSize - 1);
 
     uint global_offset = 0;
 
     // For feedback, and allocation of payload.
-    if (gl_SubgroupInvocationID == 31)
-        global_offset = atomicAdd(payload_data.counter, encode_cost_scan1);
-    global_offset = subgroupBroadcast(global_offset, 31);
+    if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
+        global_offset = atomicAdd(payload_data.counter, scan1);
+    global_offset = subgroupBroadcast(global_offset, gl_SubgroupSize - 1);
 
     // First, encode the code word.
-    uint code_word = quality_planes << Q_PLANES_OFFSET;
+    uint code_word = result0.quality_planes << Q_PLANES_OFFSET;
     code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
-    uint plane_code0 = findMSB(block8x4_0_shifted) + 1;
-    uint plane_code1 = findMSB(block8x4_1_shifted) + 1;
+    uint plane_code0 = findMSB(result0.block4x2_shifted) + 1;
+    uint plane_code1 = findMSB(result1.block4x2_shifted) + 1;
     uint plane_code = plane_code0 | (plane_code1 << 8);
 
     code_word |= subgroupBroadcast(plane_code, 0) << 0;
@@ -486,379 +238,67 @@ void encode_payload32(vec4 texels0, vec4 texels1, bool in_range0, bool in_range1
 
     if (subgroupElect())
     {
-        block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            BlockMeta(code_word, global_offset);
-        block_deadzones.data[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            deadzone;
+        block_meta.meta[block_index] = BlockMeta(code_word, global_offset);
+        block_stats.stats[block_index].num_planes = msb + 1;
+        block_stats.stats[block_index].errors[0] = QuantStats(
+            float16_t(result0.square_error + result1.square_error),
+            uint16_t(result0.encode_cost_late_bits + result1.encode_cost_late_bits));
+    }
+
+    for (int q = 1; q <= msb; q++)
+    {
+        result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant, in_range0);
+        result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant, in_range1);
+        block_stats.stats[block_index].errors[q] = QuantStats(
+            float16_t(result0.square_error + result1.square_error),
+            uint16_t(result0.encode_cost_late_bits + result1.encode_cost_late_bits));
     }
 
     if (in_range0)
     {
-        uint word_offset0 = encode_cost_scan0 - encode_cost0 + global_offset;
-        bool need_sign0 = block8x4_0_shifted != 0 || quality_planes != 0;
+        uint word_offset0 = scan0 - result0.encode_cost_early + global_offset;
+        bool need_sign0 = result0.block4x2_shifted != 0 || result0.quality_planes != 0;
 
+        // Don't pack the sign plane until final pass, since we don't know how we quantize yet.
         if (need_sign0)
         {
-            encode_bits(ivec4(lessThan(texels0, vec4(0.0))), word_offset0);
+            encode_bits(int(texel0 < 0.0), word_offset0);
             word_offset0++;
         }
 
-        int plane_iterations0 = quality_planes + int(plane_code0);
+        int plane_iterations0 = result0.quality_planes + int(plane_code0);
         for (int q = plane_iterations0 - 1; q >= 0; q--)
         {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels0), q, 1), word_offset0);
+            encode_bits(bitfieldExtract(uint(abs_quant_texel0), q, 1), word_offset0);
             word_offset0++;
         }
     }
 
     if (in_range1)
     {
-        uint word_offset1 = encode_cost_scan1 - encode_cost1 + global_offset;
-        bool need_sign1 = block8x4_1_shifted != 0 || quality_planes != 0;
+        uint word_offset1 = scan1 - result1.encode_cost_early + global_offset;
+        bool need_sign1 = result1.block4x2_shifted != 0 || result1.quality_planes != 0;
 
         if (need_sign1)
         {
-            encode_bits(ivec4(lessThan(texels1, vec4(0.0))), word_offset1);
+            encode_bits(int(texel1 < 0.0), word_offset1);
             word_offset1++;
         }
 
-        int plane_iterations1 = quality_planes + int(plane_code1);
+        int plane_iterations1 = result1.quality_planes + int(plane_code1);
         for (int q = plane_iterations1 - 1; q >= 0; q--)
         {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels1), q, 1), word_offset1);
+            encode_bits(bitfieldExtract(uint(abs_quant_texel1), q, 1), word_offset1);
             word_offset1++;
         }
     }
 }
-
-void encode_payload64(vec4 texels, bool in_range)
-{
-    float max_wave_texels = subgroupMax(max4(abs(texels)));
-    float quant_scale;
-    uint quant_code;
-    compute_quant_scale(max_wave_texels, quant_code, quant_scale);
-    texels *= quant_scale;
-
-    ivec4 quant_texels = ivec4(texels);
-    ivec4 abs_quant_texels = abs(quant_texels);
-    int max_thread_texel = max4(abs_quant_texels);
-    int max_absolute_value = subgroupMax(max_thread_texel);
-
-    // The entire block quantizes to zero.
-    if (max_absolute_value == 0)
-    {
-        if (subgroupElect())
-            block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] = BlockMeta(0, 0);
-        return;
-    }
-
-    DeadZone deadzone = compute_deadzone(abs(texels), equal(quant_texels, ivec4(in_range ? 0 : 0x7fffffff)));
-
-    int msb = findMSB(max_absolute_value);
-
-    int block8x4 = compute_block8x4_max(max_thread_texel);
-    int block8x4_shifted = block8x4;
-    int quality_planes = 0;
-
-    // Record sign bit.
-    int encode_cost = block8x4 > 0 ? 1 : 0;
-
-    // Need quality planes.
-    if (msb >= 3)
-    {
-        quality_planes = msb - 2;
-        // Must encode the sign plane if we have quality planes.
-        encode_cost = quality_planes + 1;
-        block8x4_shifted >>= quality_planes;
-    }
-
-    if (!in_range)
-    {
-        encode_cost = 0;
-        block8x4_shifted = 0;
-    }
-
-    // Four modes per 8x4 block of pixels:
-    // 0 -> all 0
-    // 1 -> 1 MSB + sign
-    // 2 -> 2 MSB + sign
-    // 3 -> 3 MSB + sign
-    encode_cost += findMSB(block8x4_shifted) + 1;
-
-    uint encode_cost_scan = scan_strided(encode_cost);
-    uint global_offset = 0;
-
-    // For feedback, and allocation of payload.
-    if (gl_SubgroupInvocationID == 63)
-        global_offset = atomicAdd(payload_data.counter, encode_cost_scan);
-    global_offset = subgroupBroadcast(global_offset, 63);
-
-    // First, encode the code word.
-    uint code_word = quality_planes << Q_PLANES_OFFSET;
-    code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
-    uint plane_code = findMSB(block8x4_shifted) + 1;
-
-    for (int i = 0; i < 8; i++)
-        code_word = bitfieldInsert(code_word, subgroupBroadcast(plane_code, 8 * i), 2 * i, 2);
-
-    if (subgroupElect())
-    {
-        block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            BlockMeta(code_word, global_offset);
-        block_deadzones.data[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            deadzone;
-    }
-
-    if (in_range)
-    {
-        uint word_offset = encode_cost_scan - encode_cost + global_offset;
-        bool need_sign = block8x4_shifted != 0 || quality_planes != 0;
-
-        if (need_sign)
-        {
-            encode_bits(ivec4(lessThan(texels, vec4(0.0))), word_offset);
-            word_offset++;
-        }
-
-        int plane_iterations = quality_planes + int(plane_code);
-
-        for (int q = plane_iterations - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uvec4(abs_quant_texels), q, 1), word_offset);
-            word_offset++;
-        }
-    }
-}
-
-#if 0
-// For whatever reason, this path is *disgustingly* slow.
-shared uint workgroup_tmp_max[2];
-shared uint workgroup_tmp_deadzone[2];
-shared uint workgroup_tmp_block_max[8];
-shared uint workgroup_tmp_scan[8];
-shared uint workgroup_tmp_plane_code;
-shared uint workgroup_tmp_offset;
-shared uint workgroup_tmp_count;
-shared uint workgroup_tmp_payload[gl_WorkGroupSize.x / 2];
-
-float workgroup_max(float v)
-{
-    v = subgroupMax(v);
-    if (subgroupElect())
-        atomicMax(workgroup_tmp_max[0], floatBitsToUint(v));
-    barrier();
-    return uintBitsToFloat(workgroup_tmp_max[0]);
-}
-
-int workgroup_max(int uv)
-{
-    uv = subgroupMax(uv);
-    if (subgroupElect())
-        atomicMax(workgroup_tmp_max[1], uint(uv));
-    barrier();
-    return int(workgroup_tmp_max[1]);
-}
-
-DeadZone compute_deadzone(float abs_texel, bool is_zero)
-{
-    if (!is_zero)
-        abs_texel = 0.0;
-
-    abs_texel = subgroupAdd(abs_texel);
-    uint count = subgroupBallotBitCount(subgroupBallot(is_zero));
-
-    if (subgroupElect())
-    {
-        atomicAdd(workgroup_tmp_deadzone[0], uint(abs_texel * 64.0 * 1024.0 + 0.5));
-        atomicAdd(workgroup_tmp_deadzone[1], count);
-    }
-
-    barrier();
-
-    return DeadZone(float(workgroup_tmp_deadzone[0]) / (64.0 * 1024.0), int(workgroup_tmp_deadzone[1]));
-}
-
-int workgroup_compute_block8x4_max(int v)
-{
-    v = subgroupMax(v);
-    if (subgroupElect())
-        atomicMax(workgroup_tmp_block_max[gl_SubgroupID / (32 / gl_SubgroupSize)], uint(v));
-    barrier();
-    return int(workgroup_tmp_block_max[gl_SubgroupID / (32 / gl_SubgroupSize)]);
-}
-
-uint workgroup_scan_strided(uint cost, uint index)
-{
-    if ((index & 31u) == 0)
-        workgroup_tmp_scan[index / 32] = cost;
-
-    barrier();
-
-    if (gl_SubgroupID == 0)
-    {
-        if (gl_SubgroupInvocationID < 8)
-            cost = workgroup_tmp_scan[index];
-        cost = subgroupInclusiveAdd(cost);
-        if (gl_SubgroupInvocationID < 8)
-            workgroup_tmp_scan[index] = cost;
-    }
-
-    barrier();
-    return workgroup_tmp_scan[index / 32];
-}
-
-void encode_payload_generic(float texel, bool in_range, uint index)
-{
-    float max_wave_texels = workgroup_max(abs(texel));
-    float quant_scale;
-    uint quant_code;
-    compute_quant_scale(max_wave_texels, quant_code, quant_scale);
-    texel *= quant_scale;
-
-    int quant_texel = int(texel);
-    int abs_quant_texel = abs(quant_texel);
-    int max_absolute_value = int(workgroup_max(abs_quant_texel));
-
-    // The entire block quantizes to zero.
-    if (max_absolute_value == 0)
-    {
-        if (index == 0)
-            block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] = BlockMeta(0, 0);
-        return;
-    }
-
-    DeadZone deadzone = compute_deadzone(abs(texel), quant_texel == 0 && in_range);
-
-    int msb = findMSB(max_absolute_value);
-
-    int block8x4 = workgroup_compute_block8x4_max(abs_quant_texel);
-    int block8x4_shifted = block8x4;
-    int quality_planes = 0;
-
-    // Record sign bit.
-    int encode_cost = block8x4 > 0 ? 1 : 0;
-
-    // Need quality planes.
-    if (msb >= 3)
-    {
-        quality_planes = msb - 2;
-        // Must encode the sign plane if we have quality planes.
-        encode_cost = quality_planes + 1;
-        block8x4_shifted >>= quality_planes;
-    }
-
-    if (!in_range)
-    {
-        encode_cost = 0;
-        block8x4_shifted = 0;
-    }
-
-    // Four modes per 8x4 block of pixels:
-    // 0 -> all 0
-    // 1 -> 1 MSB + sign
-    // 2 -> 2 MSB + sign
-    // 3 -> 3 MSB + sign
-    encode_cost += findMSB(block8x4_shifted) + 1;
-
-    uint encode_cost_scan = workgroup_scan_strided(encode_cost, index);
-
-    // For feedback, and allocation of payload.
-    if (index == gl_WorkGroupSize.x - 1)
-    {
-        workgroup_tmp_offset = atomicAdd(payload_data.counter, encode_cost_scan);
-        workgroup_tmp_count = encode_cost_scan;
-    }
-
-    uint plane_code = findMSB(block8x4_shifted) + 1;
-    if ((index & 31u) == 0u)
-        atomicOr(workgroup_tmp_plane_code, plane_code << (2 * (index / 32)));
-
-    barrier();
-
-    uint global_offset = workgroup_tmp_offset;
-    uint global_count = workgroup_tmp_count;
-
-    if (index == 0)
-    {
-        uint code_word = quality_planes << Q_PLANES_OFFSET;
-        code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
-        code_word |= workgroup_tmp_plane_code;
-        block_meta.meta[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            BlockMeta(code_word, global_offset);
-        block_deadzones.data[registers.block_offset + gl_WorkGroupID.y * registers.block_stride + gl_WorkGroupID.x] =
-            deadzone;
-    }
-
-    if (subgroupAny(in_range))
-    {
-        uint word_offset = subgroupBroadcastFirst(encode_cost_scan - encode_cost);
-
-        // Help compiler understand this is subgroup uniform.
-        bool need_sign = subgroupBroadcastFirst(block8x4_shifted != 0 || quality_planes != 0);
-
-        if (need_sign)
-        {
-            uvec4 ballot = subgroupBallot(texel < 0);
-            if (subgroupElect())
-                atomicOr(workgroup_tmp_payload[word_offset], ballot.x << (index & 31u));
-            word_offset++;
-        }
-
-        int plane_iterations = subgroupBroadcastFirst(quality_planes + int(plane_code));
-
-        for (int q = plane_iterations - 1; q >= 0; q--)
-        {
-            uvec4 ballot = subgroupBallot(bitfieldExtract(uint(abs_quant_texel), q, 1) != 0);
-            if (subgroupElect())
-                atomicOr(workgroup_tmp_payload[word_offset], ballot.x << (index & 31u));
-            word_offset++;
-        }
-    }
-
-    barrier();
-
-    // Dump the payload.
-    for (uint i = index; i < global_count; i += gl_WorkGroupSize.x)
-        payload_data.data[global_offset + i] = workgroup_tmp_payload[i];
-}
-#endif
 
 void main()
 {
     ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * 16;
 
 #if 0
-    if (gl_WorkGroupSize.x == 256)
-    {
-        if (gl_LocalInvocationIndex == 0)
-            workgroup_tmp_plane_code = 0;
-
-        if (gl_LocalInvocationIndex < 2)
-        {
-            workgroup_tmp_max[gl_LocalInvocationIndex] = 0;
-            workgroup_tmp_deadzone[gl_LocalInvocationIndex] = 0;
-        }
-
-        if (gl_LocalInvocationIndex < 8)
-            workgroup_tmp_block_max[gl_LocalInvocationIndex] = 0;
-
-        if (gl_LocalInvocationIndex < gl_WorkGroupSize.x / 2)
-            workgroup_tmp_payload[gl_LocalInvocationIndex] = 0;
-
-        uint index = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
-        ivec2 local_coord = unswizzle16x16_dequant(index);
-        ivec2 top_left_coord = base_coord + local_coord;
-
-        float texel = texelFetch(uTexture, ivec3(top_left_coord, registers.input_layer), 0).x;
-        float scaled_texel = texel * registers.quant_resolution;
-
-        bool in_range = all(lessThan(top_left_coord & ivec2(~7, ~3), registers.resolution));
-
-        barrier();
-        encode_payload_generic(scaled_texel, in_range, index);
-    }
-    else
-#endif
     if (gl_SubgroupSize == 64)
     {
         ivec2 local_coord = unswizzle8x8_2x2_quant(gl_SubgroupInvocationID);
@@ -872,26 +312,27 @@ void main()
         bool in_range = all(lessThan(top_left_coord & ivec2(~7, ~3), registers.resolution));
         encode_payload64(scaled_texels, in_range);
     }
-    else if (gl_SubgroupSize == 32)
+    else
+#endif
+    if (gl_SubgroupSize == 32)
     {
-        ivec2 local_coord = unswizzle4x8_2x2_quant(gl_SubgroupInvocationID);
+        ivec2 local_coord = unswizzle4x8(gl_SubgroupInvocationID);
 
-        ivec2 top_left_coord = base_coord + local_coord * 2;
-        ivec2 gather_coord = top_left_coord + ivec2(5, 0);
-        vec2 gather_uv = vec2(gather_coord) * registers.inv_resolution;
+        ivec2 top_left_coord = base_coord + local_coord;
 
-        vec4 texels0 = textureGatherOffset(uTexture, vec3(gather_uv, registers.input_layer), ivec2(-4, 1), 0).wzxy;
-        vec4 texels1 = textureGatherOffset(uTexture, vec3(gather_uv, registers.input_layer), ivec2(4, 1), 0).wzxy;
+        float texel0 = texelFetch(uTexture, ivec3(top_left_coord, registers.input_layer), 0).x;
+        float texel1 = texelFetch(uTexture, ivec3(top_left_coord + ivec2(4, 0), registers.input_layer), 0).x;
 
-        vec4 scaled_texels0 = texels0 * registers.quant_resolution;
-        vec4 scaled_texels1 = texels1 * registers.quant_resolution;
+        float scaled_texel0 = texel0 * registers.quant_resolution;
+        float scaled_texel1 = texel1 * registers.quant_resolution;
 
-        ivec2 snapped_top_left = top_left_coord & ivec2(~7, ~3);
+        ivec2 snapped_top_left = top_left_coord & ivec2(-4, -2);
 
         bool in_range0 = all(lessThan(snapped_top_left, registers.resolution));
-        bool in_range1 = all(lessThan(snapped_top_left + ivec2(8, 0), registers.resolution));
-        encode_payload32(scaled_texels0, scaled_texels1, in_range0, in_range1);
+        bool in_range1 = all(lessThan(snapped_top_left + ivec2(4, 0), registers.resolution));
+        encode_payload32(scaled_texel0, scaled_texel1, in_range0, in_range1);
     }
+#if 0
     else if (gl_SubgroupSize == 16)
     {
         ivec2 local_coord = unswizzle4x8_2x2_quant(gl_SubgroupInvocationID);
@@ -921,4 +362,5 @@ void main()
             scaled_texels0, scaled_texels1, scaled_texels2, scaled_texels3,
             in_range0, in_range1, in_range2, in_range3);
     }
+#endif
 }
