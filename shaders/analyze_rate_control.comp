@@ -5,6 +5,8 @@
 #extension GL_KHR_shader_subgroup_vote : require
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
 #extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
 #include "dwt_quant_scale.h"
 #include "constants.h"
@@ -15,12 +17,6 @@ struct BlockMeta
 {
     uint code_word;
     uint offset;
-};
-
-struct DeadZone
-{
-    float total;
-    int count;
 };
 
 struct RDOperation
@@ -44,21 +40,32 @@ layout(set = 0, binding = 1) readonly buffer SSBOMeta
     BlockMeta meta[];
 } block_meta;
 
-layout(set = 0, binding = 2) readonly buffer DeadZones
+struct QuantStats
 {
-    DeadZone data[];
-} deadzones;
+    float16_t square_error;
+    uint16_t payload_cost;
+};
+
+struct BlockStats
+{
+    uint num_planes;
+    QuantStats errors[15];
+};
+
+layout(set = 0, binding = 2) readonly buffer SSBOBlockStats
+{
+    BlockStats stats[];
+} block_stats;
 
 layout(push_constant) uniform Registers
 {
     ivec2 resolution;
-    ivec2 resolution_16x16_blocks;
-    float step_size;
+    ivec2 resolution_8x8_blocks;
     float rdo_distortion_scale;
-    int block_offset_16x16;
-    int block_stride_16x16;
-    int block_offset_64x64;
-    int block_stride_64x64;
+    int block_offset_8x8;
+    int block_stride_8x8;
+    int block_offset_32x32;
+    int block_stride_32x32;
     uint total_wg_count;
     uint num_blocks_aligned;
     uint block_index_shamt;
@@ -68,108 +75,6 @@ shared uint shared_rate_cost[16];
 shared float shared_distortion[16];
 shared uint shared_tmp[4];
 
-uint compute_required_16x16_size(uint control_word, int quant, uint block_mask, int in_range_subblocks)
-{
-    int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
-
-    int sub_q = min(q_bits, quant);
-    q_bits -= sub_q;
-    quant -= sub_q;
-
-    // Bit 0 plane survives if we don't quant any more.
-    uint plane0 = control_word & 0x5555u;
-    uint plane1 = (control_word & 0xaaaau) >> 1;
-    uint plane2 = plane0 & plane1;
-
-    if (quant >= 1)
-    {
-        plane0 = plane1;
-        plane1 = plane2;
-        plane2 = 0;
-    }
-
-    if (quant >= 2)
-    {
-        plane0 = plane1;
-        plane1 = 0;
-    }
-
-    if (quant >= 3)
-        plane0 = 0;
-
-    uint sign_mask = (plane1 | plane0) | (q_bits != 0 ? block_mask : 0u);
-    uint size = bitCount(plane0) + bitCount(plane1 * 3) + bitCount(sign_mask) + q_bits * in_range_subblocks;
-
-    if (size != 0u)
-        size++;
-
-    return size;
-}
-
-float estimate_weighted_square_error(uint control_word, DeadZone zone, int quant)
-{
-    float step_size = registers.step_size * decode_quant_scale(bitfieldExtract(control_word, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS));
-
-    // Assume perfectly uniform white noise. This should hold reasonably well for non-zero coefficients.
-    float uniform_quant_square_error = step_size * step_size * (1.0 / 12.0);
-    float uniform_quant_square_error_scaled = ldexp(uniform_quant_square_error, 2 * quant);
-
-    int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
-    int sub_q = min(q_bits, quant);
-    q_bits -= sub_q;
-    quant -= sub_q;
-    uint lsbs = control_word & 0x5555u;
-    uint msbs = control_word & 0xaaaau;
-    uint msbs_shift = msbs >> 1;
-    uint msb_and_lsb = control_word & msbs_shift;
-
-    // If we don't have Q bits, we can code a 8x4 block to flat 0.
-    // The error rate is fixed at that point.
-    uint dead_zeroed_blocks = q_bits == 0 ? (8 - bitCount(lsbs | msbs_shift | msb_and_lsb)) : 0;
-    uint enters_dead_zero_blocks_1 = quant >= 1 ? bitCount(lsbs & ~(msb_and_lsb | msbs_shift)) : 0;
-    uint enters_dead_zero_blocks_2 = quant >= 2 ? bitCount(msbs_shift & ~lsbs) : 0;
-    uint enters_dead_zero_blocks_3 = quant >= 3 ? bitCount(msb_and_lsb) : 0;
-
-    // Surviving blocks assume uniform quantization.
-    uint surviving_blocks = 8 - dead_zeroed_blocks -
-        enters_dead_zero_blocks_1 -
-        enters_dead_zero_blocks_2 -
-        enters_dead_zero_blocks_3;
-
-    // If we don't have the sign plane anymore, quantizing to zero quadruples the average square error.
-    // This basically measures the average power of the samples given a maximum range assuming a uniform distribution.
-    // In reality this isn't true, and we probably won't be using the full range, so instead of 4.0, use a 2.0 multiplier
-    // as a fudge factor.
-    const float DeadzoneScale = 2.0;
-    float deadzone_base_square_error = ldexp(uniform_quant_square_error, 2 * sub_q) * DeadzoneScale;
-    float square_error_plane_1 = float(enters_dead_zero_blocks_1) * deadzone_base_square_error * 4.0;
-    float square_error_plane_2 = float(enters_dead_zero_blocks_2) * deadzone_base_square_error * 16.0;
-    float square_error_plane_3 = float(enters_dead_zero_blocks_3) * deadzone_base_square_error * 64.0;
-
-    // Coefficients that were quantized to zero before RDO will not generally get worse with more quant since we
-    // scale the deadzone region alongside the quant scale.
-    float deadzone = min(0.5, zone.total / max(1.0, float(zone.count)));
-    float deadzone_step_size = 2.0 * deadzone * step_size;
-    float deadzone_quant_square_error = deadzone_step_size * deadzone_step_size * (1.0 / 12.0);
-
-    float square_error = uniform_quant_square_error_scaled * float(surviving_blocks) +
-        square_error_plane_1 + square_error_plane_2 + square_error_plane_3;
-
-    // Get average square error.
-    square_error /= 8.0;
-
-    // Weight the results. If a lot of coefficents were initially quantized to 0, the actual error will look
-    // more like the deadzone quantization noise.
-    // If nothing is in the deadzone, we can assume more uniformly distributed noise and the actual square error
-    // starts looking more like normal white noise.
-    square_error = mix(square_error, deadzone_quant_square_error, float(zone.count) / 256.0);
-
-    // Weight the noise. This depends on psychovisual effects but also filter bank gains, etc.
-    square_error *= registers.rdo_distortion_scale;
-
-    return square_error;
-}
-
 // Perform operations that cause lower distortion first.
 uint distortion_to_bucket_index(float d, float cost, float d_base, float cost_base)
 {
@@ -178,8 +83,8 @@ uint distortion_to_bucket_index(float d, float cost, float d_base, float cost_ba
 
     // Compress a large range into 64 possible buckets.
     // Every band is ~1.5 dB.
-    // Greedily chase least added distortion per word removed from code stream.
-    float index = 60.0 + 2.0 * log2((d - d_base) / (cost_base - cost));
+    // Greedily chase least added (weighted) distortion per byte removed from code stream.
+    float index = 60.0 + 2.0 * log2(max(d - d_base, 0.0) / (cost_base - cost));
     return uint(max(index + 0.5, 0.0));
 }
 
@@ -236,9 +141,9 @@ void emit_rdo_operations()
 
         if (saving != 0)
         {
-            ivec2 block64x64_index = ivec2(gl_WorkGroupID.xy);
-            int block_index = registers.block_offset_64x64 +
-                block64x64_index.y * registers.block_stride_64x64 + block64x64_index.x;
+            ivec2 block32x32_index = ivec2(gl_WorkGroupID.xy);
+            int block_index = registers.block_offset_32x32 +
+                block32x32_index.y * registers.block_stride_32x32 + block32x32_index.x;
             uint subdivision = block_index >> registers.block_index_shamt;
             atomicAdd(buckets.total_savings_per_bucket[inclusive_bucket_index * BLOCK_SPACE_SUBDIVISION + subdivision], saving);
             buckets.rdo_operations[block_index + inclusive_bucket_index * registers.num_blocks_aligned] =
@@ -251,41 +156,40 @@ void main()
 {
     // Each workgroup processes a 64x64 block and computes all possible rate wins for every potential quant rate.
     uint index = gl_SubgroupInvocationID + gl_SubgroupSize * gl_SubgroupID;
-    ivec2 block64x64_index = ivec2(gl_WorkGroupID.xy);
+    ivec2 block32x32_index = ivec2(gl_WorkGroupID.xy);
     ivec2 local_block_index = ivec2(bitfieldExtract(index, 0, 2), bitfieldExtract(index, 2, 2));
-    ivec2 block16x16_index = 4 * block64x64_index + local_block_index;
+    ivec2 block8x8_index = 4 * block32x32_index + local_block_index;
 
-    BlockMeta meta;
-    DeadZone deadzone;
+    uint num_active_planes;
 
-    if (all(lessThan(block16x16_index, registers.resolution_16x16_blocks)))
-    {
-        int block_index = registers.block_offset_16x16 +
-            registers.block_stride_16x16 * block16x16_index.y +
-            block16x16_index.x;
-        meta = block_meta.meta[block_index];
-        deadzone = deadzones.data[block_index];
-    }
+    bool block8x8_in_range = all(lessThan(block8x8_index, registers.resolution_8x8_blocks));
+    int block_index_8x8 = registers.block_offset_8x8 +
+        registers.block_stride_8x8 * block8x8_index.y +
+        block8x8_index.x;
+
+    if (block8x8_in_range)
+        num_active_planes = block_stats.stats[block_index_8x8].num_planes;
     else
-    {
-        meta = BlockMeta(0, 0);
-        deadzone = DeadZone(0, 0);
-    }
+        num_active_planes = 0;
 
     uint bit_index = index >> 4;
 
-    ivec2 active_block_res = min(registers.resolution - 16 * block16x16_index, ivec2(16));
-    int active_subblocks_x = (active_block_res.x + 7) >> 3;
-    int active_subblocks_y = (active_block_res.y + 3) >> 2;
-    int in_range_subblocks = active_subblocks_x * active_subblocks_y;
-    uint block_mask = bitfieldExtract(0x5555u, 0, 2 * active_subblocks_y);
-    if (active_subblocks_x == 2)
-        block_mask |= block_mask << 8;
-
     for (uint i = bit_index; i < 16; i += 4)
     {
-        uint cost = compute_required_16x16_size(meta.code_word, int(i), block_mask, in_range_subblocks);
-        float dist = estimate_weighted_square_error(meta.code_word, deadzone, int(i));
+        float dist = 0.0;
+        uint cost = 0;
+
+        if (i < num_active_planes)
+        {
+            QuantStats stats = block_stats.stats[block_index_8x8].errors[i];
+            dist = float(stats.square_error) * registers.rdo_distortion_scale;
+            cost = uint(stats.payload_cost);
+
+            // 16 bits to encode the control codes, 8 bits to encode Q bits + quant scale.
+            // Cost is encoded in terms of bits. 8x8 blocks are decoded in isolation.
+            if (cost != 0)
+                cost = 3 + ((cost + 7) / 8);
+        }
 
         if (gl_SubgroupSize == 16)
         {
@@ -308,17 +212,20 @@ void main()
             dist += subgroupShuffleXor(dist, 2);
             dist += subgroupShuffleXor(dist, 4);
             dist += subgroupShuffleXor(dist, 8);
+        }
 
-            if ((index & 15u) == 0u)
-            {
-                // Need to encode a header.
-                // We can eliminate 64x64 blocks if everything decodes to 0.
-                if (cost != 0)
-                    cost += 2;
+        if ((index & 15u) == 0u)
+        {
+            // Need to encode a header.
+            // We can eliminate 32x32 blocks if everything decodes to 0.
+            if (cost != 0)
+                cost += 2;
 
-                shared_rate_cost[i] = cost;
-                shared_distortion[i] = dist;
-            }
+            // Each packet is aligned to 4 bytes for practical reasons.
+            cost = (cost + 3u) & ~3u;
+
+            shared_rate_cost[i] = cost;
+            shared_distortion[i] = dist;
         }
     }
 

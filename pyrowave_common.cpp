@@ -57,53 +57,53 @@ void WaveletBuffers::allocate_images()
 	}
 }
 
-void WaveletBuffers::accumulate_block_16x16_mapping(int level_width, int level_height)
+void WaveletBuffers::accumulate_block_8x8_mapping(int level_width, int level_height)
 {
-	int blocks_x_16x16 = (level_width + 15) / 16;
-	int blocks_y_16x16 = (level_height + 15) / 16;
+	int blocks_x_8x8 = (level_width + 7) / 8;
+	int blocks_y_8x8 = (level_height + 7) / 8;
 
-	for (int y = 0; y < blocks_y_16x16; y++)
+	for (int y = 0; y < blocks_y_8x8; y++)
 	{
-		for (int x = 0; x < blocks_x_16x16; x++)
+		for (int x = 0; x < blocks_x_8x8; x++)
 		{
-			int block_width = std::min<int>(16, level_width - x * 16);
-			int block_height = std::min<int>(16, level_height - y * 16);
+			int block_width = std::min<int>(8, level_width - x * 8);
+			int block_height = std::min<int>(8, level_height - y * 8);
 
-			int subblocks_x = (block_width + 7) >> 3;
-			int subblocks_y = (block_height + 3) >> 2;
+			int subblocks_x = (block_width + 3) >> 2;
+			int subblocks_y = (block_height + 1) >> 1;
 
 			uint32_t block_mask = 0x5555u & ((1u << (2 * subblocks_y)) - 1u);
 			if (subblocks_x == 2)
 				block_mask |= block_mask << 8u;
 
-			BlockInfo16x16 info = {};
+			BlockInfo8x8 info = {};
 			info.block_mask = block_mask;
 			info.in_bounds_subblocks = subblocks_x * subblocks_y;
-			block_meta_16x16.push_back(info);
+			block_meta_8x8.push_back(info);
 		}
 	}
 }
 
-void WaveletBuffers::accumulate_block_mapping(int blocks_x_16x16, int blocks_y_16x16)
+void WaveletBuffers::accumulate_block_mapping(int blocks_x_8x8, int blocks_y_8x8)
 {
-	int blocks_x_64x64 = (blocks_x_16x16 + 3) / 4;
-	int blocks_y_64x64 = (blocks_y_16x16 + 3) / 4;
+	int blocks_x_32x32 = (blocks_x_8x8 + 3) / 4;
+	int blocks_y_32x32 = (blocks_y_8x8 + 3) / 4;
 
-	for (int y = 0; y < blocks_y_64x64; y++)
+	for (int y = 0; y < blocks_y_32x32; y++)
 	{
-		for (int x = 0; x < blocks_x_64x64; x++)
+		for (int x = 0; x < blocks_x_32x32; x++)
 		{
 			BlockMapping mapping = {};
-			mapping.block_offset_16x16 = block_count_16x16 + 4 * y * blocks_x_16x16 + 4 * x;
-			mapping.block_stride_16x16 = blocks_x_16x16;
-			mapping.block_width_16x16 = std::min<int>(4, blocks_x_16x16 - 4 * x);
-			mapping.block_height_16x16 = std::min<int>(4, blocks_y_16x16 - 4 * y);
-			block_64x64_to_16x16_mapping.push_back(mapping);
-			block_count_64x64++;
+			mapping.block_offset_8x8 = block_count_8x8 + 4 * y * blocks_x_8x8 + 4 * x;
+			mapping.block_stride_8x8 = blocks_x_8x8;
+			mapping.block_width_8x8 = std::min<int>(4, blocks_x_8x8 - 4 * x);
+			mapping.block_height_8x8 = std::min<int>(4, blocks_y_8x8 - 4 * y);
+			block_32x32_to_8x8_mapping.push_back(mapping);
+			block_count_32x32++;
 		}
 	}
 
-	block_count_16x16 += blocks_x_16x16 * blocks_y_16x16;
+	block_count_8x8 += blocks_x_8x8 * blocks_y_8x8;
 }
 
 void WaveletBuffers::init_block_meta()
@@ -121,22 +121,22 @@ void WaveletBuffers::init_block_meta()
 				uint32_t level_width = wavelet_img->get_width(level);
 				uint32_t level_height = wavelet_img->get_height(level);
 
-				int blocks_x_16x16 = (level_width + 15) / 16;
-				int blocks_y_16x16 = (level_height + 15) / 16;
-				int blocks_x_64x64 = (level_width + 63) / 64;
+				int blocks_x_8x8 = (level_width + 7) / 8;
+				int blocks_y_8x8 = (level_height + 7) / 8;
+				int blocks_x_32x32 = (level_width + 31) / 32;
 
 				block_meta[component][level][band] = {
-					block_count_16x16, blocks_x_16x16,
-					block_count_64x64, blocks_x_64x64,
+					block_count_8x8, blocks_x_8x8,
+					block_count_32x32, blocks_x_32x32,
 				};
 
-				accumulate_block_16x16_mapping(level_width, level_height);
-				accumulate_block_mapping(blocks_x_16x16, blocks_y_16x16);
+				accumulate_block_8x8_mapping(level_width, level_height);
+				accumulate_block_mapping(blocks_x_8x8, blocks_y_8x8);
 			}
 		}
 	}
 
-	assert(size_t(block_count_16x16) == block_meta_16x16.size());
+	assert(size_t(block_count_8x8) == block_meta_8x8.size());
 }
 
 bool WaveletBuffers::init(Device *device_, int width_, int height_)

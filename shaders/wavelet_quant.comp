@@ -203,7 +203,10 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
     if (max_absolute_value == 0)
     {
         if (subgroupElect())
+        {
             block_meta.meta[block_index] = BlockMeta(0, 0);
+            block_stats.stats[block_index].num_planes = 0;
+        }
         return;
     }
 

@@ -90,11 +90,18 @@ struct BitstreamSequenceHeader
 
 static_assert(sizeof(BitstreamSequenceHeader) == 8, "BitstreamSequenceHeader is not 8 bytes.");
 
-struct DeadZone
+struct QuantStats
 {
-	float total;
-	int32_t count;
+	uint16_t square_error_fp16;
+	uint16_t encode_cost_bits;
 };
+
+struct BlockStats
+{
+	uint32_t num_planes;
+	QuantStats stats[15];
+};
+static_assert(sizeof(BlockStats) == 64, "BlockStats is not 64 bytes.");
 
 struct BlockMeta
 {
@@ -150,31 +157,31 @@ struct WaveletBuffers
 
 	struct BlockInfo
 	{
-		int block_offset_16x16;
-		int block_stride_16x16;
-		int block_offset_64x64;
-		int block_stride_64x64;
+		int block_offset_8x8;
+		int block_stride_8x8;
+		int block_offset_32x32;
+		int block_stride_32x32;
 	};
 	BlockInfo block_meta[NumComponents][DecompositionLevels][4] = {};
 
-	struct BlockInfo16x16
+	struct BlockInfo8x8
 	{
 		uint32_t block_mask;
 		int in_bounds_subblocks;
 	};
-	std::vector<BlockInfo16x16> block_meta_16x16;
+	std::vector<BlockInfo8x8> block_meta_8x8;
 
 	struct BlockMapping
 	{
-		int block_offset_16x16;
-		int block_stride_16x16;
-		int block_width_16x16;
-		int block_height_16x16;
+		int block_offset_8x8;
+		int block_stride_8x8;
+		int block_width_8x8;
+		int block_height_8x8;
 	};
-	std::vector<BlockMapping> block_64x64_to_16x16_mapping;
+	std::vector<BlockMapping> block_32x32_to_8x8_mapping;
 
-	int block_count_16x16 = 0;
-	int block_count_64x64 = 0;
+	int block_count_8x8 = 0;
+	int block_count_32x32 = 0;
 
 	int width = 0;
 	int height = 0;
@@ -189,7 +196,7 @@ protected:
 	Shaders<> shaders;
 
 private:
-	void accumulate_block_mapping(int blocks_x_16x16, int blocks_y_16x16);
-	void accumulate_block_16x16_mapping(int level_width, int level_height);
+	void accumulate_block_mapping(int blocks_x_8x8, int blocks_y_8x8);
+	void accumulate_block_8x8_mapping(int level_width, int level_height);
 };
 }
