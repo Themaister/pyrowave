@@ -29,7 +29,7 @@ struct QuantizerPushData
 {
 	ivec2 resolution;
 	vec2 inv_resolution;
-	float input_layer;
+	int32_t input_layer;
 	float quant_resolution;
 	int32_t block_offset;
 	int32_t block_stride;
@@ -38,26 +38,25 @@ struct QuantizerPushData
 struct BlockPackingPushData
 {
 	ivec2 resolution;
-	ivec2 resolution_64x64_blocks;
-	ivec2 resolution_16x16_blocks;
+	ivec2 resolution_32x32_blocks;
+	ivec2 resolution_8x8_blocks;
 	uint32_t quant_resolution_code;
 	uint32_t sequence_count;
-	uint32_t block_offset_64x64;
-	uint32_t block_stride_64x64;
-	uint32_t block_offset_16x16;
-	uint32_t block_stride_16x16;
+	uint32_t block_offset_32x32;
+	uint32_t block_stride_32x32;
+	uint32_t block_offset_8x8;
+	uint32_t block_stride_8x8;
 };
 
 struct AnalyzeRateControlPushData
 {
 	ivec2 resolution;
-	ivec2 resolution_16x16_blocks;
-	float step_size;
+	ivec2 resolution_8x8_blocks;
 	float rdo_distortion_scale;
-	int32_t block_offset_16x16;
-	int32_t block_stride_16x16;
-	int32_t block_offset_64x64;
-	int32_t block_stride_64x64;
+	int32_t block_offset_8x8;
+	int32_t block_stride_8x8;
+	int32_t block_offset_32x32;
+	int32_t block_stride_32x32;
 	uint32_t total_wg_count;
 	uint32_t num_blocks_aligned;
 	uint32_t block_index_shamt;
@@ -72,15 +71,17 @@ struct RDOperation
 
 struct Encoder::Impl : public WaveletBuffers
 {
-	BufferHandle bucket_buffer, meta_buffer, deadzone_buffer, payload_data, quant_buffer;
+	BufferHandle bucket_buffer, meta_buffer, block_stat_buffer, payload_data, quant_buffer;
 
 	bool encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers);
+	bool encode_pre_transformed(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
+	bool encode_quant_and_coding(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
 
 	bool dwt(CommandBuffer &cmd, const ViewBuffers &views);
-	bool quant(CommandBuffer &cmd);
+	bool quant(CommandBuffer &cmd, float quant_scale);
 	bool analyze_rdo(CommandBuffer &cmd);
 	bool resolve_rdo(CommandBuffer &cmd, size_t target_payload_size);
-	bool block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers);
+	bool block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
 
 	float get_noise_power_normalized_quant_resolution(int level, int component, int band) const;
 	float get_quant_resolution(int level, int component, int band) const;
@@ -97,7 +98,7 @@ struct Encoder::Impl : public WaveletBuffers
 	void report_stats(const void *mapped_meta, const void *mapped_bitstream) const;
 	void analyze_alternative_packing(const void *mapped_meta, const void *mapped_bitstream) const;
 
-	bool validate_bitstream(const uint32_t *bitstream, const BitstreamPacket *meta, uint32_t block_index) const;
+	bool validate_bitstream(const uint32_t *bitstream_u32, const BitstreamPacket *meta, uint32_t block_index) const;
 
 	uint32_t sequence_count = 0;
 };
@@ -171,11 +172,11 @@ void Encoder::Impl::init_block_meta()
 	info.domain = BufferDomain::Device;
 	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-	info.size = block_count_16x16 * sizeof(DeadZone);
-	deadzone_buffer = device->create_buffer(info);
-	device->set_name(*deadzone_buffer, "deadzone-buffer");
+	info.size = block_count_8x8 * sizeof(BlockStats);
+	block_stat_buffer = device->create_buffer(info);
+	device->set_name(*block_stat_buffer, "block-stat-buffer");
 
-	info.size = block_count_16x16 * sizeof(BlockMeta);
+	info.size = block_count_8x8 * sizeof(BlockMeta);
 	meta_buffer = device->create_buffer(info);
 	device->set_name(*meta_buffer, "meta-buffer");
 
@@ -184,18 +185,19 @@ void Encoder::Impl::init_block_meta()
 	payload_data = device->create_buffer(info);
 	device->set_name(*payload_data, "payload-data");
 
-	info.size = block_count_64x64 * sizeof(uint32_t);
+	info.size = block_count_32x32 * sizeof(uint32_t);
 	quant_buffer = device->create_buffer(info);
 	device->set_name(*quant_buffer, "quant-buffer");
 
 	info.size = RDOBucketOffset;
 	info.size += NumRDOBuckets * BlockSpaceSubdivision * sizeof(uint32_t);
-	info.size += NumRDOBuckets * compute_block_count_per_subdivision(block_count_64x64) * BlockSpaceSubdivision * sizeof(RDOperation);
+	info.size += NumRDOBuckets * compute_block_count_per_subdivision(block_count_32x32) *
+	             BlockSpaceSubdivision * sizeof(RDOperation);
 	bucket_buffer = device->create_buffer(info);
 	device->set_name(*bucket_buffer, "bucket-buffer");
 }
 
-bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers)
+bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
 {
 	cmd.begin_region("DWT block packing");
 	auto start_packing = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -204,7 +206,7 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 	cmd.set_storage_buffer(0, 1, *buffers.meta.buffer, buffers.meta.offset, buffers.meta.size);
 	cmd.set_storage_buffer(0, 2, *meta_buffer);
 	cmd.set_storage_buffer(0, 3, *payload_data);
-	cmd.set_storage_buffer(0, 4, *deadzone_buffer);
+	cmd.set_storage_buffer(0, 4, *block_stat_buffer);
 	cmd.set_storage_buffer(0, 5, *quant_buffer);
 
 	if (device->supports_subgroup_size_log2(true, 4, 6))
@@ -236,23 +238,23 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 			{
 				BlockPackingPushData packing_push = {};
 				packing_push.resolution = ivec2(level_width, level_height);
-				packing_push.resolution_64x64_blocks = ivec2((level_width + 63) / 64, (level_height + 63) / 64);
-				packing_push.resolution_16x16_blocks = ivec2((level_width + 15) / 16, (level_height + 15) / 16);
+				packing_push.resolution_32x32_blocks = ivec2((level_width + 31) / 32, (level_height + 31) / 32);
+				packing_push.resolution_8x8_blocks = ivec2((level_width + 7) / 8, (level_height + 7) / 8);
 
-				auto quant_res = get_quant_resolution(level, component, band);
+				auto quant_res = quant_scale < 0.0f ? get_quant_resolution(level, component, band) : quant_scale;
 				packing_push.quant_resolution_code = encode_quant(1.0f / quant_res);
 				packing_push.sequence_count = sequence_count;
 
 				auto &meta = block_meta[component][level][band];
 
-				packing_push.block_offset_64x64 = meta.block_offset_64x64;
-				packing_push.block_stride_64x64 = meta.block_stride_64x64;
-				packing_push.block_offset_16x16 = meta.block_offset_16x16;
-				packing_push.block_stride_16x16 = meta.block_stride_16x16;
+				packing_push.block_offset_32x32 = meta.block_offset_32x32;
+				packing_push.block_stride_32x32 = meta.block_stride_32x32;
+				packing_push.block_offset_8x8 = meta.block_offset_8x8;
+				packing_push.block_stride_8x8 = meta.block_stride_8x8;
 				cmd.push_constants(&packing_push, 0, sizeof(packing_push));
 
-				cmd.dispatch((packing_push.resolution_64x64_blocks.x + 1) / 2,
-				             (packing_push.resolution_64x64_blocks.y + 1) / 2,
+				cmd.dispatch((packing_push.resolution_32x32_blocks.x + 1) / 2,
+				             (packing_push.resolution_32x32_blocks.y + 1) / 2,
 				             1);
 			}
 
@@ -312,7 +314,7 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 	} push = {};
 
 	push.target_payload_size = target_payload_size / sizeof(uint32_t);
-	push.num_blocks_per_subdivision = compute_block_count_per_subdivision(block_count_64x64);
+	push.num_blocks_per_subdivision = compute_block_count_per_subdivision(block_count_32x32);
 	cmd.push_constants(&push, 0, sizeof(push));
 	cmd.set_storage_buffer(0, 0, *bucket_buffer);
 	cmd.set_storage_buffer(0, 1, *quant_buffer);
@@ -364,29 +366,26 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				auto level_width = wavelet_img->get_width(level);
 				auto level_height  = wavelet_img->get_height(level);
 
-				float quant_res = get_quant_resolution(level, component, band);
 
 				push.resolution.x = level_width;
 				push.resolution.y = level_height;
-				push.resolution_16x16_blocks.x = (level_width + 15) / 16;
-				push.resolution_16x16_blocks.y = (level_height + 15) / 16;
-				push.step_size = decode_quant(encode_quant(1.0f / quant_res));
+				push.resolution_8x8_blocks.x = (level_width + 7) / 8;
+				push.resolution_8x8_blocks.y = (level_height + 7) / 8;
 				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
-				push.block_offset_16x16 = block_meta[component][level][band].block_offset_16x16;
-				push.block_stride_16x16 = block_meta[component][level][band].block_stride_16x16;
-				push.block_offset_64x64 = block_meta[component][level][band].block_offset_64x64;
-				push.block_stride_64x64 = block_meta[component][level][band].block_stride_64x64;
-				push.total_wg_count = block_count_64x64;
-				push.num_blocks_aligned = compute_block_count_per_subdivision(block_count_64x64) * BlockSpaceSubdivision;
-				push.block_index_shamt = Util::floor_log2(compute_block_count_per_subdivision(block_count_64x64));
+				push.block_offset_8x8 = block_meta[component][level][band].block_offset_8x8;
+				push.block_stride_8x8 = block_meta[component][level][band].block_stride_8x8;
+				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
+				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
+				push.total_wg_count = block_count_32x32;
+				push.num_blocks_aligned = compute_block_count_per_subdivision(block_count_32x32) * BlockSpaceSubdivision;
+				push.block_index_shamt = Util::floor_log2(compute_block_count_per_subdivision(block_count_32x32));
 
 				cmd.push_constants(&push, 0, sizeof(push));
 
 				cmd.set_storage_buffer(0, 0, *bucket_buffer);
-				cmd.set_storage_buffer(0, 1, *meta_buffer);
-				cmd.set_storage_buffer(0, 2, *deadzone_buffer);
+				cmd.set_storage_buffer(0, 1, *block_stat_buffer);
 
-				cmd.dispatch((level_width + 63) / 64, (level_height + 63) / 64, 1);
+				cmd.dispatch((level_width + 31) / 32, (level_height + 31) / 32, 1);
 			}
 
 			cmd.end_region();
@@ -402,7 +401,7 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 	return true;
 }
 
-bool Encoder::Impl::quant(CommandBuffer &cmd)
+bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 {
 	auto start_quant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	cmd.begin_region("DWT quantize");
@@ -413,19 +412,6 @@ bool Encoder::Impl::quant(CommandBuffer &cmd)
 	{
 		cmd.set_specialization_constant(0, 64);
 		cmd.set_subgroup_size_log2(true, 6, 6);
-	}
-#if 0
-	// Disgustingly slow path for some reason.
-	else if (device->supports_subgroup_size_log2(true, 3, 4))
-	{
-		cmd.set_specialization_constant(0, 256);
-		cmd.set_subgroup_size_log2(true, 3, 4);
-	}
-#endif
-	else if (device->supports_subgroup_size_log2(true, 4, 4))
-	{
-		cmd.set_specialization_constant(0, 16);
-		cmd.set_subgroup_size_log2(true, 4, 4);
 	}
 	else if (device->supports_subgroup_size_log2(true, 5, 5))
 	{
@@ -455,26 +441,26 @@ bool Encoder::Impl::quant(CommandBuffer &cmd)
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				float quant_res = get_quant_resolution(level, component, band);
+				float quant_res = quant_scale < 0.0f ? get_quant_resolution(level, component, band) : quant_scale;
 
 				push.resolution.x = wavelet_img->get_width(level);
 				push.resolution.y = wavelet_img->get_height(level);
 				push.inv_resolution.x = 1.0f / float(push.resolution.x);
 				push.inv_resolution.y = 1.0f / float(push.resolution.y);
-				push.input_layer = float(band);
+				push.input_layer = band;
 				push.quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res));
 
-				int blocks_x = (push.resolution.x + 15) / 16;
-				int blocks_y = (push.resolution.y + 15) / 16;
+				int blocks_x = (push.resolution.x + 7) / 8;
+				int blocks_y = (push.resolution.y + 7) / 8;
 
-				push.block_offset = block_meta[component][level][band].block_offset_16x16;
-				push.block_stride = block_meta[component][level][band].block_stride_16x16;
+				push.block_offset = block_meta[component][level][band].block_offset_8x8;
+				push.block_stride = block_meta[component][level][band].block_stride_8x8;
 
 				cmd.push_constants(&push, 0, sizeof(push));
 
 				cmd.set_texture(0, 0, *component_layer_views[component][level], *border_sampler);
 				cmd.set_storage_buffer(0, 1, *meta_buffer);
-				cmd.set_storage_buffer(0, 2, *deadzone_buffer);
+				cmd.set_storage_buffer(0, 2, *block_stat_buffer);
 				cmd.set_storage_buffer(0, 3, *payload_data);
 
 				cmd.dispatch(blocks_x, blocks_y, 1);
@@ -600,7 +586,7 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 
 	size_in_packet += sizeof(BitstreamSequenceHeader);
 
-	for (int i = 0; i < block_count_64x64; i++)
+	for (int i = 0; i < block_count_32x32; i++)
 	{
 		size_t packet_size = meta[i].num_words * sizeof(uint32_t);
 		if (!packet_size)
@@ -621,6 +607,7 @@ size_t Encoder::Impl::compute_num_packets(const void *meta_, size_t packet_bound
 	return num_packets;
 }
 
+#if 0
 static int max_magnitude(const int (&values)[64][64], int off_x, int off_y, int w, int h)
 {
 	int max_magnitude = 0;
@@ -953,15 +940,16 @@ void Encoder::Impl::report_stats(const void *mapped_meta, const void *mapped_bit
 
 	analyze_alternative_packing(mapped_meta, mapped_bitstream);
 }
+#endif
 
 bool Encoder::Impl::validate_bitstream(
-		const uint32_t *bitstream, const BitstreamPacket *meta, uint32_t block_index) const
+		const uint32_t *bitstream_u32, const BitstreamPacket *meta, uint32_t block_index) const
 {
 	if (meta[block_index].num_words == 0)
 		return true;
 
-	bitstream += meta[block_index].offset_u32;
-	auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream);
+	bitstream_u32 += meta[block_index].offset_u32;
+	auto *header = reinterpret_cast<const BitstreamHeader *>(bitstream_u32);
 	if (header->block_index != block_index)
 	{
 		LOGI("Mismatch in block index. header: %u, meta: %u\n", header->block_index, block_index);
@@ -974,61 +962,53 @@ bool Encoder::Impl::validate_bitstream(
 		return false;
 	}
 
-	int blocks_16x16 = int(Util::popcount32(header->ballot));
-	auto *control_words = bitstream + 2;
-	uint32_t offset = 2 + blocks_16x16;
+	// 32x32 block layout:
+	// N = popcount(ballot)
+	// N * u16 control words. 2 bits per active 4x2 block.
+	// N * u8 control words. 4 bits Q, 4 bits quant scale.
+	// Plane data: M * u8.
+	// Tightly packed sign data follows. Depends on number of significant values while decoding plane data.
 
-	if (sizeof(*header) / sizeof(uint32_t) + blocks_16x16 > header->payload_words)
+	int blocks_8x8 = int(Util::popcount32(header->ballot));
+	auto *bitstream_u8 = reinterpret_cast<const uint8_t *>(bitstream_u32);
+	auto *block_control_words = reinterpret_cast<const uint16_t *>(bitstream_u32 + 2);
+	auto *q_control_words = reinterpret_cast<const uint8_t *>(block_control_words + blocks_8x8);
+	uint32_t offset = sizeof(BitstreamHeader) + 3 * blocks_8x8;
+
+	if (offset > header->payload_words * 4)
 	{
 		LOGE("payload_words is not large enough.\n");
 		return false;
 	}
 
-	const auto &mapping = block_64x64_to_16x16_mapping[header->block_index];
-
+	const auto &mapping = block_32x32_to_8x8_mapping[header->block_index];
 	bool invalid_packet = false;
+	int num_significant_values = 0;
 
 	Util::for_each_bit(header->ballot, [&](unsigned bit) {
 		int x = int(bit & 3);
 		int y = int(bit >> 2);
 
-		if (x < mapping.block_width_16x16 && y < mapping.block_height_16x16)
+		if (x < mapping.block_width_8x8 && y < mapping.block_height_8x8)
 		{
-			int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * y + x;
+			auto q_bits = *q_control_words & 0xf;
 
-			auto &mapping_16x16 = block_meta_16x16[block_16x16];
-
-			auto q_bits = (*control_words >> 16) & 0xf;
-			auto lsbs = *control_words & 0x5555u;
-			auto msbs = *control_words & 0xaaaau;
-
-			if ((lsbs & (mapping_16x16.block_mask << 0)) != lsbs)
+			for (int subblock_offset = 0; subblock_offset < 16; subblock_offset += 2)
 			{
-				LOGE("Invalid LSBs for block_index %u.\n", block_index);
-				invalid_packet = true;
+				int num_planes = q_bits + ((*block_control_words >> subblock_offset) & 3);
+				int plane_significance = 0;
+				for (int plane = 0; plane < num_planes; plane++)
+					plane_significance |= bitstream_u8[offset++];
+				num_significant_values += int(Util::popcount32(plane_significance));
 			}
 
-			if ((msbs & (mapping_16x16.block_mask << 1)) != msbs)
-			{
-				LOGE("Invalid MSBs for block_index %u.\n", block_index);
-				invalid_packet = true;
-			}
-
-			auto msbs_shift = msbs >> 1;
-			auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_16x16.block_mask : 0);
-			msbs |= msbs_shift;
-			auto cost = Util::popcount32(lsbs) +
-			            Util::popcount32(msbs) +
-			            Util::popcount32(sign_mask) +
-			            q_bits * mapping_16x16.in_bounds_subblocks;
-
-			offset += cost;
-			control_words++;
+			block_control_words++;
+			q_control_words++;
 		}
 		else
 		{
-			LOGE("block_index %u: 16x16 block is out of bounds. (%d, %d) >= (%d, %d)\n",
-			     block_index, x, y, mapping.block_width_16x16, mapping.block_height_16x16);
+			LOGE("block_index %u: 8x8 block is out of bounds. (%d, %d) >= (%d, %d)\n",
+			     block_index, x, y, mapping.block_width_8x8, mapping.block_height_8x8);
 			invalid_packet = true;
 		}
 	});
@@ -1036,9 +1016,14 @@ bool Encoder::Impl::validate_bitstream(
 	if (invalid_packet)
 		return false;
 
-	if (offset != header->payload_words)
+	// We expect this many sign bits to have come through.
+	offset += (num_significant_values + 7) / 8;
+
+	auto offset_words = (offset + 3) / 4;
+
+	if (offset_words != header->payload_words)
 	{
-		LOGE("Block index %u, offset %u != %u\n", block_index, offset, header->payload_words);
+		LOGE("Block index %u, offset %u != %u\n", block_index, offset_words, header->payload_words);
 		return false;
 	}
 
@@ -1060,7 +1045,7 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	(void)size;
 
 	size_t num_non_zero_blocks = 0;
-	for (int i = 0; i < block_count_64x64; i++)
+	for (int i = 0; i < block_count_32x32; i++)
 		if (meta[i].num_words != 0)
 			num_non_zero_blocks++;
 
@@ -1077,11 +1062,11 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	output_offset += sizeof(header);
 	size_in_packet += sizeof(header);
 
-	for (int i = 0; i < block_count_64x64; i++)
+	for (int i = 0; i < block_count_32x32; i++)
 		if (!validate_bitstream(input_bitstream, meta, i))
 			return false;
 
-	for (int i = 0; i < block_count_64x64; i++)
+	for (int i = 0; i < block_count_32x32; i++)
 	{
 		size_t packet_size = meta[i].num_words * sizeof(uint32_t);
 		if (!packet_size)
@@ -1113,29 +1098,12 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	return num_packets;
 }
 
-bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
+bool Encoder::Impl::encode_quant_and_coding(
+		Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
 {
-	sequence_count = (sequence_count + 1) & SequenceCountMask;
-
-	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-
 	cmd.enable_subgroup_size_control(true);
 
-	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
-	cmd.fill_buffer(*bucket_buffer, 0);
-	cmd.fill_buffer(*quant_buffer, 0);
-
-	if (!dwt(cmd, views))
-		return false;
-
-	// Don't need to read the payload offset counter until quantizer.
-	cmd.barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-	            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-
-	if (!quant(cmd))
+	if (!quant(cmd, quant_scale))
 		return false;
 
 	if (!analyze_rdo(cmd))
@@ -1144,11 +1112,51 @@ bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const B
 	if (!resolve_rdo(cmd, buffers.target_size))
 		return false;
 
-	if (!block_packing(cmd, buffers))
+	if (!block_packing(cmd, buffers, quant_scale))
 		return false;
 
 	cmd.enable_subgroup_size_control(false);
 	return true;
+}
+
+bool Encoder::Impl::encode_pre_transformed(
+		Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
+{
+	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
+	cmd.fill_buffer(*bucket_buffer, 0);
+	cmd.fill_buffer(*quant_buffer, 0);
+
+	// Don't need to read the payload offset counter until quantizer.
+	cmd.barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+	            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	return encode_quant_and_coding(cmd, buffers, quant_scale);
+}
+
+bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
+{
+	sequence_count = (sequence_count + 1) & SequenceCountMask;
+
+	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
+	cmd.fill_buffer(*bucket_buffer, 0);
+	cmd.fill_buffer(*quant_buffer, 0);
+
+	cmd.enable_subgroup_size_control(true);
+	if (!dwt(cmd, views))
+		return false;
+	cmd.enable_subgroup_size_control(false);
+
+	// Don't need to read the payload offset counter until quantizer.
+	cmd.barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+	            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	return encode_quant_and_coding(cmd, buffers, -1.0f);
 }
 
 Encoder::Encoder()
@@ -1196,6 +1204,16 @@ bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const Bitstre
 	return impl->encode(cmd, views, buffers);
 }
 
+const Vulkan::ImageView &Encoder::get_wavelet_band(int component, int level)
+{
+	return *impl->component_layer_views[component][level];
+}
+
+bool Encoder::encode_pre_transformed(Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
+{
+	return impl->encode_pre_transformed(cmd, buffers, quant_scale);
+}
+
 size_t Encoder::compute_num_packets(const void *meta, size_t packet_boundary) const
 {
 	return impl->compute_num_packets(meta, packet_boundary);
@@ -1210,12 +1228,12 @@ size_t Encoder::packetize(Packet *packets, size_t packet_boundary,
 
 void Encoder::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
 {
-	impl->report_stats(mapped_meta, mapped_bitstream);
+	//impl->report_stats(mapped_meta, mapped_bitstream);
 }
 
 uint64_t Encoder::get_meta_required_size() const
 {
-	return impl->block_count_64x64 * sizeof(BitstreamPacket);
+	return impl->block_count_32x32 * sizeof(BitstreamPacket);
 }
 
 Encoder::~Encoder()

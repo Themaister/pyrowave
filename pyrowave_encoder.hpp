@@ -35,8 +35,12 @@ public:
 	};
 
 	bool init(Vulkan::Device *device, int width, int height);
-	bool encode(Vulkan::CommandBuffer &cmd, const ViewBuffers &views,
-				const BitstreamBuffers &buffers);
+	bool encode(Vulkan::CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers);
+
+	// Debug hackery
+	const Vulkan::ImageView &get_wavelet_band(int component, int level);
+	bool encode_pre_transformed(Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
+	//
 
 	uint64_t get_meta_required_size() const;
 

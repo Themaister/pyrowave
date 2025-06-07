@@ -16,6 +16,8 @@
 #include "fft.hpp"
 #include "yuv4mpeg.hpp"
 #include "shaders/slangmosh.hpp"
+#include "math.hpp"
+#include "muglm/muglm_impl.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -51,7 +53,33 @@ static void run_encoder_test(Device &device,
 
 	{
 		auto cmd = device.request_command_buffer();
+#if 1
 		enc.encode(*cmd, inputs, buffers);
+#else
+		cmd->image_barrier(enc.get_wavelet_band(0, 0).get_image(),
+		                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+		                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+		                   VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+		cmd->clear_image(enc.get_wavelet_band(0, 0).get_image(), {});
+
+		cmd->barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+		             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+		auto *coeffs = static_cast<uint16_t *>(
+				cmd->update_image(enc.get_wavelet_band(0, 0).get_image(),
+				                  {}, { 16, 16, 1 }, 16, 256, { VK_IMAGE_ASPECT_COLOR_BIT, 4, 0, 1 }));
+
+		for (int y = 0; y < 16; y++)
+			for (int x = 0; x < 16; x++)
+				coeffs[16 * y + x] = floatToHalf((float(x) + (x ? 0.5f : 0.0f)) * (y & 1 ? -1.0f : 1.0f));
+
+		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+		             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+		enc.encode_pre_transformed(*cmd, buffers, 1.0f);
+#endif
+
 		cmd->copy_buffer(*bitstream_host, *bitstream);
 		cmd->copy_buffer(*meta_host, *meta);
 		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -92,9 +120,44 @@ static void run_encoder_test(Device &device,
 
 	assert(out_packets == num_packets);
 
+#if 0
+	struct DummyPacket
+	{
+		alignas(uint32_t) PyroWave::BitstreamHeader header;
+		uint16_t code[16];
+		uint8_t q[16];
+		uint8_t planes[16];
+		uint8_t signs[16];
+	};
+
+	DummyPacket packet = {};
+	packet.header.payload_words = sizeof(DummyPacket) / sizeof(uint32_t);
+	packet.header.ballot = 0xffff;
+	packet.header.quant_code = PyroWave::encode_quant(1.0f);
+	for (auto &c : packet.code)
+		c = 0x1;
+	for (auto &q : packet.q)
+		q = 6 << 4;
+	for (auto &p : packet.planes)
+		p = 0x7;
+	packet.signs[0] = 0xff;
+	packet.signs[1] = 0xff;
+	packet.signs[2] = 0xff;
+	packet.signs[3] = 0xff;
+	packet.signs[4] = 0xff;
+	dec.push_packet(&packet, sizeof(packet));
+
+	packet.header.block_index = 1;
+	dec.push_packet(&packet, sizeof(packet));
+	packet.header.block_index = 2;
+	dec.push_packet(&packet, sizeof(packet));
+#endif
+
+#if 1
 	for (auto &p : packets)
 		if (!dec.push_packet(reordered_packet_buffer.data() + p.offset, p.size))
 			return;
+#endif
 
 	BufferHandle out_buffers[3];
 	for (int i = 0; i < 3; i++)
@@ -108,8 +171,8 @@ static void run_encoder_test(Device &device,
 
 	{
 		auto cmd = device.request_command_buffer();
-		if (!dec.decode_is_ready(false))
-			return;
+		//if (!dec.decode_is_ready(false))
+		//	return;
 		if (!dec.decode(*cmd, outputs))
 			return;
 
@@ -435,9 +498,7 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 		}
 
 		device.submit(cmd);
-
 		run_encoder_test(device, enc, dec, inputs.views, outputs.views, bitstream_size, output);
-
 		frames++;
 		if (has_rdoc && frames >= 10)
 			break;
