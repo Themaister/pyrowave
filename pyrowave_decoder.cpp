@@ -17,10 +17,10 @@ struct DequantizerPushData
 {
 	ivec2 resolution;
 	int32_t output_layer;
-	int32_t block_offset_16x16;
-	int32_t block_stride_16x16;
-	int32_t block_offset_64x64;
-	int32_t block_stride_64x64;
+	int32_t block_offset_8x8;
+	int32_t block_stride_8x8;
+	int32_t block_offset_32x32;
+	int32_t block_stride_32x32;
 };
 
 struct Decoder::Impl : public WaveletBuffers
@@ -110,31 +110,31 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 			payload_words + header->payload_words -
 			blocks_16x16 - sizeof(*header) / sizeof(uint32_t));
 
-	const auto &mapping = block_64x64_to_16x16_mapping[header->block_index];
+	const auto &mapping = block_32x32_to_8x8_mapping[header->block_index];
 	bool invalid_packet = false;
 
 	Util::for_each_bit(header->ballot, [&](unsigned bit) {
 		int x = int(bit & 3);
 		int y = int(bit >> 2);
 
-		if (x < mapping.block_width_16x16 && y < mapping.block_height_16x16)
+		if (x < mapping.block_width_8x8 && y < mapping.block_height_8x8)
 		{
-			int block_16x16 = mapping.block_offset_16x16 + mapping.block_stride_16x16 * y + x;
-			meta_buffer_cpu[block_16x16].offset = offset;
-			meta_buffer_cpu[block_16x16].code_word = *control_words;
+			int block_8x8 = mapping.block_offset_8x8 + mapping.block_stride_8x8 * y + x;
+			meta_buffer_cpu[block_8x8].offset = offset;
+			meta_buffer_cpu[block_8x8].code_word = *control_words;
 
-			auto &mapping_16x16 = block_meta_16x16[block_16x16];
+			auto &mapping_8x8 = block_meta_8x8[block_8x8];
 
 			auto q_bits = (*control_words >> 16) & 0xf;
-			auto lsbs = *control_words & (mapping_16x16.block_mask << 0);
-			auto msbs = *control_words & (mapping_16x16.block_mask << 1);
+			auto lsbs = *control_words & (mapping_8x8.block_mask << 0);
+			auto msbs = *control_words & (mapping_8x8.block_mask << 1);
 			auto msbs_shift = msbs >> 1;
-			auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_16x16.block_mask : 0);
+			auto sign_mask = (msbs_shift | lsbs) | (q_bits ? mapping_8x8.block_mask : 0);
 			msbs |= msbs_shift;
 			auto cost = Util::popcount32(lsbs) +
 			            Util::popcount32(msbs) +
 			            Util::popcount32(sign_mask) +
-			            q_bits * mapping_16x16.in_bounds_subblocks;
+			            q_bits * mapping_8x8.in_bounds_subblocks;
 
 			offset += cost;
 			control_words++;
@@ -142,7 +142,7 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 		else
 		{
 			LOGE("16x16 block is out of bounds. (%d, %d) >= (%d, %d)\n",
-			     x, y, mapping.block_width_16x16, mapping.block_height_16x16);
+			     x, y, mapping.block_width_8x8, mapping.block_height_8x8);
 			invalid_packet = true;
 		}
 	});
@@ -248,9 +248,9 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 			last_seq = header->sequence;
 		}
 
-		if (header->block_index >= uint32_t(block_count_64x64))
+		if (header->block_index >= uint32_t(block_count_32x32))
 		{
-			LOGE("block_index %u is out of bounds (>= %d).\n", header->block_index, block_count_64x64);
+			LOGE("block_index %u is out of bounds (>= %d).\n", header->block_index, block_count_32x32);
 			return false;
 		}
 
@@ -278,17 +278,17 @@ void Decoder::Impl::init_block_meta()
 	info.domain = BufferDomain::Device;
 	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-	info.size = block_count_16x16 * sizeof(BlockMeta);
+	info.size = block_count_8x8 * sizeof(BlockMeta);
 	meta_buffer = device->create_buffer(info);
 	device->set_name(*meta_buffer, "meta-buffer");
-	meta_buffer_cpu.resize(block_count_16x16);
+	meta_buffer_cpu.resize(block_count_8x8);
 
 	payload_data_cpu.reserve(1024 * 1024);
 
-	info.size = block_count_64x64 * sizeof(float);
+	info.size = block_count_32x32 * sizeof(float);
 	quant_data = device->create_buffer(info);
 	device->set_name(*quant_data, "quant-buffer");
-	quant_data_cpu.resize(block_count_64x64);
+	quant_data_cpu.resize(block_count_32x32);
 }
 
 bool Decoder::Impl::dequant(CommandBuffer &cmd)
@@ -338,10 +338,10 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 				push.resolution.x = wavelet_img->get_width(level);
 				push.resolution.y = wavelet_img->get_height(level);
 				push.output_layer = band;
-				push.block_offset_16x16 = block_meta[component][level][band].block_offset_16x16;
-				push.block_stride_16x16 = block_meta[component][level][band].block_stride_16x16;
-				push.block_offset_64x64 = block_meta[component][level][band].block_offset_64x64;
-				push.block_stride_64x64 = block_meta[component][level][band].block_stride_64x64;
+				push.block_offset_8x8 = block_meta[component][level][band].block_offset_8x8;
+				push.block_stride_8x8 = block_meta[component][level][band].block_stride_8x8;
+				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
+				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
 				cmd.push_constants(&push, 0, sizeof(push));
 
 				cmd.set_storage_texture(0, 0, *component_layer_views[component][level]);
@@ -495,7 +495,7 @@ void Decoder::Impl::clear()
 	std::fill(quant_data_cpu.begin(), quant_data_cpu.end(), 0.0f);
 	decoded_blocks = 0;
 	decoded_frame_for_current_sequence = false;
-	total_blocks_in_sequence = block_count_64x64;
+	total_blocks_in_sequence = block_count_32x32;
 	payload_data_cpu.clear();
 }
 

@@ -133,7 +133,7 @@ float compute_square_error(float v, int q, out uint num_significant_values)
         iv += 0.5;
     iv = ldexp(iv, q);
     float err = v - iv;
-    return subgroupAdd(err * err);
+    return err * err;
 }
 
 struct QuantResult
@@ -179,6 +179,11 @@ QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float
     return result;
 }
 
+float square(float v)
+{
+    return v * v;
+}
+
 void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1)
 {
     float max_wave_texels = subgroupMax(max(abs(texel0), abs(texel1)));
@@ -206,6 +211,7 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         {
             block_meta.meta[block_index] = BlockMeta(0, 0);
             block_stats.stats[block_index].num_planes = 0;
+            block_stats.stats[block_index].errors[0] = QuantStats(float16_t(0.0), uint16_t(0));
         }
         return;
     }
@@ -244,7 +250,7 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         block_meta.meta[block_index] = BlockMeta(code_word, global_offset);
         block_stats.stats[block_index].num_planes = msb + 1;
         block_stats.stats[block_index].errors[0] = QuantStats(
-            float16_t(result0.square_error + result1.square_error),
+            float16_t(0.0), // We don't care about distortion from 0 quant since we've already made that decision.
             uint16_t(result0.encode_cost_late_bits + result1.encode_cost_late_bits));
     }
 
@@ -252,10 +258,19 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
     {
         result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant, in_range0);
         result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant, in_range1);
-        block_stats.stats[block_index].errors[q] = QuantStats(
-            float16_t(result0.square_error + result1.square_error),
-            uint16_t(result0.encode_cost_late_bits + result1.encode_cost_late_bits));
+        float square_error = subgroupAdd(result0.square_error + result1.square_error);
+
+        if (subgroupElect())
+        {
+            block_stats.stats[block_index].errors[q] = QuantStats(
+                float16_t(square_error),
+                uint16_t(result0.encode_cost_late_bits + result1.encode_cost_late_bits));
+        }
     }
+
+    float square_error = subgroupAdd(square(texel0 * inv_quant) + square(texel1 * inv_quant));
+    if (subgroupElect())
+        block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(square_error), uint16_t(0));
 
     if (in_range0)
     {

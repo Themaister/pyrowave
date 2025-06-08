@@ -38,14 +38,14 @@ struct QuantizerPushData
 struct BlockPackingPushData
 {
 	ivec2 resolution;
-	ivec2 resolution_64x64_blocks;
-	ivec2 resolution_16x16_blocks;
+	ivec2 resolution_32x32_blocks;
+	ivec2 resolution_8x8_blocks;
 	uint32_t quant_resolution_code;
 	uint32_t sequence_count;
-	uint32_t block_offset_64x64;
-	uint32_t block_stride_64x64;
-	uint32_t block_offset_16x16;
-	uint32_t block_stride_16x16;
+	uint32_t block_offset_32x32;
+	uint32_t block_stride_32x32;
+	uint32_t block_offset_8x8;
+	uint32_t block_stride_8x8;
 };
 
 struct AnalyzeRateControlPushData
@@ -236,8 +236,8 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 			{
 				BlockPackingPushData packing_push = {};
 				packing_push.resolution = ivec2(level_width, level_height);
-				packing_push.resolution_64x64_blocks = ivec2((level_width + 63) / 64, (level_height + 63) / 64);
-				packing_push.resolution_16x16_blocks = ivec2((level_width + 15) / 16, (level_height + 15) / 16);
+				packing_push.resolution_32x32_blocks = ivec2((level_width + 31) / 32, (level_height + 31) / 32);
+				packing_push.resolution_8x8_blocks = ivec2((level_width + 7) / 8, (level_height + 7) / 8);
 
 				auto quant_res = get_quant_resolution(level, component, band);
 				packing_push.quant_resolution_code = encode_quant(1.0f / quant_res);
@@ -245,14 +245,14 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 
 				auto &meta = block_meta[component][level][band];
 
-				packing_push.block_offset_64x64 = meta.block_offset_64x64;
-				packing_push.block_stride_64x64 = meta.block_stride_64x64;
-				packing_push.block_offset_16x16 = meta.block_offset_16x16;
-				packing_push.block_stride_16x16 = meta.block_stride_16x16;
+				packing_push.block_offset_32x32 = meta.block_offset_32x32;
+				packing_push.block_stride_32x32 = meta.block_stride_32x32;
+				packing_push.block_offset_8x8 = meta.block_offset_8x8;
+				packing_push.block_stride_8x8 = meta.block_stride_8x8;
 				cmd.push_constants(&packing_push, 0, sizeof(packing_push));
 
-				cmd.dispatch((packing_push.resolution_64x64_blocks.x + 1) / 2,
-				             (packing_push.resolution_64x64_blocks.y + 1) / 2,
+				cmd.dispatch((packing_push.resolution_32x32_blocks.x + 1) / 2,
+				             (packing_push.resolution_32x32_blocks.y + 1) / 2,
 				             1);
 			}
 
@@ -312,7 +312,7 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 	} push = {};
 
 	push.target_payload_size = target_payload_size / sizeof(uint32_t);
-	push.num_blocks_per_subdivision = compute_block_count_per_subdivision(block_count_64x64);
+	push.num_blocks_per_subdivision = compute_block_count_per_subdivision(block_count_32x32);
 	cmd.push_constants(&push, 0, sizeof(push));
 	cmd.set_storage_buffer(0, 0, *bucket_buffer);
 	cmd.set_storage_buffer(0, 1, *quant_buffer);
@@ -381,8 +381,7 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				cmd.push_constants(&push, 0, sizeof(push));
 
 				cmd.set_storage_buffer(0, 0, *bucket_buffer);
-				cmd.set_storage_buffer(0, 1, *meta_buffer);
-				cmd.set_storage_buffer(0, 2, *block_stat_buffer);
+				cmd.set_storage_buffer(0, 1, *block_stat_buffer);
 
 				cmd.dispatch((level_width + 31) / 32, (level_height + 31) / 32, 1);
 			}
@@ -1212,7 +1211,7 @@ void Encoder::report_stats(const void *mapped_meta, const void *mapped_bitstream
 
 uint64_t Encoder::get_meta_required_size() const
 {
-	return impl->block_count_64x64 * sizeof(BitstreamPacket);
+	return impl->block_count_32x32 * sizeof(BitstreamPacket);
 }
 
 Encoder::~Encoder()

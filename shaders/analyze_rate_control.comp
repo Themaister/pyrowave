@@ -35,11 +35,6 @@ layout(set = 0, binding = 0) coherent buffer Buckets
     RDOperation rdo_operations[];
 } buckets;
 
-layout(set = 0, binding = 1) readonly buffer SSBOMeta
-{
-    BlockMeta meta[];
-} block_meta;
-
 struct QuantStats
 {
     float16_t square_error;
@@ -52,7 +47,7 @@ struct BlockStats
     QuantStats errors[15];
 };
 
-layout(set = 0, binding = 2) readonly buffer SSBOBlockStats
+layout(set = 0, binding = 1) readonly buffer SSBOBlockStats
 {
     BlockStats stats[];
 } block_stats;
@@ -179,17 +174,14 @@ void main()
         float dist = 0.0;
         uint cost = 0;
 
-        if (i < num_active_planes)
-        {
-            QuantStats stats = block_stats.stats[block_index_8x8].errors[i];
-            dist = float(stats.square_error) * registers.rdo_distortion_scale;
-            cost = uint(stats.payload_cost);
+        QuantStats stats = block_stats.stats[block_index_8x8].errors[min(i, num_active_planes)];
+        dist = float(stats.square_error) * registers.rdo_distortion_scale;
+        cost = uint(stats.payload_cost);
 
-            // 16 bits to encode the control codes, 8 bits to encode Q bits + quant scale.
-            // Cost is encoded in terms of bits. 8x8 blocks are decoded in isolation.
-            if (cost != 0)
-                cost = 3 + ((cost + 7) / 8);
-        }
+        // 16 bits to encode the control codes, 8 bits to encode Q bits + quant scale.
+        // Cost is encoded in terms of bits. 8x8 blocks are decoded in isolation.
+        if (cost != 0)
+            cost += 24;
 
         if (gl_SubgroupSize == 16)
         {
@@ -219,10 +211,10 @@ void main()
             // Need to encode a header.
             // We can eliminate 32x32 blocks if everything decodes to 0.
             if (cost != 0)
-                cost += 2;
+                cost += 16;
 
             // Each packet is aligned to 4 bytes for practical reasons.
-            cost = (cost + 3u) & ~3u;
+            cost = (cost + 31u) & ~31u;
 
             shared_rate_cost[i] = cost;
             shared_distortion[i] = dist;
