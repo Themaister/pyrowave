@@ -55,7 +55,7 @@ layout(set = 0, binding = 2) readonly buffer SSBOMeta
 layout(set = 0, binding = 3) buffer Payloads
 {
     layout(offset = 4) uint bitstream_payload_counter;
-    layout(offset = 8) uint data[];
+    layout(offset = 8) uint8_t data[];
 } payload_data;
 
 struct QuantStats
@@ -146,7 +146,7 @@ uint copy_bytes(inout uint output_offset, uint input_offset, uint count)
         uint in_data = uint(payload_data.data[input_offset++]);
         // If we observe any 1 in the non-sign planes, it's not deadzone quantized.
         significant_mask |= in_data;
-        bitstream_data.data[output_offset++] = in_data;
+        bitstream_data_8b.data[output_offset++] = uint8_t(in_data);
         count--;
     } while (count > 0);
 
@@ -165,9 +165,7 @@ uint inclusive_add_clustered16(uint v)
 {
     for (uint i = 1; i < 16; i *= 2)
     {
-        // Ensure monotonic progression for buckets.
-        // Separate every quant level out by at least one bucket.
-        uint up = subgroupShuffleUp(v, i) + i;
+        uint up = subgroupShuffleUp(v, i);
         v += gl_SubgroupInvocationID >= i ? up : 0;
     }
 
@@ -312,7 +310,7 @@ void main()
     uint total_sign_bits = inclusive_add_clustered16(required_sign_bits);
     uint local_planes_offset = inclusive_add_clustered16(required_plane_bytes) - required_plane_bytes;
     uint local_sign_offset = total_sign_bits - required_sign_bits;
-    uint global_planes_offset = 4 * global_payload_offset + 3 * total_subblocks + local_planes_offset;
+    uint global_planes_offset = 4 * global_payload_offset + 3 * total_subblocks + local_planes_offset + 4 * HeaderSize;
     uint global_sign_offset = global_planes_offset + subgroupClusteredAdd(required_plane_bytes, 16);
 
     uint total_sign_bytes = (subgroupShuffle(total_sign_bits, gl_SubgroupInvocationID | 15u) + 7) / 8;
@@ -354,9 +352,9 @@ void main()
 
         flush_sign_plane(linear_block_32x32_index, local_sign_offset);
 
-        bitstream_data_16b.data[2 * global_payload_offset + block_header_offset] =
+        bitstream_data_16b.data[2 * global_payload_offset + block_header_offset + 2 * HeaderSize] =
             uint16_t(code_word);
-        bitstream_data_8b.data[4 * global_payload_offset + 2 * total_subblocks + block_header_offset] =
+        bitstream_data_8b.data[4 * global_payload_offset + 2 * total_subblocks + block_header_offset + 4 * HeaderSize] =
             uint8_t(code_word >> 16);
     }
 

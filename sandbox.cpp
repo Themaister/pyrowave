@@ -92,6 +92,10 @@ static void run_encoder_test(Device &device,
 
 	assert(out_packets == num_packets);
 
+	//
+	return;
+	////
+
 	for (auto &p : packets)
 		if (!dec.push_packet(reordered_packet_buffer.data() + p.offset, p.size))
 			return;

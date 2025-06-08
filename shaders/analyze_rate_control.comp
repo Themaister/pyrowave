@@ -8,6 +8,8 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
+#extension GL_EXT_debug_printf : require
+
 #include "dwt_quant_scale.h"
 #include "constants.h"
 
@@ -164,8 +166,6 @@ void main()
 
     if (block8x8_in_range)
         num_active_planes = block_stats.stats[block_index_8x8].num_planes;
-    else
-        num_active_planes = 0;
 
     uint bit_index = index >> 4;
 
@@ -174,9 +174,12 @@ void main()
         float dist = 0.0;
         uint cost = 0;
 
-        QuantStats stats = block_stats.stats[block_index_8x8].errors[min(i, num_active_planes)];
-        dist = float(stats.square_error) * registers.rdo_distortion_scale;
-        cost = uint(stats.payload_cost);
+        if (block8x8_in_range)
+        {
+            QuantStats stats = block_stats.stats[block_index_8x8].errors[min(i, num_active_planes)];
+            dist = float(stats.square_error) * registers.rdo_distortion_scale;
+            cost = uint(stats.payload_cost);
+        }
 
         // 16 bits to encode the control codes, 8 bits to encode Q bits + quant scale.
         // Cost is encoded in terms of bits. 8x8 blocks are decoded in isolation.
@@ -187,11 +190,6 @@ void main()
         {
             cost = subgroupAdd(cost);
             dist = subgroupAdd(dist);
-            if (subgroupElect())
-            {
-                shared_rate_cost[i] = cost;
-                shared_distortion[i] = dist;
-            }
         }
         else
         {
@@ -214,9 +212,7 @@ void main()
                 cost += 16;
 
             // Each packet is aligned to 4 bytes for practical reasons.
-            cost = (cost + 31u) & ~31u;
-
-            shared_rate_cost[i] = cost;
+            shared_rate_cost[i] = (cost + 31) >> 5;
             shared_distortion[i] = dist;
         }
     }
