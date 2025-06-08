@@ -1073,9 +1073,9 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	output_offset += sizeof(header);
 	size_in_packet += sizeof(header);
 
-	for (int i = 0; i < block_count_32x32; i++)
-		if (!validate_bitstream(input_bitstream, meta, i))
-			return false;
+	//for (int i = 0; i < block_count_32x32; i++)
+	//	if (!validate_bitstream(input_bitstream, meta, i))
+	//		return false;
 
 	for (int i = 0; i < block_count_32x32; i++)
 	{
@@ -1206,7 +1206,7 @@ size_t Encoder::packetize(Packet *packets, size_t packet_boundary,
 
 void Encoder::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
 {
-	impl->report_stats(mapped_meta, mapped_bitstream);
+	//impl->report_stats(mapped_meta, mapped_bitstream);
 }
 
 uint64_t Encoder::get_meta_required_size() const

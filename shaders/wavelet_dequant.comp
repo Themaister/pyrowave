@@ -129,14 +129,9 @@ float decode_payload64(BlockMeta meta, uint block_mask, bool in_range)
 
     if (in_range)
     {
-        float deadzone = float(bitfieldExtract(control_word, DEADZONE_STRENGTH_OFFSET, DEADZONE_STRENGTH_BITS)) / 128.0;
         v = float(decoded_abs);
-
         if (v != 0.0)
             v += 0.5;
-        else if (need_sign)
-            v += deadzone;
-
         v *= 1.0 - 2.0 * float(decoded_sign);
     }
     else
@@ -209,13 +204,9 @@ float decode_payload_generic(BlockMeta meta, uint block_mask, uint index)
         payload = payload_data.data[word_offset];
     }
 
-    float deadzone = float(bitfieldExtract(control_word, DEADZONE_STRENGTH_OFFSET, DEADZONE_STRENGTH_BITS)) / 128.0;
-
     float v = float(decoded_abs);
     if (v != 0.0)
         v += 0.5;
-    else if (need_sign)
-        v += deadzone;
 
     v *= 1.0 - 2.0 * float(decoded_sign);
     return v;

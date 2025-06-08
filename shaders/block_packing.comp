@@ -84,7 +84,7 @@ layout(push_constant) uniform Registers
 {
     ivec2 resolution;
     ivec2 resolution_32x32_blocks;
-    ivec2 resolution_32x32_blocks;
+    ivec2 resolution_8x8_blocks;
     uint quant_resolution_code;
     uint sequence_code;
     int block_offset_32x32;
@@ -137,20 +137,20 @@ uint quantize_code_word(uint control_word, int quant)
     return control_word;
 }
 
-uint copy_words(inout uint output_offset, uint input_offset, uint count)
+uint copy_bytes(inout uint output_offset, uint input_offset, uint count)
 {
-    uint quant_to_zero_mask = ~0u;
+    uint significant_mask = 0;
 
     do
     {
-        uint in_data = payload_data.data[input_offset++];
+        uint in_data = uint(payload_data.data[input_offset++]);
         // If we observe any 1 in the non-sign planes, it's not deadzone quantized.
-        quant_to_zero_mask &= ~in_data;
+        significant_mask |= in_data;
         bitstream_data.data[output_offset++] = in_data;
         count--;
     } while (count > 0);
 
-    return quant_to_zero_mask;
+    return significant_mask;
 }
 
 uint modify_quant_code(uint code, int quant)
@@ -198,7 +198,7 @@ void append_sign_plane(uint bank, inout uint local_sign_offset, uint sign_mask, 
             else
             {
                 atomicAnd(shared_sign_bank[bank][local_sign_offset / 32], ~pending_sign_mask);
-                atomicOr(shared_sign_bank[bank][local_sign_offset / 32], pending_sign_write);
+                atomicOr(shared_sign_bank[bank][local_sign_offset / 32], pending_sign_write & pending_sign_mask);
             }
 
             pending_sign_mask = 0;
@@ -208,12 +208,12 @@ void append_sign_plane(uint bank, inout uint local_sign_offset, uint sign_mask, 
     }
 }
 
-void flush_sign_plane(uint local_sign_offset)
+void flush_sign_plane(uint bank, uint local_sign_offset)
 {
     if (pending_sign_mask != 0)
     {
         atomicAnd(shared_sign_bank[bank][local_sign_offset / 32], ~pending_sign_mask);
-        atomicOr(shared_sign_bank[bank][local_sign_offset / 32], pending_sign_write);
+        atomicOr(shared_sign_bank[bank][local_sign_offset / 32], pending_sign_write & pending_sign_mask);
         pending_sign_mask = 0;
     }
 }
@@ -257,11 +257,11 @@ void main()
 
     if (in_range_8x8)
     {
-        int block_index = registers.block_offset_16x16 +
-            registers.block_stride_16x16 * block16x16_index.y +
-            block16x16_index.x;
+        int block_index = registers.block_offset_8x8 +
+            registers.block_stride_8x8 * block8x8_index.y +
+            block8x8_index.x;
         meta = block_meta.meta[block_index];
-        num_bits_for_q = block_stats.stats[quant].payload_cost;
+        num_bits_for_q = uint(block_stats.stats[block_index].errors[quant].payload_cost);
     }
     else
     {
@@ -275,7 +275,7 @@ void main()
     local_ballot = bitfieldExtract(local_ballot, int(16u * (linear_block_32x32_index & 1u)), 16);
 
     uint required_plane_bytes = compute_required_8x8_size(code_word, block_mask, in_range_subblocks);
-    uint required_sign_bits = num_bits_for_q - required_plane_size * 8;
+    uint required_sign_bits = num_bits_for_q - required_plane_bytes * 8;
 
     uint required_bits_with_meta = num_bits_for_q;
     if (required_bits_with_meta != 0)
@@ -292,7 +292,7 @@ void main()
 
     uint global_payload_offset = 0;
     if (writes_header)
-        global_payload_offset = atomicAdd(payload_data.bitstream_payload_counter, packet_total_words);
+        global_payload_offset = atomicAdd(payload_data.bitstream_payload_counter, payload_total_words);
     global_payload_offset = subgroupShuffle(global_payload_offset, gl_SubgroupInvocationID | 15u);
 
     if (writes_header)
@@ -301,10 +301,10 @@ void main()
             block32x32_index.y * registers.block_stride_32x32 + block32x32_index.x;
 
         bitstream_data.data[global_payload_offset + 0] =
-            local_ballot | (packet_size << 16) | (registers.sequence_code << 28);
+            local_ballot | (payload_total_words << 16) | (registers.sequence_code << 28);
         bitstream_data.data[global_payload_offset + 1] =
             modify_quant_code(registers.quant_resolution_code, quant) | (block_index << 8);
-        bitstream_meta.packets[block_index] = BitstreamPacket(global_payload_offset, packet_size);
+        bitstream_meta.packets[block_index] = BitstreamPacket(global_payload_offset, payload_total_words);
     }
 
     uint total_subblocks = bitCount(local_ballot);
@@ -315,7 +315,7 @@ void main()
     uint global_planes_offset = 4 * global_payload_offset + 3 * total_subblocks + local_planes_offset;
     uint global_sign_offset = global_planes_offset + subgroupClusteredAdd(required_plane_bytes, 16);
 
-    total_sign_bytes = (subgroupShuffle(total_sign_bits, gl_SubgroupInvocationID | 15u) + 7) / 8;
+    uint total_sign_bytes = (subgroupShuffle(total_sign_bits, gl_SubgroupInvocationID | 15u) + 7) / 8;
 
     // Followed by N code words which map to the local ballot of active 16x16 regions.
     if (code_word != 0)
@@ -352,7 +352,7 @@ void main()
             }
         }
 
-        flush_sign_plane(local_sign_offset);
+        flush_sign_plane(linear_block_32x32_index, local_sign_offset);
 
         bitstream_data_16b.data[2 * global_payload_offset + block_header_offset] =
             uint16_t(code_word);
