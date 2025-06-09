@@ -4,6 +4,7 @@
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_16bit_storage : require
 
@@ -52,8 +53,8 @@ mat2x4 decode_payload(uint code_word, uint q_bits, uint offset, uint block_index
     int bit_offset = 2 * int(block_index);
 
     // First, we need to compute the offset that our 4x2 block starts on.
-    uint lsbs = control_word & 0x5555u;
-    uint msbs = control_word & 0xaaaau;
+    uint lsbs = code_word & 0x5555u;
+    uint msbs = code_word & 0xaaaau;
     uint msbs_shift = msbs >> 1;
     msbs |= msbs_shift;
 
@@ -97,16 +98,28 @@ shared uint shared_sign_offset;
 shared uint shared_plane_byte_offsets[16];
 shared uint shared_sign_scan[8];
 
+const int MaxScaleExp = 4;
+
+float decode_quant(uint quant_code)
+{
+    // Custom FP formulation for numbers in (0, 2) range.
+    int e = MaxScaleExp - int(quant_code >> 3);
+    int m = int(quant_code) & 0x7;
+    float inv_quant = (1.0 / (8.0 * 1024.0 * 1024.0)) * float((8 + m) * (1 << (20 + e)));
+    return inv_quant;
+}
+
 void main()
 {
     uint local_index = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
 
-    int block_index_32x32 = registers.block_offset_32x32 +
+    int block_index_32x32 = int(registers.block_offset_32x32 +
         gl_WorkGroupID.y * registers.block_stride_32x32 +
-        gl_WorkGroupID.x;
+        gl_WorkGroupID.x);
 
     uint offset_u32 = payload_offsets.data[block_index_32x32];
     uint ballot = payload_data_u32.data[offset_u32] & 0xffff;
+    uint q_code = payload_data_u32.data[offset_u32 + 1] & 0xff;
 
     if (local_index < 16)
     {
@@ -189,7 +202,7 @@ void main()
         }
     }
 
-    float q = 1.0; // TODO
+    float q = decode_quant(q_code);
     float inv_scale = q * decode_quant_scale(bitfieldExtract(control_word2, QUANT_SCALE_OFFSET - 16, QUANT_SCALE_BITS));
 
     ivec2 coord = ivec2(gl_WorkGroupID.xy) * 32;

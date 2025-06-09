@@ -23,9 +23,9 @@ struct DequantizerPushData
 
 struct Decoder::Impl : public WaveletBuffers
 {
-	BufferHandle dequant_meta_buffer, payload_data;
+	BufferHandle dequant_offset_buffer, payload_data;
 
-	std::vector<uint32_t> dequant_meta_buffer_cpu;
+	std::vector<uint32_t> dequant_offset_buffer_cpu;
 	std::vector<uint32_t> payload_data_cpu;
 	int decoded_blocks = 0;
 	int total_blocks_in_sequence = 0;
@@ -78,7 +78,7 @@ void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 
 bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 {
-	auto &offset = dequant_meta_buffer_cpu[header->block_index];
+	auto &offset = dequant_offset_buffer_cpu[header->block_index];
 	if (offset == UINT32_MAX)
 	{
 		decoded_blocks++;
@@ -229,7 +229,7 @@ void Decoder::Impl::init_block_meta()
 
 	info.size = block_count_32x32 * sizeof(uint32_t);
 	dequant_offset_buffer = device->create_buffer(info);
-	device->set_name(*dequant_meta_buffer, "meta-buffer");
+	device->set_name(*dequant_offset_buffer, "meta-buffer");
 	dequant_offset_buffer_cpu.resize(block_count_32x32);
 
 	payload_data_cpu.reserve(1024 * 1024);
@@ -287,7 +287,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 				cmd.push_constants(&push, 0, sizeof(push));
 
 				cmd.set_storage_texture(0, 0, *component_layer_views[component][level]);
-				cmd.set_storage_buffer(0, 1, *dequant_meta_buffer);
+				cmd.set_storage_buffer(0, 1, *dequant_offset_buffer);
 				cmd.set_storage_buffer(0, 2, *payload_data);
 				cmd.dispatch((push.resolution.x + 15) / 16, (push.resolution.y + 15) / 16, 1);
 			}
@@ -409,8 +409,11 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 	cmd.begin_region("Decode uploads");
 	{
 		upload_payload(cmd);
-		memcpy(cmd.update_buffer(*dequant_meta_buffer, 0, dequant_meta_buffer_cpu.size() * sizeof(dequant_meta_buffer_cpu.front())),
-		       dequant_meta_buffer_cpu.data(), dequant_meta_buffer_cpu.size() * sizeof(dequant_meta_buffer_cpu.front()));
+
+		memcpy(cmd.update_buffer(*dequant_offset_buffer, 0,
+		                         dequant_offset_buffer_cpu.size() * sizeof(dequant_offset_buffer_cpu.front())),
+		       dequant_offset_buffer_cpu.data(), dequant_offset_buffer_cpu.size() * sizeof(dequant_offset_buffer_cpu.front()));
+
 		cmd.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 		            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
 	}
@@ -430,7 +433,7 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 
 void Decoder::Impl::clear()
 {
-	std::fill(dequant_meta_buffer_cpu.begin(), dequant_meta_buffer_cpu.end(), UINT32_MAX);
+	std::fill(dequant_offset_buffer_cpu.begin(), dequant_offset_buffer_cpu.end(), UINT32_MAX);
 	decoded_blocks = 0;
 	decoded_frame_for_current_sequence = false;
 	total_blocks_in_sequence = block_count_32x32;
