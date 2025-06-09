@@ -254,6 +254,11 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 				cmd.dispatch((packing_push.resolution_32x32_blocks.x + 1) / 2,
 				             (packing_push.resolution_32x32_blocks.y + 1) / 2,
 				             1);
+
+#if 0
+				cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+							VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+#endif
 			}
 
 			cmd.end_region();
@@ -311,7 +316,7 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 		uint32_t num_blocks_per_subdivision;
 	} push = {};
 
-	push.target_payload_size = target_payload_size & ~3u;
+	push.target_payload_size = target_payload_size / sizeof(uint32_t);
 	push.num_blocks_per_subdivision = compute_block_count_per_subdivision(block_count_32x32);
 	cmd.push_constants(&push, 0, sizeof(push));
 	cmd.set_storage_buffer(0, 0, *bucket_buffer);
@@ -469,7 +474,13 @@ bool Encoder::Impl::quant(CommandBuffer &cmd)
 				cmd.set_storage_buffer(0, 2, *block_stat_buffer);
 				cmd.set_storage_buffer(0, 3, *payload_data);
 
+#if 1
 				cmd.dispatch(blocks_x, blocks_y, 1);
+#else
+				cmd.dispatch(1, 1, 1);
+				cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+				            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+#endif
 			}
 
 			cmd.end_region();

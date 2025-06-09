@@ -10,6 +10,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_debug_printf : require
 
 #include "constants.h"
 
@@ -143,13 +144,16 @@ uint copy_bytes(inout uint output_offset, uint input_offset, uint count)
 
     do
     {
-        uint in_data = uint(payload_data.data[input_offset++]);
+        uint in_data = uint(payload_data.data[input_offset]);
         // If we observe any 1 in the non-sign planes, it's not deadzone quantized.
         significant_mask |= in_data;
+        debugPrintfEXT("Writing payload to word %f = %02x, input byte %u", 0.25 * float(output_offset), in_data, input_offset);
         bitstream_data_8b.data[output_offset++] = uint8_t(in_data);
         count--;
+        input_offset++;
     } while (count > 0);
 
+    debugPrintfEXT("Returning significance %02x", significant_mask);
     return significant_mask;
 }
 
@@ -166,7 +170,7 @@ uint inclusive_add_clustered16(uint v)
     for (uint i = 1; i < 16; i *= 2)
     {
         uint up = subgroupShuffleUp(v, i);
-        v += gl_SubgroupInvocationID >= i ? up : 0;
+        v += (gl_SubgroupInvocationID & 15) >= i ? up : 0;
     }
 
     return v;
@@ -303,6 +307,7 @@ void main()
         bitstream_data.data[global_payload_offset + 1] =
             modify_quant_code(registers.quant_resolution_code, quant) | (block_index << 8);
         bitstream_meta.packets[block_index] = BitstreamPacket(global_payload_offset, payload_total_words);
+        debugPrintfEXT("Writing header to word %u", global_payload_offset);
     }
 
     uint total_subblocks = bitCount(local_ballot);
@@ -310,8 +315,11 @@ void main()
     uint total_sign_bits = inclusive_add_clustered16(required_sign_bits);
     uint local_planes_offset = inclusive_add_clustered16(required_plane_bytes) - required_plane_bytes;
     uint local_sign_offset = total_sign_bits - required_sign_bits;
-    uint global_planes_offset = 4 * global_payload_offset + 3 * total_subblocks + local_planes_offset + 4 * HeaderSize;
+    uint global_planes_offset = 4 * global_payload_offset + 3 * total_subblocks + 4 * HeaderSize;
     uint global_sign_offset = global_planes_offset + subgroupClusteredAdd(required_plane_bytes, 16);
+    global_planes_offset += local_planes_offset;
+
+    debugPrintfEXT("Q: %d, Total sign bits %u", quant, total_sign_bits);
 
     uint total_sign_bytes = (subgroupShuffle(total_sign_bits, gl_SubgroupInvocationID | 15u) + 7) / 8;
 
@@ -338,15 +346,13 @@ void main()
 
                 if (out_planes != 0 && in_planes != 0)
                 {
+                    debugPrintfEXT("Reading sign plane from %u", input_offset);
                     uint sign_plane = uint(payload_data.data[input_offset]);
                     uint significant_mask = copy_bytes(output_offset, input_offset + 1, out_planes);
-                    input_offset += in_planes - out_planes;
                     append_sign_plane(linear_block_32x32_index, local_sign_offset, sign_plane, significant_mask);
                 }
-                else
-                {
-                    input_offset += in_planes;
-                }
+
+                input_offset += in_planes;
             }
         }
 
@@ -356,6 +362,8 @@ void main()
             uint16_t(code_word);
         bitstream_data_8b.data[4 * global_payload_offset + 2 * total_subblocks + block_header_offset + 4 * HeaderSize] =
             uint8_t(code_word >> 16);
+        debugPrintfEXT("Writing u16 code to word %f", 0.5 * float(2 * global_payload_offset + block_header_offset + 2 * HeaderSize));
+        debugPrintfEXT("Writing u8 q to word %f", 0.25 * float(4 * global_payload_offset + 2 * total_subblocks + block_header_offset + 4 * HeaderSize));
     }
 
     subgroupBarrier();
@@ -369,6 +377,7 @@ void main()
         bitstream_data_8b.data[offset_8b + 1] = uint8_t(sign_word >> 8);
         bitstream_data_8b.data[offset_8b + 2] = uint8_t(sign_word >> 16);
         bitstream_data_8b.data[offset_8b + 3] = uint8_t(sign_word >> 24);
+        debugPrintfEXT("Writing sign 4x to word %f", 0.25 * float(offset_8b));
     }
 
     // Copy out any stragglers.
@@ -377,5 +386,6 @@ void main()
         uint sign_word = shared_sign_bank[linear_block_32x32_index][i / 4];
         uint offset_8b = global_sign_offset + i;
         bitstream_data_8b.data[offset_8b] = uint8_t(sign_word >> (8 * (i & 3u)));
+        debugPrintfEXT("Writing sign 1x to word %f", 0.25 * float(offset_8b));
     }
 }

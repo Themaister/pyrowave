@@ -10,6 +10,7 @@
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+#extension GL_EXT_debug_printf : require
 
 #include "dwt_quant_scale.h"
 #include "constants.h"
@@ -174,6 +175,9 @@ QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float
         result.block4x2_shifted = 0;
     }
 
+    if (subgroupElect())
+        debugPrintfEXT("Q %d: Num significants %u", q, num_significants);
+
     result.encode_cost_early += findMSB(result.block4x2_shifted) + 1;
     result.encode_cost_late_bits = subgroupAdd(max(result.encode_cost_early - 1, 0)) + int(num_significants);
     return result;
@@ -233,8 +237,12 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         global_offset = atomicAdd(payload_data.counter, scan1);
     global_offset = subgroupBroadcast(global_offset, gl_SubgroupSize - 1);
 
+    scan0 -= result0.encode_cost_early;
+    scan1 -= result1.encode_cost_early;
+
     // First, encode the code word.
-    uint code_word = result0.quality_planes << Q_PLANES_OFFSET;
+    int quality_planes = result0.quality_planes;
+    uint code_word = quality_planes << Q_PLANES_OFFSET;
     code_word = bitfieldInsert(code_word, quant_code, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS);
     uint plane_code0 = findMSB(result0.block4x2_shifted) + 1;
     uint plane_code1 = findMSB(result1.block4x2_shifted) + 1;
@@ -256,15 +264,15 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
 
     for (int q = 1; q <= msb; q++)
     {
-        result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant, in_range0);
-        result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant, in_range1);
-        float square_error = subgroupAdd(result0.square_error + result1.square_error);
+        QuantResult quant_result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant, in_range0);
+        QuantResult quant_result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant, in_range1);
+        float square_error = subgroupAdd(quant_result0.square_error + quant_result1.square_error);
 
         if (subgroupElect())
         {
             block_stats.stats[block_index].errors[q] = QuantStats(
                 float16_t(square_error),
-                uint16_t(result0.encode_cost_late_bits + result1.encode_cost_late_bits));
+                uint16_t(quant_result0.encode_cost_late_bits + quant_result1.encode_cost_late_bits));
         }
     }
 
@@ -274,47 +282,55 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
 
     if (in_range0)
     {
-        uint word_offset0 = scan0 - result0.encode_cost_early + global_offset;
-        bool need_sign0 = result0.block4x2_shifted != 0 || result0.quality_planes != 0;
+        uint byte_offset0 = scan0 + global_offset;
+        bool need_sign0 = result0.block4x2_shifted != 0 || quality_planes != 0;
 
         // Don't pack the sign plane until final pass, since we don't know how we quantize yet.
         if (need_sign0)
         {
-            encode_bits(int(texel0 < 0.0), word_offset0);
-            word_offset0++;
+            if ((gl_SubgroupInvocationID & 7) == 0)
+                debugPrintfEXT("Encode sign to %u, local offset %u", byte_offset0, scan0);
+            encode_bits(int(texel0 < 0.0), byte_offset0);
+            byte_offset0++;
         }
 
-        int plane_iterations0 = result0.quality_planes + int(plane_code0);
+        int plane_iterations0 = quality_planes + int(plane_code0);
         for (int q = plane_iterations0 - 1; q >= 0; q--)
         {
-            encode_bits(bitfieldExtract(uint(abs_quant_texel0), q, 1), word_offset0);
-            word_offset0++;
+            if ((gl_SubgroupInvocationID & 7) == 0)
+                debugPrintfEXT("Encode byte to %u, local offset %u", byte_offset0, scan0);
+            encode_bits(bitfieldExtract(uint(abs_quant_texel0), q, 1), byte_offset0);
+            byte_offset0++;
         }
     }
 
     if (in_range1)
     {
-        uint word_offset1 = scan1 - result1.encode_cost_early + global_offset;
-        bool need_sign1 = result1.block4x2_shifted != 0 || result1.quality_planes != 0;
+        uint byte_offset1 = scan1 + global_offset;
+        bool need_sign1 = result1.block4x2_shifted != 0 || quality_planes != 0;
 
         if (need_sign1)
         {
-            encode_bits(int(texel1 < 0.0), word_offset1);
-            word_offset1++;
+            if ((gl_SubgroupInvocationID & 7) == 0)
+                debugPrintfEXT("Encode sign to %u, local offset %u", byte_offset1, scan1);
+            encode_bits(int(texel1 < 0.0), byte_offset1);
+            byte_offset1++;
         }
 
-        int plane_iterations1 = result1.quality_planes + int(plane_code1);
+        int plane_iterations1 = quality_planes + int(plane_code1);
         for (int q = plane_iterations1 - 1; q >= 0; q--)
         {
-            encode_bits(bitfieldExtract(uint(abs_quant_texel1), q, 1), word_offset1);
-            word_offset1++;
+            if ((gl_SubgroupInvocationID & 7) == 0)
+                debugPrintfEXT("Encode byte to %u, local offset %u", byte_offset1, scan1);
+            encode_bits(bitfieldExtract(uint(abs_quant_texel1), q, 1), byte_offset1);
+            byte_offset1++;
         }
     }
 }
 
 void main()
 {
-    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * 16;
+    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * 8;
 
 #if 0
     if (gl_SubgroupSize == 64)
