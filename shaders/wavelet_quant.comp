@@ -255,6 +255,7 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
 
     if (subgroupElect())
     {
+        debugPrintfEXT("Code word %08x", code_word);
         block_meta.meta[block_index] = BlockMeta(code_word, global_offset);
         block_stats.stats[block_index].num_planes = msb + 1;
         block_stats.stats[block_index].errors[0] = QuantStats(
@@ -276,6 +277,7 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         }
     }
 
+    // Record distortion for throwing away everything.
     float square_error = subgroupAdd(square(texel0 * inv_quant) + square(texel1 * inv_quant));
     if (subgroupElect())
         block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(square_error), uint16_t(0));
@@ -288,8 +290,6 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         // Don't pack the sign plane until final pass, since we don't know how we quantize yet.
         if (need_sign0)
         {
-            if ((gl_SubgroupInvocationID & 7) == 0)
-                debugPrintfEXT("Encode sign to %u, local offset %u", byte_offset0, scan0);
             encode_bits(int(texel0 < 0.0), byte_offset0);
             byte_offset0++;
         }
@@ -297,8 +297,6 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         int plane_iterations0 = quality_planes + int(plane_code0);
         for (int q = plane_iterations0 - 1; q >= 0; q--)
         {
-            if ((gl_SubgroupInvocationID & 7) == 0)
-                debugPrintfEXT("Encode byte to %u, local offset %u", byte_offset0, scan0);
             encode_bits(bitfieldExtract(uint(abs_quant_texel0), q, 1), byte_offset0);
             byte_offset0++;
         }
@@ -311,8 +309,6 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
 
         if (need_sign1)
         {
-            if ((gl_SubgroupInvocationID & 7) == 0)
-                debugPrintfEXT("Encode sign to %u, local offset %u", byte_offset1, scan1);
             encode_bits(int(texel1 < 0.0), byte_offset1);
             byte_offset1++;
         }
@@ -320,8 +316,6 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
         int plane_iterations1 = quality_planes + int(plane_code1);
         for (int q = plane_iterations1 - 1; q >= 0; q--)
         {
-            if ((gl_SubgroupInvocationID & 7) == 0)
-                debugPrintfEXT("Encode byte to %u, local offset %u", byte_offset1, scan1);
             encode_bits(bitfieldExtract(uint(abs_quant_texel1), q, 1), byte_offset1);
             byte_offset1++;
         }

@@ -7,6 +7,7 @@
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
 #extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_KHR_shader_subgroup_clustered : require
+#extension GL_KHR_shader_subgroup_vote : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_shader_8bit_storage : require
@@ -109,6 +110,7 @@ uint quantize_code_word(uint control_word, int quant)
     if (quant != 0 && control_word != 0)
     {
         int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
+        debugPrintfEXT("q_bits = %d", q_bits);
         int sub_quant = min(q_bits, quant);
         q_bits -= sub_quant;
         quant -= sub_quant;
@@ -121,6 +123,10 @@ uint quantize_code_word(uint control_word, int quant)
             uint plane1 = (control_word & 0xaaaau) >> 1;
             uint plane2 = plane0 & plane1;
 
+            debugPrintfEXT("pre plane0 = %x", plane0);
+            debugPrintfEXT("pre plane1 = %x", plane1);
+            debugPrintfEXT("pre plane2 = %x", plane2);
+
             do
             {
                 plane0 = plane1;
@@ -129,7 +135,12 @@ uint quantize_code_word(uint control_word, int quant)
                 quant--;
             } while (quant != 0);
 
-            control_word = plane0 | (plane1 << 1);
+            plane0 &= ~plane1;
+
+            debugPrintfEXT("post plane0 = %x", plane0);
+            debugPrintfEXT("post plane1 = %x", plane1);
+
+            control_word = bitfieldInsert(control_word, plane0 | (plane1 << 1), 0, 16);
         }
 
         control_word = bitfieldInsert(control_word, uint(q_bits), Q_PLANES_OFFSET, Q_PLANES_BITS);
@@ -271,6 +282,7 @@ void main()
     }
 
     uint code_word = quantize_code_word(meta.code_word, quant);
+    debugPrintfEXT("Quantizing code word q = %d: %x -> %x", quant, meta.code_word, code_word);
 
     uvec4 code_word_ballot = subgroupBallot(code_word != 0);
     uint local_ballot = gl_SubgroupSize >= 64 && linear_block_32x32_index >= 2 ? code_word_ballot.y : code_word_ballot.x;
@@ -278,6 +290,13 @@ void main()
 
     uint required_plane_bytes = compute_required_8x8_size(code_word, block_mask, in_range_subblocks);
     uint required_sign_bits = num_bits_for_q - required_plane_bytes * 8;
+
+    if (subgroupAny(int(required_sign_bits) < 0))
+    {
+        if (int(required_sign_bits) < 0)
+            debugPrintfEXT("!!!! %u - %u * 8 < 0, code word %08x", num_bits_for_q, required_plane_bytes * 8, code_word);
+        return;
+    }
 
     uint required_bits_with_meta = num_bits_for_q;
     if (required_bits_with_meta != 0)
