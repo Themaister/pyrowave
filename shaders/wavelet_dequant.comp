@@ -5,30 +5,25 @@
 #extension GL_KHR_shader_subgroup_ballot : require
 #extension GL_KHR_shader_subgroup_vote : require
 
-layout(local_size_x = 256) in;
+layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) writeonly uniform image2DArray uDequantImg;
 
-struct BlockMeta
+struct DequantMeta
 {
-    uint code_word;
-    uint offset;
+    uint offset_u32;
+    float q;
 };
 
-layout(set = 0, binding = 1) readonly buffer SSBOMeta
+layout(set = 0, binding = 1) readonly buffer SSBODequantMeta
 {
-    BlockMeta meta[];
-} block_meta;
+    DequantMeta meta[];
+} dequant_meta;
 
 layout(set = 0, binding = 2) readonly buffer Payloads
 {
     uint data[];
 } payload_data;
-
-layout(set = 0, binding = 3) readonly buffer Quant
-{
-    float data[];
-} quant_data;
 
 #include "dwt_swizzle.h"
 #include "dwt_quant_scale.h"
@@ -38,10 +33,8 @@ layout(push_constant) uniform Registers
 {
     ivec2 resolution;
     int output_layer;
-    int block_offset_16x16;
-    int block_stride_16x16;
-    int block_offset_64x64;
-    int block_stride_64x64;
+    int block_offset_32x32;
+    int block_stride_32x32;
 } registers;
 
 int decode_bits32(uint payload)
@@ -215,19 +208,20 @@ float decode_payload_generic(BlockMeta meta, uint block_mask, uint index)
 void main()
 {
     uint local_index = gl_SubgroupInvocationID + gl_SubgroupID * gl_SubgroupSize;
-    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * 16;
+    ivec2 base_coord = ivec2(gl_WorkGroupID.xy) * 32;
 
-    BlockMeta meta = block_meta.meta[
-        registers.block_offset_16x16 +
-        gl_WorkGroupID.y * registers.block_stride_16x16 +
-        gl_WorkGroupID.x];
+    int block_index_32x32 = registers.block_offset_32x32 +
+        gl_WorkGroupID.y * registers.block_stride_32x32 +
+        gl_WorkGroupID.x;
 
-    ivec2 local_coord = unswizzle16x16_dequant(local_index);
+    DequantMeta meta = dequant_meta.meta[block_index_32x32];
+
+    ivec2 local_coord = unswizzle8x8(local_index);
     float v;
 
-    bool in_range = all(lessThan((base_coord + local_coord) & ivec2(~7, ~3), registers.resolution));
+    bool in_range = all(lessThan((base_coord + local_coord) & ivec2(-4, -2), registers.resolution));
 
-    ivec2 active_block_res = min(registers.resolution - 16 * ivec2(gl_WorkGroupID.xy), ivec2(16));
+    ivec2 active_block_res = min(registers.resolution - 8 * ivec2(gl_WorkGroupID.xy), ivec2(16));
     int active_subblocks_x = (active_block_res.x + 7) >> 3;
     int active_subblocks_y = (active_block_res.y + 3) >> 2;
     int in_range_subblocks = active_subblocks_x * active_subblocks_y;
@@ -248,11 +242,7 @@ void main()
             v = 0.0;
     }
 
-    v *= quant_data.data[
-        registers.block_offset_64x64 +
-        (gl_WorkGroupID.y >> 2) * registers.block_stride_64x64 +
-        (gl_WorkGroupID.x >> 2)];
-
+    v *= meta.q;
     v *= decode_quant_scale(bitfieldExtract(meta.code_word, QUANT_SCALE_OFFSET, QUANT_SCALE_BITS));
 
     imageStore(uDequantImg, ivec3(base_coord + local_coord, registers.output_layer), vec4(v));
