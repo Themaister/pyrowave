@@ -164,13 +164,6 @@ struct WaveletBuffers
 	};
 	BlockInfo block_meta[NumComponents][DecompositionLevels][4] = {};
 
-	struct BlockInfo8x8
-	{
-		uint32_t block_mask;
-		int in_bounds_subblocks;
-	};
-	std::vector<BlockInfo8x8> block_meta_8x8;
-
 	struct BlockMapping
 	{
 		int block_offset_8x8;
@@ -197,6 +190,5 @@ protected:
 
 private:
 	void accumulate_block_mapping(int blocks_x_8x8, int blocks_y_8x8);
-	void accumulate_block_8x8_mapping(int level_width, int level_height);
 };
 }

@@ -95,14 +95,14 @@ layout(push_constant) uniform Registers
     int block_stride_8x8;
 } registers;
 
-uint compute_required_8x8_size(uint control_word, uint block_mask, int in_range_subblocks)
+uint compute_required_8x8_size(uint control_word)
 {
     int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
     uint lsbs = control_word & 0x5555u;
     uint msbs = control_word & 0xaaaau;
     uint msbs_shift = msbs >> 1;
     msbs |= msbs_shift;
-    return bitCount(lsbs) + bitCount(msbs) + q_bits * in_range_subblocks;
+    return bitCount(lsbs) + bitCount(msbs) + q_bits * 8;
 }
 
 uint quantize_code_word(uint control_word, int quant)
@@ -235,14 +235,6 @@ void main()
     BlockMeta meta;
     int quant;
 
-    ivec2 active_block_res = min(registers.resolution - 8 * block8x8_index, ivec2(8));
-    int active_subblocks_x = (active_block_res.x + 3) >> 2;
-    int active_subblocks_y = (active_block_res.y + 1) >> 1;
-    int in_range_subblocks = active_subblocks_x * active_subblocks_y;
-    uint block_mask = bitfieldExtract(0x5555u, 0, 2 * active_subblocks_y);
-    if (active_subblocks_x == 2)
-        block_mask |= block_mask << 8;
-
     bool in_range_8x8 = all(lessThan(block8x8_index, registers.resolution_8x8_blocks));
     bool in_range_32x32 = all(lessThan(block32x32_index, registers.resolution_32x32_blocks));
     uint num_bits_for_q = 0;
@@ -279,7 +271,7 @@ void main()
     uint local_ballot = gl_SubgroupSize >= 64 && linear_block_32x32_index >= 2 ? code_word_ballot.y : code_word_ballot.x;
     local_ballot = bitfieldExtract(local_ballot, int(16u * (linear_block_32x32_index & 1u)), 16);
 
-    uint required_plane_bytes = compute_required_8x8_size(code_word, block_mask, in_range_subblocks);
+    uint required_plane_bytes = compute_required_8x8_size(code_word);
     uint required_sign_bits = num_bits_for_q - required_plane_bytes * 8;
 
     uint required_bits_with_meta = num_bits_for_q;
@@ -338,25 +330,22 @@ void main()
         uint input_offset = meta.offset;
         uint output_offset = global_planes_offset;
 
-        for (int x = 0; x < active_subblocks_x; x++)
+        for (int bit_offset = 0; bit_offset < 16; bit_offset += 2)
         {
-            for (int y = 0; y < active_subblocks_y; y++)
+            uint out_planes = bitfieldExtract(code_word, bit_offset, 2) + out_q_bits;
+            uint in_planes = bitfieldExtract(meta.code_word, bit_offset, 2) + in_q_bits;
+            if (in_planes != 0)
+                in_planes++;
+
+            uint sign_plane = uint(payload_data.data[input_offset]);
+
+            if (out_planes != 0)
             {
-                int bit_offset = x * 8 + y * 2;
-                uint out_planes = bitfieldExtract(code_word, bit_offset, 2) + out_q_bits;
-                uint in_planes = bitfieldExtract(meta.code_word, bit_offset, 2) + in_q_bits;
-                if (in_planes != 0)
-                    in_planes++;
-
-                if (out_planes != 0)
-                {
-                    uint sign_plane = uint(payload_data.data[input_offset]);
-                    uint significant_mask = copy_bytes(output_offset, input_offset + 1, out_planes);
-                    append_sign_plane(linear_block_32x32_index, local_sign_offset, sign_plane, significant_mask);
-                }
-
-                input_offset += in_planes;
+                uint significant_mask = copy_bytes(output_offset, input_offset + 1, out_planes);
+                append_sign_plane(linear_block_32x32_index, local_sign_offset, sign_plane, significant_mask);
             }
+
+            input_offset += in_planes;
         }
 
         flush_sign_plane(linear_block_32x32_index, local_sign_offset);

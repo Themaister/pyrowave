@@ -1008,35 +1008,15 @@ bool Encoder::Impl::validate_bitstream(
 
 		if (x < mapping.block_width_8x8 && y < mapping.block_height_8x8)
 		{
-			int block_8x8 = mapping.block_offset_8x8 + mapping.block_stride_8x8 * y + x;
-			auto &mapping_8x8 = block_meta_8x8[block_8x8];
-
 			auto q_bits = *q_control_words & 0xf;
-			auto lsbs = *block_control_words & 0x5555u;
-			auto msbs = *block_control_words & 0xaaaau;
-
-			if ((lsbs & (mapping_8x8.block_mask << 0)) != lsbs)
-			{
-				LOGE("Invalid LSBs for block_index %u.\n", block_index);
-				invalid_packet = true;
-			}
-
-			if ((msbs & (mapping_8x8.block_mask << 1)) != msbs)
-			{
-				LOGE("Invalid MSBs for block_index %u.\n", block_index);
-				invalid_packet = true;
-			}
 
 			for (int subblock_offset = 0; subblock_offset < 16; subblock_offset += 2)
 			{
 				int num_planes = q_bits + ((*block_control_words >> subblock_offset) & 3);
-				if (((mapping_8x8.block_mask >> subblock_offset) & 3) != 0)
-				{
-					int plane_significance = 0;
-					for (int plane = 0; plane < num_planes; plane++)
-						plane_significance |= bitstream_u8[offset++];
-					num_significant_values += int(Util::popcount32(plane_significance));
-				}
+				int plane_significance = 0;
+				for (int plane = 0; plane < num_planes; plane++)
+					plane_significance |= bitstream_u8[offset++];
+				num_significant_values += int(Util::popcount32(plane_significance));
 			}
 
 			block_control_words++;

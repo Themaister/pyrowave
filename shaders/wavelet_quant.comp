@@ -146,7 +146,7 @@ struct QuantResult
     int quality_planes;
 };
 
-QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float inv_quant, bool in_range)
+QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float inv_quant)
 {
     block4x2_max >>= q;
 
@@ -169,15 +169,6 @@ QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float
         result.block4x2_shifted >>= result.quality_planes;
     }
 
-    if (!in_range)
-    {
-        result.encode_cost_early = 0;
-        result.block4x2_shifted = 0;
-    }
-
-    if (subgroupElect())
-        debugPrintfEXT("Q %d: Num significants %u", q, num_significants);
-
     result.encode_cost_early += findMSB(result.block4x2_shifted) + 1;
     result.encode_cost_late_bits = subgroupAdd(max(result.encode_cost_early - 1, 0)) + int(num_significants);
     return result;
@@ -188,7 +179,7 @@ float square(float v)
     return v * v;
 }
 
-void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1)
+void encode_payload32(float texel0, float texel1)
 {
     float max_wave_texels = subgroupMax(max(abs(texel0), abs(texel1)));
     float quant_scale;
@@ -224,8 +215,8 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
     int block4x2_0 = compute_block4x2_max(abs_quant_texel0);
     int block4x2_1 = compute_block4x2_max(abs_quant_texel1);
 
-    QuantResult result0 = compute_quant_stats(texel0, 0, msb, block4x2_0, inv_quant, in_range0);
-    QuantResult result1 = compute_quant_stats(texel1, 0, msb, block4x2_1, inv_quant, in_range1);
+    QuantResult result0 = compute_quant_stats(texel0, 0, msb, block4x2_0, inv_quant);
+    QuantResult result1 = compute_quant_stats(texel1, 0, msb, block4x2_1, inv_quant);
     int scan0 = scan_strided(result0.encode_cost_early);
     int scan1 = scan_strided(result1.encode_cost_early);
     scan1 += subgroupBroadcast(scan0, gl_SubgroupSize - 1);
@@ -265,8 +256,8 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
 
     for (int q = 1; q <= msb; q++)
     {
-        QuantResult quant_result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant, in_range0);
-        QuantResult quant_result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant, in_range1);
+        QuantResult quant_result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant);
+        QuantResult quant_result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant);
         float square_error = subgroupAdd(quant_result0.square_error + quant_result1.square_error);
 
         if (subgroupElect())
@@ -282,43 +273,37 @@ void encode_payload32(float texel0, float texel1, bool in_range0, bool in_range1
     if (subgroupElect())
         block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(square_error), uint16_t(0));
 
-    if (in_range0)
+    uint byte_offset0 = scan0 + global_offset;
+    bool need_sign0 = result0.block4x2_shifted != 0 || quality_planes != 0;
+
+    // Don't pack the sign plane until final pass, since we don't know how we quantize yet.
+    if (need_sign0)
     {
-        uint byte_offset0 = scan0 + global_offset;
-        bool need_sign0 = result0.block4x2_shifted != 0 || quality_planes != 0;
-
-        // Don't pack the sign plane until final pass, since we don't know how we quantize yet.
-        if (need_sign0)
-        {
-            encode_bits(int(texel0 < 0.0), byte_offset0);
-            byte_offset0++;
-        }
-
-        int plane_iterations0 = quality_planes + int(plane_code0);
-        for (int q = plane_iterations0 - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uint(abs_quant_texel0), q, 1), byte_offset0);
-            byte_offset0++;
-        }
+        encode_bits(int(texel0 < 0.0), byte_offset0);
+        byte_offset0++;
     }
 
-    if (in_range1)
+    int plane_iterations0 = quality_planes + int(plane_code0);
+    for (int q = plane_iterations0 - 1; q >= 0; q--)
     {
-        uint byte_offset1 = scan1 + global_offset;
-        bool need_sign1 = result1.block4x2_shifted != 0 || quality_planes != 0;
+        encode_bits(bitfieldExtract(uint(abs_quant_texel0), q, 1), byte_offset0);
+        byte_offset0++;
+    }
 
-        if (need_sign1)
-        {
-            encode_bits(int(texel1 < 0.0), byte_offset1);
-            byte_offset1++;
-        }
+    uint byte_offset1 = scan1 + global_offset;
+    bool need_sign1 = result1.block4x2_shifted != 0 || quality_planes != 0;
 
-        int plane_iterations1 = quality_planes + int(plane_code1);
-        for (int q = plane_iterations1 - 1; q >= 0; q--)
-        {
-            encode_bits(bitfieldExtract(uint(abs_quant_texel1), q, 1), byte_offset1);
-            byte_offset1++;
-        }
+    if (need_sign1)
+    {
+        encode_bits(int(texel1 < 0.0), byte_offset1);
+        byte_offset1++;
+    }
+
+    int plane_iterations1 = quality_planes + int(plane_code1);
+    for (int q = plane_iterations1 - 1; q >= 0; q--)
+    {
+        encode_bits(bitfieldExtract(uint(abs_quant_texel1), q, 1), byte_offset1);
+        byte_offset1++;
     }
 }
 
@@ -354,11 +339,7 @@ void main()
         float scaled_texel0 = texel0 * registers.quant_resolution;
         float scaled_texel1 = texel1 * registers.quant_resolution;
 
-        ivec2 snapped_top_left = top_left_coord & ivec2(-4, -2);
-
-        bool in_range0 = all(lessThan(snapped_top_left, registers.resolution));
-        bool in_range1 = all(lessThan(snapped_top_left + ivec2(4, 0), registers.resolution));
-        encode_payload32(scaled_texel0, scaled_texel1, in_range0, in_range1);
+        encode_payload32(scaled_texel0, scaled_texel1);
     }
 #if 0
     else if (gl_SubgroupSize == 16)
