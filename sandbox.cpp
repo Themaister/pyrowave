@@ -92,31 +92,40 @@ static void run_encoder_test(Device &device,
 
 	assert(out_packets == num_packets);
 
+#if 0
 	struct DummyPacket
 	{
 		alignas(uint32_t) PyroWave::BitstreamHeader header;
-		uint16_t code[2];
-		uint8_t q[2];
-		uint8_t planes[4];
-		uint8_t signs[1];
+		uint16_t code[16];
+		uint8_t q[16];
+		uint8_t planes[16];
+		uint8_t signs[16];
 	};
 
 	DummyPacket packet = {};
 	packet.header.payload_words = sizeof(DummyPacket) / sizeof(uint32_t);
-	packet.header.ballot = (1 << 0) | (1 << 4);
+	packet.header.ballot = 0xffff;
 	packet.header.quant_code = PyroWave::encode_quant(1.0f);
-	packet.code[0] = 0x11;
-	packet.code[1] = 0x11;
-	packet.q[0] = 6 << 4;
-	packet.q[1] = 7 << 4;
-	packet.planes[0] = 0x2;
-	packet.planes[1] = 0x3;
-	packet.planes[2] = 0x2;
-	packet.planes[3] = 0x3;
-	packet.signs[0] = 0x0e;
+	for (auto &c : packet.code)
+		c = 0x1;
+	for (auto &q : packet.q)
+		q = 6 << 4;
+	for (auto &p : packet.planes)
+		p = 0x7;
+	packet.signs[0] = 0xff;
+	packet.signs[1] = 0xff;
+	packet.signs[2] = 0xff;
+	packet.signs[3] = 0xff;
+	packet.signs[4] = 0xff;
 	dec.push_packet(&packet, sizeof(packet));
 
-#if 0
+	packet.header.block_index = 1;
+	dec.push_packet(&packet, sizeof(packet));
+	packet.header.block_index = 2;
+	dec.push_packet(&packet, sizeof(packet));
+#endif
+
+#if 1
 	for (auto &p : packets)
 		if (!dec.push_packet(reordered_packet_buffer.data() + p.offset, p.size))
 			return;

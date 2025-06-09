@@ -284,7 +284,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 				cmd.set_storage_texture(0, 0, *component_layer_views[component][level]);
 				cmd.set_storage_buffer(0, 1, *dequant_offset_buffer);
 				cmd.set_storage_buffer(0, 2, *payload_data);
-				cmd.dispatch((push.resolution.x + 15) / 16, (push.resolution.y + 15) / 16, 1);
+				cmd.dispatch((push.resolution.x + 31) / 32, (push.resolution.y + 31) / 32, 1);
 			}
 
 			cmd.end_region();
