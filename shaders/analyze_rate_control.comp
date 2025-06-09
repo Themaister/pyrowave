@@ -209,7 +209,7 @@ void main()
             // Need to encode a header.
             // We can eliminate 32x32 blocks if everything decodes to 0.
             if (cost != 0)
-                cost += 16;
+                cost += 64;
 
             // Each packet is aligned to 4 bytes for practical reasons.
             shared_rate_cost[i] = (cost + 31) >> 5;

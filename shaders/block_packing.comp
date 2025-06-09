@@ -110,7 +110,6 @@ uint quantize_code_word(uint control_word, int quant)
     if (quant != 0 && control_word != 0)
     {
         int q_bits = int(bitfieldExtract(control_word, Q_PLANES_OFFSET, Q_PLANES_BITS));
-        debugPrintfEXT("q_bits = %d", q_bits);
         int sub_quant = min(q_bits, quant);
         q_bits -= sub_quant;
         quant -= sub_quant;
@@ -123,10 +122,6 @@ uint quantize_code_word(uint control_word, int quant)
             uint plane1 = (control_word & 0xaaaau) >> 1;
             uint plane2 = plane0 & plane1;
 
-            debugPrintfEXT("pre plane0 = %x", plane0);
-            debugPrintfEXT("pre plane1 = %x", plane1);
-            debugPrintfEXT("pre plane2 = %x", plane2);
-
             do
             {
                 plane0 = plane1;
@@ -137,10 +132,8 @@ uint quantize_code_word(uint control_word, int quant)
 
             plane0 &= ~plane1;
 
-            debugPrintfEXT("post plane0 = %x", plane0);
-            debugPrintfEXT("post plane1 = %x", plane1);
-
-            control_word = bitfieldInsert(control_word, plane0 | (plane1 << 1), 0, 16);
+            uint new_control_word = plane0 | (plane1 << 1);
+            control_word = bitfieldInsert(control_word, new_control_word, 0, 16);
         }
 
         control_word = bitfieldInsert(control_word, uint(q_bits), Q_PLANES_OFFSET, Q_PLANES_BITS);
@@ -158,13 +151,11 @@ uint copy_bytes(inout uint output_offset, uint input_offset, uint count)
         uint in_data = uint(payload_data.data[input_offset]);
         // If we observe any 1 in the non-sign planes, it's not deadzone quantized.
         significant_mask |= in_data;
-        debugPrintfEXT("Writing payload to word %f = %02x, input byte %u", 0.25 * float(output_offset), in_data, input_offset);
         bitstream_data_8b.data[output_offset++] = uint8_t(in_data);
         count--;
         input_offset++;
     } while (count > 0);
 
-    debugPrintfEXT("Returning significance %02x", significant_mask);
     return significant_mask;
 }
 
@@ -282,21 +273,14 @@ void main()
     }
 
     uint code_word = quantize_code_word(meta.code_word, quant);
-    debugPrintfEXT("Quantizing code word q = %d: %x -> %x", quant, meta.code_word, code_word);
+    bool active_code_word = (code_word & 0xffffu) != 0;
 
-    uvec4 code_word_ballot = subgroupBallot(code_word != 0);
+    uvec4 code_word_ballot = subgroupBallot(active_code_word);
     uint local_ballot = gl_SubgroupSize >= 64 && linear_block_32x32_index >= 2 ? code_word_ballot.y : code_word_ballot.x;
     local_ballot = bitfieldExtract(local_ballot, int(16u * (linear_block_32x32_index & 1u)), 16);
 
     uint required_plane_bytes = compute_required_8x8_size(code_word, block_mask, in_range_subblocks);
     uint required_sign_bits = num_bits_for_q - required_plane_bytes * 8;
-
-    if (subgroupAny(int(required_sign_bits) < 0))
-    {
-        if (int(required_sign_bits) < 0)
-            debugPrintfEXT("!!!! %u - %u * 8 < 0, code word %08x", num_bits_for_q, required_plane_bytes * 8, code_word);
-        return;
-    }
 
     uint required_bits_with_meta = num_bits_for_q;
     if (required_bits_with_meta != 0)
@@ -312,7 +296,7 @@ void main()
         payload_total_words += HeaderSize;
 
     uint global_payload_offset = 0;
-    if (writes_header)
+    if (writes_header && payload_total_words != 0)
         global_payload_offset = atomicAdd(payload_data.bitstream_payload_counter, payload_total_words);
     global_payload_offset = subgroupShuffle(global_payload_offset, gl_SubgroupInvocationID | 15u);
 
@@ -321,12 +305,15 @@ void main()
         uint block_index = registers.block_offset_32x32 +
             block32x32_index.y * registers.block_stride_32x32 + block32x32_index.x;
 
-        bitstream_data.data[global_payload_offset + 0] =
-            local_ballot | (payload_total_words << 16) | (registers.sequence_code << 28);
-        bitstream_data.data[global_payload_offset + 1] =
-            modify_quant_code(registers.quant_resolution_code, quant) | (block_index << 8);
+        if (payload_total_words != 0)
+        {
+            bitstream_data.data[global_payload_offset + 0] =
+                local_ballot | (payload_total_words << 16) | (registers.sequence_code << 28);
+            bitstream_data.data[global_payload_offset + 1] =
+                modify_quant_code(registers.quant_resolution_code, quant) | (block_index << 8);
+        }
+
         bitstream_meta.packets[block_index] = BitstreamPacket(global_payload_offset, payload_total_words);
-        debugPrintfEXT("Writing header to word %u", global_payload_offset);
     }
 
     uint total_subblocks = bitCount(local_ballot);
@@ -338,12 +325,10 @@ void main()
     uint global_sign_offset = global_planes_offset + subgroupClusteredAdd(required_plane_bytes, 16);
     global_planes_offset += local_planes_offset;
 
-    debugPrintfEXT("Q: %d, Total sign bits %u", quant, total_sign_bits);
-
     uint total_sign_bytes = (subgroupShuffle(total_sign_bits, gl_SubgroupInvocationID | 15u) + 7) / 8;
 
     // Followed by N code words which map to the local ballot of active 16x16 regions.
-    if (code_word != 0)
+    if (active_code_word)
     {
         uint block_header_offset = bitCount(bitfieldExtract(
             local_ballot, 0, local_block_index.y * 4 + local_block_index.x));
@@ -363,9 +348,8 @@ void main()
                 if (in_planes != 0)
                     in_planes++;
 
-                if (out_planes != 0 && in_planes != 0)
+                if (out_planes != 0)
                 {
-                    debugPrintfEXT("Reading sign plane from %u", input_offset);
                     uint sign_plane = uint(payload_data.data[input_offset]);
                     uint significant_mask = copy_bytes(output_offset, input_offset + 1, out_planes);
                     append_sign_plane(linear_block_32x32_index, local_sign_offset, sign_plane, significant_mask);
@@ -381,8 +365,6 @@ void main()
             uint16_t(code_word);
         bitstream_data_8b.data[4 * global_payload_offset + 2 * total_subblocks + block_header_offset + 4 * HeaderSize] =
             uint8_t(code_word >> 16);
-        debugPrintfEXT("Writing u16 code to word %f", 0.5 * float(2 * global_payload_offset + block_header_offset + 2 * HeaderSize));
-        debugPrintfEXT("Writing u8 q to word %f", 0.25 * float(4 * global_payload_offset + 2 * total_subblocks + block_header_offset + 4 * HeaderSize));
     }
 
     subgroupBarrier();
@@ -396,7 +378,6 @@ void main()
         bitstream_data_8b.data[offset_8b + 1] = uint8_t(sign_word >> 8);
         bitstream_data_8b.data[offset_8b + 2] = uint8_t(sign_word >> 16);
         bitstream_data_8b.data[offset_8b + 3] = uint8_t(sign_word >> 24);
-        debugPrintfEXT("Writing sign 4x to word %f", 0.25 * float(offset_8b));
     }
 
     // Copy out any stragglers.
@@ -405,6 +386,5 @@ void main()
         uint sign_word = shared_sign_bank[linear_block_32x32_index][i / 4];
         uint offset_8b = global_sign_offset + i;
         bitstream_data_8b.data[offset_8b] = uint8_t(sign_word >> (8 * (i & 3u)));
-        debugPrintfEXT("Writing sign 1x to word %f", 0.25 * float(offset_8b));
     }
 }
