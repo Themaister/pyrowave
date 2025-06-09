@@ -17,8 +17,6 @@ struct DequantizerPushData
 {
 	ivec2 resolution;
 	int32_t output_layer;
-	int32_t block_offset_8x8;
-	int32_t block_stride_8x8;
 	int32_t block_offset_32x32;
 	int32_t block_stride_32x32;
 };
@@ -27,13 +25,7 @@ struct Decoder::Impl : public WaveletBuffers
 {
 	BufferHandle dequant_meta_buffer, payload_data;
 
-	struct DequantMeta
-	{
-		uint32_t offset_u32;
-		float q;
-	};
-
-	std::vector<DequantMeta> dequant_meta_buffer_cpu;
+	std::vector<uint32_t> dequant_meta_buffer_cpu;
 	std::vector<uint32_t> payload_data_cpu;
 	int decoded_blocks = 0;
 	int total_blocks_in_sequence = 0;
@@ -86,11 +78,11 @@ void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 
 bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 {
-	auto &meta = dequant_meta_buffer_cpu[header->block_index];
-	if (meta.q == 0.0f)
+	auto &offset = dequant_meta_buffer_cpu[header->block_index];
+	if (offset == UINT32_MAX)
 	{
 		decoded_blocks++;
-		meta.q = decode_quant(header->quant_code);
+		offset = payload_data_cpu.size();
 	}
 	else
 	{
@@ -106,12 +98,10 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 		return false;
 	}
 
-	auto offset = payload_data_cpu.size();
 	payload_data_cpu.insert(
 			payload_data_cpu.end(),
 			payload_words,
 			payload_words + header->payload_words);
-	meta.offset_u32 = offset;
 	return true;
 }
 
@@ -237,10 +227,10 @@ void Decoder::Impl::init_block_meta()
 	info.domain = BufferDomain::Device;
 	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-	info.size = block_count_32x32 * sizeof(DequantMeta);
-	dequant_meta_buffer = device->create_buffer(info);
+	info.size = block_count_32x32 * sizeof(uint32_t);
+	dequant_offset_buffer = device->create_buffer(info);
 	device->set_name(*dequant_meta_buffer, "meta-buffer");
-	dequant_meta_buffer_cpu.resize(block_count_32x32);
+	dequant_offset_buffer_cpu.resize(block_count_32x32);
 
 	payload_data_cpu.reserve(1024 * 1024);
 }
@@ -292,8 +282,6 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 				push.resolution.x = wavelet_img->get_width(level);
 				push.resolution.y = wavelet_img->get_height(level);
 				push.output_layer = band;
-				push.block_offset_8x8 = block_meta[component][level][band].block_offset_8x8;
-				push.block_stride_8x8 = block_meta[component][level][band].block_stride_8x8;
 				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
 				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
 				cmd.push_constants(&push, 0, sizeof(push));
@@ -442,7 +430,7 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 
 void Decoder::Impl::clear()
 {
-	std::fill(dequant_meta_buffer_cpu.begin(), dequant_meta_buffer_cpu.end(), DequantMeta{});
+	std::fill(dequant_meta_buffer_cpu.begin(), dequant_meta_buffer_cpu.end(), UINT32_MAX);
 	decoded_blocks = 0;
 	decoded_frame_for_current_sequence = false;
 	total_blocks_in_sequence = block_count_32x32;
