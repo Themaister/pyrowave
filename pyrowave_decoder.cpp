@@ -59,8 +59,8 @@ void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 {
 	VkDeviceSize required_size = payload_data_cpu.size() * sizeof(uint32_t);
 
-	// Avoid a theoretical OOB access without robustness on the payload buffer during dequant.
-	VkDeviceSize required_size_padded = required_size + sizeof(uint32_t);
+	// Avoid edge case OOB access without robustness on the payload buffer during dequant.
+	VkDeviceSize required_size_padded = required_size + 16;
 
 	if (!payload_data || required_size_padded > payload_data->get_create_info().size)
 	{
@@ -242,13 +242,8 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 	cmd.set_specialization_constant_mask(0);
 	cmd.enable_subgroup_size_control(true);
 
-	bool assume_fast_wave32 = device->get_device_features().vk13_props.minSubgroupSize >= 32;
-	if (assume_fast_wave32 && device->supports_subgroup_size_log2(true, 5, 5))
-		cmd.set_subgroup_size_log2(true, 5, 5);
-	else if (assume_fast_wave32 && device->supports_subgroup_size_log2(true, 6, 6))
-		cmd.set_subgroup_size_log2(true, 6, 6);
-	else if (device->supports_subgroup_size_log2(true, 2, 6))
-		cmd.set_subgroup_size_log2(true, 2, 6);
+	if (device->supports_subgroup_size_log2(true, 4, 6))
+		cmd.set_subgroup_size_log2(true, 4, 6);
 	else
 	{
 		LOGE("No compatible subgroup size config.\n");
@@ -403,9 +398,6 @@ bool Decoder::Impl::decode_is_ready(bool allow_partial_frame) const
 
 bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 {
-	if (!decode_is_ready(true))
-		return false;
-
 	cmd.begin_region("Decode uploads");
 	{
 		upload_payload(cmd);

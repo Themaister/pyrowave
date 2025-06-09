@@ -92,13 +92,35 @@ static void run_encoder_test(Device &device,
 
 	assert(out_packets == num_packets);
 
-	//
-	return;
-	////
+	struct DummyPacket
+	{
+		alignas(uint32_t) PyroWave::BitstreamHeader header;
+		uint16_t code[2];
+		uint8_t q[2];
+		uint8_t planes[4];
+		uint8_t signs[1];
+	};
 
+	DummyPacket packet = {};
+	packet.header.payload_words = sizeof(DummyPacket) / sizeof(uint32_t);
+	packet.header.ballot = (1 << 0) | (1 << 4);
+	packet.header.quant_code = PyroWave::encode_quant(1.0f);
+	packet.code[0] = 0x11;
+	packet.code[1] = 0x11;
+	packet.q[0] = 6 << 4;
+	packet.q[1] = 7 << 4;
+	packet.planes[0] = 0x2;
+	packet.planes[1] = 0x3;
+	packet.planes[2] = 0x2;
+	packet.planes[3] = 0x3;
+	packet.signs[0] = 0x0e;
+	dec.push_packet(&packet, sizeof(packet));
+
+#if 0
 	for (auto &p : packets)
 		if (!dec.push_packet(reordered_packet_buffer.data() + p.offset, p.size))
 			return;
+#endif
 
 	BufferHandle out_buffers[3];
 	for (int i = 0; i < 3; i++)
@@ -112,8 +134,8 @@ static void run_encoder_test(Device &device,
 
 	{
 		auto cmd = device.request_command_buffer();
-		if (!dec.decode_is_ready(false))
-			return;
+		//if (!dec.decode_is_ready(false))
+		//	return;
 		if (!dec.decode(*cmd, outputs))
 			return;
 
