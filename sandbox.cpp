@@ -499,7 +499,10 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 
 		device.submit(cmd);
 
-		run_encoder_test(device, enc, dec, inputs.views, outputs.views, bitstream_size, output);
+		//if (frames != 0)
+		{
+			run_encoder_test(device, enc, dec, inputs.views, outputs.views, bitstream_size, output);
+		}
 
 		frames++;
 		if (has_rdoc && frames >= 10)

@@ -193,8 +193,6 @@ void append_sign_plane(uint bank, inout uint local_sign_offset, uint sign_mask, 
         pending_sign_write = bitfieldInsert(pending_sign_write, bitfieldExtract(sign_mask, bit, 1), out_bit, 1);
         pending_sign_mask = bitfieldInsert(pending_sign_mask, 1, out_bit, 1);
 
-        debugPrintfEXT("Writing sign %d to byte %f", bitfieldExtract(sign_mask, bit, 1), float(local_sign_offset) * 0.125);
-
         if (out_bit == 31)
         {
             if (pending_sign_mask == ~0u)
@@ -259,7 +257,13 @@ void main()
             registers.block_stride_8x8 * block8x8_index.y +
             block8x8_index.x;
         meta = block_meta.meta[block_index];
-        num_bits_for_q = uint(block_stats.stats[block_index].errors[quant].payload_cost);
+        uint num_planes = block_stats.stats[block_index].num_planes;
+        num_bits_for_q = uint(block_stats.stats[block_index].errors[min(num_planes, quant)].payload_cost);
+        if (num_bits_for_q == 0xffff)
+        {
+            debugPrintfEXT("!!! quant = %d, block_index %d, num_planes %d", quant, block_index, block_stats.stats[block_index]);
+            return;
+        }
     }
     else
     {
@@ -340,7 +344,6 @@ void main()
                 in_planes++;
 
             uint sign_plane = uint(payload_data.data[input_offset]);
-            debugPrintfEXT("Reading sign plane %x from byte %u", sign_plane, input_offset);
 
             if (out_planes != 0)
             {
