@@ -16,6 +16,8 @@
 #include "fft.hpp"
 #include "yuv4mpeg.hpp"
 #include "shaders/slangmosh.hpp"
+#include "math.hpp"
+#include "muglm/muglm_impl.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -51,7 +53,33 @@ static void run_encoder_test(Device &device,
 
 	{
 		auto cmd = device.request_command_buffer();
+#if 1
 		enc.encode(*cmd, inputs, buffers);
+#else
+		cmd->image_barrier(enc.get_wavelet_band(0, 0).get_image(),
+		                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+		                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+		                   VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+		cmd->clear_image(enc.get_wavelet_band(0, 0).get_image(), {});
+
+		cmd->barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+		             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+		auto *coeffs = static_cast<uint16_t *>(
+				cmd->update_image(enc.get_wavelet_band(0, 0).get_image(),
+				                  {}, { 16, 16, 1 }, 16, 256, { VK_IMAGE_ASPECT_COLOR_BIT, 4, 0, 1 }));
+
+		for (int y = 0; y < 16; y++)
+			for (int x = 0; x < 16; x++)
+				coeffs[16 * y + x] = floatToHalf((float(x) + (x ? 0.5f : 0.0f)) * (y & 1 ? -1.0f : 1.0f));
+
+		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+		             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+		enc.encode_pre_transformed(*cmd, buffers, 1.0f);
+#endif
+
 		cmd->copy_buffer(*bitstream_host, *bitstream);
 		cmd->copy_buffer(*meta_host, *meta);
 		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,

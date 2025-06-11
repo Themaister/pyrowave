@@ -16,6 +16,7 @@
 #include "constants.h"
 
 layout(local_size_x_id = 0) in;
+layout(constant_id = 1) const bool SkipQuantScale = true;
 
 layout(set = 0, binding = 0) uniform sampler2DArray uTexture;
 
@@ -109,7 +110,7 @@ int scan_strided(int v)
 
 void compute_quant_scale(float max_wave_texels, out uint quant_code, out float quant_scale)
 {
-    if (max_wave_texels < 1.0)
+    if (SkipQuantScale || max_wave_texels < 1.0)
     {
         quant_code = ENCODE_QUANT_IDENTITY;
         quant_scale = 1.0;

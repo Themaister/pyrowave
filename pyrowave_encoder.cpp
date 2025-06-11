@@ -74,12 +74,14 @@ struct Encoder::Impl : public WaveletBuffers
 	BufferHandle bucket_buffer, meta_buffer, block_stat_buffer, payload_data, quant_buffer;
 
 	bool encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers);
+	bool encode_pre_transformed(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
+	bool encode_quant_and_coding(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
 
 	bool dwt(CommandBuffer &cmd, const ViewBuffers &views);
-	bool quant(CommandBuffer &cmd);
+	bool quant(CommandBuffer &cmd, float quant_scale);
 	bool analyze_rdo(CommandBuffer &cmd);
 	bool resolve_rdo(CommandBuffer &cmd, size_t target_payload_size);
-	bool block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers);
+	bool block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale);
 
 	float get_noise_power_normalized_quant_resolution(int level, int component, int band) const;
 	float get_quant_resolution(int level, int component, int band) const;
@@ -195,7 +197,7 @@ void Encoder::Impl::init_block_meta()
 	device->set_name(*bucket_buffer, "bucket-buffer");
 }
 
-bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers)
+bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
 {
 	cmd.begin_region("DWT block packing");
 	auto start_packing = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -239,7 +241,7 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 				packing_push.resolution_32x32_blocks = ivec2((level_width + 31) / 32, (level_height + 31) / 32);
 				packing_push.resolution_8x8_blocks = ivec2((level_width + 7) / 8, (level_height + 7) / 8);
 
-				auto quant_res = get_quant_resolution(level, component, band);
+				auto quant_res = quant_scale < 0.0f ? get_quant_resolution(level, component, band) : quant_scale;
 				packing_push.quant_resolution_code = encode_quant(1.0f / quant_res);
 				packing_push.sequence_count = sequence_count;
 
@@ -404,7 +406,7 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 	return true;
 }
 
-bool Encoder::Impl::quant(CommandBuffer &cmd)
+bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 {
 	auto start_quant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	cmd.begin_region("DWT quantize");
@@ -452,7 +454,7 @@ bool Encoder::Impl::quant(CommandBuffer &cmd)
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				float quant_res = get_quant_resolution(level, component, band);
+				float quant_res = quant_scale < 0.0f ? get_quant_resolution(level, component, band) : quant_scale;
 
 				push.resolution.x = wavelet_img->get_width(level);
 				push.resolution.y = wavelet_img->get_height(level);
@@ -1115,29 +1117,12 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	return num_packets;
 }
 
-bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
+bool Encoder::Impl::encode_quant_and_coding(
+		Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
 {
-	sequence_count = (sequence_count + 1) & SequenceCountMask;
-
-	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-
 	cmd.enable_subgroup_size_control(true);
 
-	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
-	cmd.fill_buffer(*bucket_buffer, 0);
-	cmd.fill_buffer(*quant_buffer, 0);
-
-	if (!dwt(cmd, views))
-		return false;
-
-	// Don't need to read the payload offset counter until quantizer.
-	cmd.barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-	            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-
-	if (!quant(cmd))
+	if (!quant(cmd, quant_scale))
 		return false;
 
 	if (!analyze_rdo(cmd))
@@ -1146,11 +1131,51 @@ bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const B
 	if (!resolve_rdo(cmd, buffers.target_size))
 		return false;
 
-	if (!block_packing(cmd, buffers))
+	if (!block_packing(cmd, buffers, quant_scale))
 		return false;
 
 	cmd.enable_subgroup_size_control(false);
 	return true;
+}
+
+bool Encoder::Impl::encode_pre_transformed(
+		Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
+{
+	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
+	cmd.fill_buffer(*bucket_buffer, 0);
+	cmd.fill_buffer(*quant_buffer, 0);
+
+	// Don't need to read the payload offset counter until quantizer.
+	cmd.barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+	            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	return encode_quant_and_coding(cmd, buffers, quant_scale);
+}
+
+bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
+{
+	sequence_count = (sequence_count + 1) & SequenceCountMask;
+
+	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
+	cmd.fill_buffer(*bucket_buffer, 0);
+	cmd.fill_buffer(*quant_buffer, 0);
+
+	cmd.enable_subgroup_size_control(true);
+	if (!dwt(cmd, views))
+		return false;
+	cmd.enable_subgroup_size_control(false);
+
+	// Don't need to read the payload offset counter until quantizer.
+	cmd.barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+	            VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	return encode_quant_and_coding(cmd, buffers, -1.0f);
 }
 
 Encoder::Encoder()
@@ -1196,6 +1221,16 @@ bool Encoder::init(Device *device, int width_, int height_)
 bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
 {
 	return impl->encode(cmd, views, buffers);
+}
+
+const Vulkan::ImageView &Encoder::get_wavelet_band(int component, int level)
+{
+	return *impl->component_layer_views[component][level];
+}
+
+bool Encoder::encode_pre_transformed(Vulkan::CommandBuffer &cmd, const BitstreamBuffers &buffers, float quant_scale)
+{
+	return impl->encode_pre_transformed(cmd, buffers, quant_scale);
 }
 
 size_t Encoder::compute_num_packets(const void *meta, size_t packet_boundary) const

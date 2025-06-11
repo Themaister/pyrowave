@@ -193,6 +193,8 @@ void append_sign_plane(uint bank, inout uint local_sign_offset, uint sign_mask, 
         pending_sign_write = bitfieldInsert(pending_sign_write, bitfieldExtract(sign_mask, bit, 1), out_bit, 1);
         pending_sign_mask = bitfieldInsert(pending_sign_mask, 1, out_bit, 1);
 
+        debugPrintfEXT("Writing sign %d to byte %f", bitfieldExtract(sign_mask, bit, 1), float(local_sign_offset) * 0.125);
+
         if (out_bit == 31)
         {
             if (pending_sign_mask == ~0u)
@@ -338,6 +340,7 @@ void main()
                 in_planes++;
 
             uint sign_plane = uint(payload_data.data[input_offset]);
+            debugPrintfEXT("Reading sign plane %x from byte %u", sign_plane, input_offset);
 
             if (out_planes != 0)
             {
@@ -359,7 +362,7 @@ void main()
     subgroupBarrier();
 
     // Copy out all sign planes for any given group.
-    for (uint i = (gl_SubgroupInvocationID & 15); i < total_sign_bytes / 4; i += 16)
+    for (uint i = index & 15u; i < total_sign_bytes / 4; i += 16)
     {
         uint sign_word = shared_sign_bank[linear_block_32x32_index][i];
         uint offset_8b = global_sign_offset + 4 * i;
@@ -370,7 +373,7 @@ void main()
     }
 
     // Copy out any stragglers.
-    for (uint i = (total_sign_bytes & ~3u); i < total_sign_bytes; i += 16)
+    for (uint i = (total_sign_bytes & ~3u) + (index & 15u); i < total_sign_bytes; i += 16)
     {
         uint sign_word = shared_sign_bank[linear_block_32x32_index][i / 4];
         uint offset_8b = global_sign_offset + i;

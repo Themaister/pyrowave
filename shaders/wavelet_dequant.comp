@@ -63,7 +63,7 @@ mat2x4 decode_payload(uint code_word, uint q_bits, uint offset, uint block_index
     uint byte_offset =
         bitCount(bitfieldExtract(lsbs, 0, bit_offset)) +
         bitCount(bitfieldExtract(msbs, 0, bit_offset)) +
-        q_bits * 8 * block_index + offset;
+        q_bits * block_index + offset;
 
     // Eagerly load the data to keep latency down.
     // Also forces the descriptor to be loaded early.
@@ -186,7 +186,8 @@ void main()
             shared_sign_offset = 8 * byte_scan;
         shared_plane_byte_offsets[local_index] = byte_scan - byte_cost;
 
-        debugPrintfEXT("Plane byte offsets %u", byte_scan - byte_cost);
+        debugPrintfEXT("4x2 block #%u, Control word %x, q_bits %d, Plane byte offsets %u",
+            local_index, control_word, q_bits, byte_scan - byte_cost);
     }
 
     barrier();
@@ -200,9 +201,15 @@ void main()
         uint control_word = uint(payload_data_u16.data[offset_u32 * 2 + 4 + local_code_offset]);
         uint control_word2 = uint(payload_data_u8.data[offset_u32 * 4 + 8 + bitCount(ballot) * 2 + local_code_offset]);
 
+        debugPrintfEXT("offset %u / %u: Control word %x, %x",
+            offset_u32 * 2 + 4 + local_code_offset,
+            offset_u32 * 4 + 8 + bitCount(ballot) * 2 + local_code_offset,
+            control_word, control_word2);
+
         v = decode_payload(control_word, control_word2 & 0xfu,
             shared_plane_byte_offsets[linear_block], block_local_index);
 
+        significant_count = 0;
         for (int j = 0; j < 2; j++)
             for (int i = 0; i < 4; i++)
                 significant_count += int(v[j][i] != 0.0);
@@ -218,6 +225,7 @@ void main()
         significant_count = 0;
     }
 
+    // Figure out how many significant coefficients we have.
     int significant_scan = subgroupInclusiveAdd(significant_count);
     if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
         shared_sign_scan[gl_SubgroupID] = significant_scan;
@@ -229,10 +237,13 @@ void main()
 
     barrier();
 
+    // Compute where we need to start reading sign bits from.
     uint sign_offset = shared_sign_offset + significant_scan - significant_count;
     if (gl_SubgroupID != 0)
         sign_offset += shared_sign_scan[gl_SubgroupID - 1];
 
+    // Read out all sign bits we could possibly access per thread.
+    // On AMD at least, this 64-bit load should be vectorizable.
     uint sign_word = payload_data_u32.data[sign_offset / 32 + 0];
     uint sign_word_upper = payload_data_u32.data[sign_offset / 32 + 1];
     uint masked_sign_offset = sign_offset & 31u;
@@ -244,6 +255,7 @@ void main()
 
     int sign_counter = 0;
 
+    // Clock out the sign bits as needed.
     for (int i = 0; i < 4; i++)
     {
         for (int j = 0; j < 2; j++)
@@ -257,6 +269,7 @@ void main()
         }
     }
 
+    // Write output.
     for (int j = 0; j < 2; j++)
         for (int i = 0; i < 4; i++)
             imageStore(uDequantImg, ivec3(coord + ivec2(i, j), registers.output_layer), vec4(v[j][i]));
