@@ -16,7 +16,7 @@
 #include "constants.h"
 
 layout(local_size_x_id = 0) in;
-layout(constant_id = 1) const bool SkipQuantScale = true;
+layout(constant_id = 1) const bool SkipQuantScale = false;
 
 layout(set = 0, binding = 0) uniform sampler2DArray uTexture;
 
