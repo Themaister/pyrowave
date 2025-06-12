@@ -407,16 +407,17 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 	cmd.begin_region("DWT quantize");
 	cmd.set_program(shaders.wavelet_quant);
 
+	// Wave32 path seems faster than Wave64 on RDNA4 at least.
 	cmd.set_specialization_constant_mask(1);
-	if (device->supports_subgroup_size_log2(true, 6, 6))
-	{
-		cmd.set_specialization_constant(0, 64);
-		cmd.set_subgroup_size_log2(true, 6, 6);
-	}
-	else if (device->supports_subgroup_size_log2(true, 5, 5))
+	if (device->supports_subgroup_size_log2(true, 5, 5))
 	{
 		cmd.set_specialization_constant(0, 32);
 		cmd.set_subgroup_size_log2(true, 5, 5);
+	}
+	else if (device->supports_subgroup_size_log2(true, 6, 6))
+	{
+		cmd.set_specialization_constant(0, 64);
+		cmd.set_subgroup_size_log2(true, 6, 6);
 	}
 	else
 	{
