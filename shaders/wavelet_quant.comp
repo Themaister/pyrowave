@@ -129,8 +129,8 @@ void compute_quant_scale(float max_wave_texels, out uint quant_code, out float q
 float compute_square_error(float v, int q, out uint num_significant_values)
 {
     v = abs(v);
-    float iv = float(int(v) >> q);
-    num_significant_values = subgroupBallotBitCount(subgroupBallot(iv != 0));
+    float iv = trunc(ldexp(v, -q));
+    num_significant_values = subgroupBallotBitCount(subgroupBallot(iv != 0.0));
     if (iv != 0.0)
         iv += 0.5;
     iv = ldexp(iv, q);
@@ -147,14 +147,14 @@ struct QuantResult
     int quality_planes;
 };
 
-QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float inv_quant)
+QuantResult compute_quant_stats(float v, int q, int msb, int block4x2_max, float inv_quant_squared)
 {
     block4x2_max >>= q;
 
     uint num_significants;
     QuantResult result;
 
-    result.square_error = compute_square_error(v, q, num_significants) * inv_quant * inv_quant;
+    result.square_error = compute_square_error(v, q, num_significants) * inv_quant_squared;
     result.block4x2_shifted = block4x2_max;
 
     result.encode_cost_early = block4x2_max > 0 ? 1 : 0;
@@ -190,6 +190,7 @@ void encode_payload64(float texel)
 
     float overall_quant_scale = registers.quant_resolution * quant_scale;
     float inv_quant = 1.0 / overall_quant_scale;
+    float inv_quant_squared = inv_quant * inv_quant;
 
     int quant_texel = int(texel);
     int abs_quant_texel = abs(quant_texel);
@@ -212,7 +213,7 @@ void encode_payload64(float texel)
     int msb = findMSB(max_absolute_value);
     int block4x2 = compute_block4x2_max(abs_quant_texel);
 
-    QuantResult result = compute_quant_stats(texel, 0, msb, block4x2, inv_quant);
+    QuantResult result = compute_quant_stats(texel, 0, msb, block4x2, inv_quant_squared);
     int scan = scan_strided(result.encode_cost_early);
 
     uint global_offset = 0;
@@ -250,7 +251,7 @@ void encode_payload64(float texel)
 
     for (int q = 1; q <= msb; q++)
     {
-        QuantResult quant_result = compute_quant_stats(texel, q, msb, block4x2, inv_quant);
+        QuantResult quant_result = compute_quant_stats(texel, q, msb, block4x2, inv_quant_squared);
         float square_error = subgroupAdd(quant_result.square_error);
 
         if (subgroupElect())
@@ -297,6 +298,7 @@ void encode_payload32(float texel0, float texel1)
 
     float overall_quant_scale = registers.quant_resolution * quant_scale;
     float inv_quant = 1.0 / overall_quant_scale;
+    float inv_quant_squared = inv_quant * inv_quant;
 
     int quant_texel0 = int(texel0);
     int quant_texel1 = int(texel1);
@@ -322,8 +324,8 @@ void encode_payload32(float texel0, float texel1)
     int block4x2_0 = compute_block4x2_max(abs_quant_texel0);
     int block4x2_1 = compute_block4x2_max(abs_quant_texel1);
 
-    QuantResult result0 = compute_quant_stats(texel0, 0, msb, block4x2_0, inv_quant);
-    QuantResult result1 = compute_quant_stats(texel1, 0, msb, block4x2_1, inv_quant);
+    QuantResult result0 = compute_quant_stats(texel0, 0, msb, block4x2_0, inv_quant_squared);
+    QuantResult result1 = compute_quant_stats(texel1, 0, msb, block4x2_1, inv_quant_squared);
     int scan0 = scan_strided(result0.encode_cost_early);
     int scan1 = scan_strided(result1.encode_cost_early);
     scan1 += subgroupBroadcast(scan0, gl_SubgroupSize - 1);
@@ -362,8 +364,8 @@ void encode_payload32(float texel0, float texel1)
 
     for (int q = 1; q <= msb; q++)
     {
-        QuantResult quant_result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant);
-        QuantResult quant_result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant);
+        QuantResult quant_result0 = compute_quant_stats(texel0, q, msb, block4x2_0, inv_quant_squared);
+        QuantResult quant_result1 = compute_quant_stats(texel1, q, msb, block4x2_1, inv_quant_squared);
         float square_error = subgroupAdd(quant_result0.square_error + quant_result1.square_error);
 
         if (subgroupElect())
@@ -426,7 +428,8 @@ void main()
         ivec2 local_coord = unswizzle8x8(gl_SubgroupInvocationID);
         ivec2 top_left_coord = base_coord + local_coord;
         float texel = texelFetch(uTexture, ivec3(top_left_coord, registers.input_layer), 0).x;
-        float scaled_texel = texel * registers.quant_resolution;
+        // Don't want reordering since we want to be able to quantize in FP too.
+        precise float scaled_texel = texel * registers.quant_resolution;
         encode_payload64(scaled_texel);
     }
     else if (gl_SubgroupSize == 32)
@@ -438,8 +441,9 @@ void main()
         float texel0 = texelFetch(uTexture, ivec3(top_left_coord, registers.input_layer), 0).x;
         float texel1 = texelFetch(uTexture, ivec3(top_left_coord + ivec2(4, 0), registers.input_layer), 0).x;
 
-        float scaled_texel0 = texel0 * registers.quant_resolution;
-        float scaled_texel1 = texel1 * registers.quant_resolution;
+        // Don't want reordering since we want to be able to quantize in FP too.
+        precise float scaled_texel0 = texel0 * registers.quant_resolution;
+        precise float scaled_texel1 = texel1 * registers.quant_resolution;
 
         encode_payload32(scaled_texel0, scaled_texel1);
     }
