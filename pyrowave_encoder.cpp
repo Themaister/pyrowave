@@ -366,7 +366,6 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				auto level_width = wavelet_img->get_width(level);
 				auto level_height  = wavelet_img->get_height(level);
 
-
 				push.resolution.x = level_width;
 				push.resolution.y = level_height;
 				push.resolution_8x8_blocks.x = (level_width + 7) / 8;
