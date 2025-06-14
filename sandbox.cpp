@@ -66,12 +66,12 @@ static void run_encoder_test(Device &device,
 		cmd->barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 		             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
-		constexpr int w = 256;
-		constexpr int h = 256;
+		constexpr int w = 32;
+		constexpr int h = 32;
 
 		auto *coeffs = static_cast<uint16_t *>(
 				cmd->update_image(enc.get_wavelet_band(0, 0).get_image(),
-				                  {}, { w, h, 1 }, w, 256, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 1 }));
+				                  {}, { w, h, 1 }, w, 256, { VK_IMAGE_ASPECT_COLOR_BIT, 3, 1, 1 }));
 
 		for (int y = 0; y < h; y++)
 			for (int x = 0; x < w; x++)

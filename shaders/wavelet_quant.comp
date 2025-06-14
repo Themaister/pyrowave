@@ -55,22 +55,6 @@ layout(set = 0, binding = 3) buffer Payloads
     layout(offset = 8) uint8_t data[];
 } payload_data;
 
-struct RDOperation
-{
-    int quant;
-    uint block_offset_saving;
-};
-
-const int BLOCK_SPACE_SUBDIVISION = 16;
-
-layout(set = 0, binding = 4) buffer Buckets
-{
-    uint count;
-    uint consumed_payload;
-    layout(offset = 64) uint total_savings_per_bucket[128 * BLOCK_SPACE_SUBDIVISION];
-    RDOperation rdo_operations[];
-} buckets;
-
 #include "dwt_swizzle.h"
 
 layout(push_constant) uniform Registers
@@ -80,13 +64,8 @@ layout(push_constant) uniform Registers
     vec2 inv_resolution;
     float input_layer;
     float quant_resolution;
-    float rdo_distortion_scale;
-    int block_offset_8x8;
-    int block_stride_8x8;
-    int block_offset_32x32;
-    int block_stride_32x32;
-    uint num_blocks_aligned;
-    uint block_index_shamt;
+    int block_offset;
+    int block_stride;
 } registers;
 
 float max4(vec4 v)
@@ -189,14 +168,7 @@ float square(float v)
     return v * v;
 }
 
-// RDO
-shared float shared_distortions[16 * 16];
-shared uint shared_cost[16 * 16];
-
-shared uint shared_rate_cost[16];
-shared float shared_distortion[16];
-
-void encode_payload(ivec2 block_index_8x8, mat2x4 texels, int linear_block_index)
+void encode_payload(ivec2 block_index_8x8, mat2x4 texels)
 {
     precise float max_subblock_texel = max(max4(abs(texels[0])), max4(abs(texels[1])));
     precise float max_wave_texels = subgroupClusteredMax(max_subblock_texel, 8);
@@ -215,7 +187,7 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels, int linear_block_index
     int max_absolute_value = int(max_wave_texels);
     int block4x2_max = int(max_subblock_texel);
 
-    uint block_index = registers.block_offset_8x8 + block_index_8x8.y * registers.block_stride_8x8 + block_index_8x8.x;
+    uint block_index = registers.block_offset + block_index_8x8.y * registers.block_stride + block_index_8x8.x;
 
     // The entire block quantizes to zero.
     if (max_absolute_value == 0)
@@ -262,7 +234,6 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels, int linear_block_index
         block_stats.stats[block_index].errors[0] = QuantStats(
             float16_t(0.0), // We don't care about distortion from 0 quant since we've already made that decision.
             uint16_t(result.encode_cost_late_bits));
-        shared_cost[linear_block_index] = result.encode_cost_late_bits;
     }
 
     for (int q = 1; q <= msb; q++)
@@ -275,19 +246,13 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels, int linear_block_index
             block_stats.stats[block_index].errors[q] = QuantStats(
                 float16_t(square_error),
                 uint16_t(quant_result.encode_cost_late_bits));
-            shared_cost[16 * q + linear_block_index] = quant_result.encode_cost_late_bits;
-            shared_distortions[16 * q + linear_block_index] = square_error;
         }
     }
 
     // Record distortion for throwing away everything.
     float square_error = subgroupClusteredAdd((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * inv_quant_squared, 8);
     if ((gl_SubgroupInvocationID & 7u) == 0)
-    {
         block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(square_error), uint16_t(0));
-        shared_cost[16 * (msb + 1) + linear_block_index] = 0;
-        shared_distortions[16 * (msb + 1) + linear_block_index] = square_error;
-    }
 
     uint byte_offset = scan + global_offset;
     bool need_sign = result.block4x2_shifted != 0 || quality_planes != 0;
@@ -323,95 +288,9 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels, int linear_block_index
     }
 }
 
-// Perform operations that cause lower distortion first.
-uint distortion_to_bucket_index(float d, float cost, float d_base, float cost_base)
-{
-    if (cost == cost_base)
-        return 0;
-
-    // Compress a large range into 64 possible buckets.
-    // Every band is ~1.5 dB.
-    // Greedily chase least added (weighted) distortion per byte removed from code stream.
-    float index = 60.0 + 2.0 * log2(max(d - d_base, 0.0) / (cost_base - cost));
-    return uint(max(index + 0.5, 0.0));
-}
-
-uint inclusive_max_clustered16(uint v)
-{
-    // Ensures that we never end up with a value > 127.
-    v = min(v, 128 - 16 + gl_SubgroupInvocationID);
-
-    for (uint i = 1; i < 16; i *= 2)
-    {
-        // Ensure monotonic progression for buckets.
-        // Separate every quant level out by at least one bucket.
-        uint up = subgroupShuffleUp(v, i) + i;
-        v = max(v, gl_SubgroupInvocationID >= i ? up : 0);
-    }
-
-    return v;
-}
-
-void emit_rdo_operations()
-{
-    float distortion;
-    float cost;
-
-    if (gl_SubgroupInvocationID < 16)
-    {
-        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
-        distortion = shared_distortion[gl_SubgroupInvocationID];
-    }
-    else
-    {
-        // Dummy values.
-        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
-        distortion = 1e30;
-    }
-
-    uint bucket_index = distortion_to_bucket_index(distortion, cost, shared_distortion[0], float(shared_rate_cost[0]));
-    if (gl_SubgroupInvocationID == 0)
-        bucket_index = 0;
-
-    // Constraints:
-    // bucket_index for Q1 must be less than bucket_index for Q2 if Q1 < Q2.
-    // If a high quant target sees very favorable RD, lower bucket indices for lower Q values.
-    uint inclusive_bucket_index = inclusive_max_clustered16(bucket_index);
-
-    if (gl_SubgroupInvocationID == 0)
-    {
-        uint unquantized_cost = shared_rate_cost[0];
-        atomicAdd(buckets.consumed_payload, unquantized_cost);
-    }
-    else if (gl_SubgroupInvocationID < 16)
-    {
-        uint saving = shared_rate_cost[gl_SubgroupInvocationID - 1] - shared_rate_cost[gl_SubgroupInvocationID];
-
-        if (saving != 0)
-        {
-            ivec2 block32x32_index = ivec2(gl_WorkGroupID.xy);
-            int block_index = registers.block_offset_32x32 +
-                block32x32_index.y * registers.block_stride_32x32 + block32x32_index.x;
-            uint subdivision = block_index >> registers.block_index_shamt;
-            atomicAdd(buckets.total_savings_per_bucket[inclusive_bucket_index * BLOCK_SPACE_SUBDIVISION + subdivision], saving);
-            buckets.rdo_operations[block_index + inclusive_bucket_index * registers.num_blocks_aligned] =
-                RDOperation(int(gl_SubgroupInvocationID), uint(block_index) | (saving << 16u));
-        }
-    }
-}
-
 void main()
 {
     uint local_index = gl_SubgroupID * gl_SubgroupSize + gl_SubgroupInvocationID;
-
-    for (uint i = local_index; i < 256; i += gl_WorkGroupSize.x)
-    {
-        shared_distortions[i] = 0.0;
-        shared_cost[i] = 0;
-    }
-
-    barrier();
-
     uint block_local_index = bitfieldExtract(local_index, 0, 3);
     uint block_x = bitfieldExtract(local_index, 3, 2);
     uint block_y = bitfieldExtract(local_index, 5, 2);
@@ -431,42 +310,6 @@ void main()
     precise vec4 scaled_texels0 = texels0 * registers.quant_resolution;
     precise vec4 scaled_texels1 = texels1 * registers.quant_resolution;
     bool in_bounds = all(lessThan(block_index, registers.resolution_8x8_blocks));
-
     if (in_bounds)
-        encode_payload(block_index, mat2x4(scaled_texels0, scaled_texels1), int(block_y * 4 + block_x));
-
-    barrier();
-
-    // Reduce the costs/distortions per quant bit.
-    for (uint i = 0; i < 256u; i += gl_WorkGroupSize.x)
-    {
-        float bit_distortion = subgroupClusteredAdd(shared_distortions[i + local_index], 16) * registers.rdo_distortion_scale;
-
-        uint cost = shared_cost[i + local_index];
-
-        // 16 bits to encode the control codes, 8 bits to encode Q bits + quant scale.
-        // Cost is encoded in terms of bits. 8x8 blocks are decoded in isolation.
-        if (cost != 0)
-            cost += 24;
-
-        cost = subgroupClusteredAdd(cost, 16);
-
-        if ((local_index & 15u) == 0u)
-        {
-            // Need to encode a header.
-            // We can eliminate 32x32 blocks if everything decodes to 0.
-            if (cost != 0)
-                cost += 64;
-
-            // Each packet is aligned to 4 bytes for practical reasons.
-            shared_rate_cost[(i + local_index) / 16] = (cost + 31) >> 5;
-            shared_distortion[(i + local_index) / 16] = bit_distortion;
-        }
-    }
-
-    barrier();
-
-    // Do RDO analysis.
-    if (gl_SubgroupID == 0)
-        emit_rdo_operations();
+        encode_payload(block_index, mat2x4(scaled_texels0, scaled_texels1));
 }

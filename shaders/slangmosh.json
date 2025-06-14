@@ -21,14 +21,19 @@
 			"path": "power_to_db.comp"
 		},
 		{
-			"name": "resolve_rate_control",
+			"name": "analyze_rate_control",
 			"compute": true,
-			"path": "resolve_rate_control.comp"
+			"path": "analyze_rate_control.comp"
 		},
 		{
 			"name": "analyze_rate_control_finalize",
 			"compute": true,
 			"path": "analyze_rate_control_finalize.comp"
+		},
+		{
+			"name": "resolve_rate_control",
+			"compute": true,
+			"path": "resolve_rate_control.comp"
 		},
 		{
 			"name": "wavelet_quant",
