@@ -28,8 +28,9 @@ static int compute_block_count_per_subdivision(int num_blocks)
 struct QuantizerPushData
 {
 	ivec2 resolution;
+	ivec2 resolution_8x8_blocks;
 	vec2 inv_resolution;
-	int32_t input_layer;
+	float input_layer;
 	float quant_resolution;
 	int32_t block_offset;
 	int32_t block_stride;
@@ -406,17 +407,10 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 	cmd.begin_region("DWT quantize");
 	cmd.set_program(shaders.wavelet_quant);
 
-	// Wave32 path seems faster than Wave64 on RDNA4 at least.
-	cmd.set_specialization_constant_mask(1);
-	if (device->supports_subgroup_size_log2(true, 5, 5))
+	cmd.set_specialization_constant_mask(0);
+	if (device->supports_subgroup_size_log2(true, 3, 7))
 	{
-		cmd.set_specialization_constant(0, 32);
-		cmd.set_subgroup_size_log2(true, 5, 5);
-	}
-	else if (device->supports_subgroup_size_log2(true, 6, 6))
-	{
-		cmd.set_specialization_constant(0, 64);
-		cmd.set_subgroup_size_log2(true, 6, 6);
+		cmd.set_subgroup_size_log2(true, 3, 7);
 	}
 	else
 	{
@@ -445,13 +439,15 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 
 				push.resolution.x = wavelet_img->get_width(level);
 				push.resolution.y = wavelet_img->get_height(level);
+				push.resolution_8x8_blocks.x = (push.resolution.x + 7) / 8;
+				push.resolution_8x8_blocks.y = (push.resolution.y + 7) / 8;
 				push.inv_resolution.x = 1.0f / float(push.resolution.x);
 				push.inv_resolution.y = 1.0f / float(push.resolution.y);
-				push.input_layer = band;
+				push.input_layer = float(band);
 				push.quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res));
 
-				int blocks_x = (push.resolution.x + 7) / 8;
-				int blocks_y = (push.resolution.y + 7) / 8;
+				int blocks_x = (push.resolution.x + 31) / 32;
+				int blocks_y = (push.resolution.y + 31) / 32;
 
 				push.block_offset = block_meta[component][level][band].block_offset_8x8;
 				push.block_stride = block_meta[component][level][band].block_stride_8x8;
@@ -476,7 +472,6 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 
 	auto end_quant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	device->register_time_interval("GPU", std::move(start_quant), std::move(end_quant), "Quant");
-	cmd.set_specialization_constant_mask(0);
 	return true;
 }
 

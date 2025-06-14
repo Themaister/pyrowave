@@ -66,13 +66,16 @@ static void run_encoder_test(Device &device,
 		cmd->barrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 		             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
+		constexpr int w = 32;
+		constexpr int h = 32;
+
 		auto *coeffs = static_cast<uint16_t *>(
 				cmd->update_image(enc.get_wavelet_band(0, 0).get_image(),
-				                  {}, { 16, 16, 1 }, 16, 256, { VK_IMAGE_ASPECT_COLOR_BIT, 4, 0, 1 }));
+				                  {}, { w, h, 1 }, w, 256, { VK_IMAGE_ASPECT_COLOR_BIT, 3, 1, 1 }));
 
-		for (int y = 0; y < 16; y++)
-			for (int x = 0; x < 16; x++)
-				coeffs[16 * y + x] = floatToHalf((float(x) + (x ? 0.5f : 0.0f)) * (y & 1 ? -1.0f : 1.0f));
+		for (int y = 0; y < h; y++)
+			for (int x = 0; x < w; x++)
+				coeffs[w * y + x] = floatToHalf((float(x) + (x ? 0.5f : 0.0f)) * (y & 1 ? -1.0f : 1.0f));
 
 		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 		             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
@@ -145,11 +148,6 @@ static void run_encoder_test(Device &device,
 	packet.signs[2] = 0xff;
 	packet.signs[3] = 0xff;
 	packet.signs[4] = 0xff;
-	dec.push_packet(&packet, sizeof(packet));
-
-	packet.header.block_index = 1;
-	dec.push_packet(&packet, sizeof(packet));
-	packet.header.block_index = 2;
 	dec.push_packet(&packet, sizeof(packet));
 #endif
 
