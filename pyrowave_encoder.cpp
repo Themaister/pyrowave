@@ -32,8 +32,13 @@ struct QuantizerPushData
 	vec2 inv_resolution;
 	float input_layer;
 	float quant_resolution;
-	int32_t block_offset;
-	int32_t block_stride;
+	float rdo_distortion_scale;
+	int32_t block_offset_8x8;
+	int32_t block_stride_8x8;
+	int32_t block_offset_32x32;
+	int32_t block_stride_32x32;
+	uint32_t num_blocks_aligned;
+	uint32_t block_index_shamt;
 };
 
 struct BlockPackingPushData
@@ -334,68 +339,11 @@ bool Encoder::Impl::resolve_rdo(CommandBuffer &cmd, size_t target_payload_size)
 bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 {
 	auto start_analyze = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-	cmd.begin_region("DWT analyze");
-	cmd.set_program(shaders.analyze_rate_control);
+	cmd.begin_region("DWT analyze finalize");
 
-	if (device->supports_subgroup_size_log2(true, 4, 6))
-	{
-		cmd.set_subgroup_size_log2(true, 4, 6);
-	}
-	else
-	{
-		LOGI("No compatible subgroup size config.\n");
-		return false;
-	}
-
-	// Quantize
-	for (int level = 0; level < DecompositionLevels; level++)
-	{
-		for (int component = 0; component < NumComponents; component++)
-		{
-			// Ignore top-level CbCr when doing 420 subsampling.
-			if (level == 0 && component != 0)
-				continue;
-
-			AnalyzeRateControlPushData push = {};
-
-			char label[128];
-			snprintf(label, sizeof(label), "level %d, component %d", level, component);
-			cmd.begin_region(label);
-
-			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
-			{
-				auto level_width = wavelet_img->get_width(level);
-				auto level_height  = wavelet_img->get_height(level);
-
-				push.resolution.x = level_width;
-				push.resolution.y = level_height;
-				push.resolution_8x8_blocks.x = (level_width + 7) / 8;
-				push.resolution_8x8_blocks.y = (level_height + 7) / 8;
-				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
-				push.block_offset_8x8 = block_meta[component][level][band].block_offset_8x8;
-				push.block_stride_8x8 = block_meta[component][level][band].block_stride_8x8;
-				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
-				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
-				push.total_wg_count = block_count_32x32;
-				push.num_blocks_aligned = compute_block_count_per_subdivision(block_count_32x32) * BlockSpaceSubdivision;
-				push.block_index_shamt = Util::floor_log2(compute_block_count_per_subdivision(block_count_32x32));
-
-				cmd.push_constants(&push, 0, sizeof(push));
-
-				cmd.set_storage_buffer(0, 0, *bucket_buffer);
-				cmd.set_storage_buffer(0, 1, *block_stat_buffer);
-
-				cmd.dispatch((level_width + 31) / 32, (level_height + 31) / 32, 1);
-			}
-
-			cmd.end_region();
-		}
-	}
-
-	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-
+	cmd.set_subgroup_size_log2(true, 2, 7);
 	cmd.set_program(shaders.analyze_rate_control_finalize);
+	cmd.set_storage_buffer(0, 0, *bucket_buffer);
 	cmd.dispatch(1, 1, 1);
 
 	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -403,7 +351,7 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 
 	cmd.end_region();
 	auto end_analyze = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-	device->register_time_interval("GPU", std::move(start_analyze), std::move(end_analyze), "Analyze");
+	device->register_time_interval("GPU", std::move(start_analyze), std::move(end_analyze), "AnalyzeFinal");
 	return true;
 }
 
@@ -414,9 +362,9 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 	cmd.set_program(shaders.wavelet_quant);
 
 	cmd.set_specialization_constant_mask(0);
-	if (device->supports_subgroup_size_log2(true, 3, 7))
+	if (device->supports_subgroup_size_log2(true, 4, 7))
 	{
-		cmd.set_subgroup_size_log2(true, 3, 7);
+		cmd.set_subgroup_size_log2(true, 4, 7);
 	}
 	else
 	{
@@ -451,12 +399,16 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 				push.inv_resolution.y = 1.0f / float(push.resolution.y);
 				push.input_layer = float(band);
 				push.quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res));
+				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
+				push.block_offset_8x8 = block_meta[component][level][band].block_offset_8x8;
+				push.block_stride_8x8 = block_meta[component][level][band].block_stride_8x8;
+				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
+				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
+				push.num_blocks_aligned = compute_block_count_per_subdivision(block_count_32x32) * BlockSpaceSubdivision;
+				push.block_index_shamt = Util::floor_log2(compute_block_count_per_subdivision(block_count_32x32));
 
 				int blocks_x = (push.resolution.x + 31) / 32;
 				int blocks_y = (push.resolution.y + 31) / 32;
-
-				push.block_offset = block_meta[component][level][band].block_offset_8x8;
-				push.block_stride = block_meta[component][level][band].block_stride_8x8;
 
 				cmd.push_constants(&push, 0, sizeof(push));
 
@@ -464,6 +416,7 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 				cmd.set_storage_buffer(0, 1, *meta_buffer);
 				cmd.set_storage_buffer(0, 2, *block_stat_buffer);
 				cmd.set_storage_buffer(0, 3, *payload_data);
+				cmd.set_storage_buffer(0, 4, *bucket_buffer);
 
 				cmd.dispatch(blocks_x, blocks_y, 1);
 			}
