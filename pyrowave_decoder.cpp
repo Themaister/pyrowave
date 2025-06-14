@@ -453,6 +453,9 @@ bool Decoder::init(Vulkan::Device *device, int width, int height)
 		return false;
 	}
 
+	if (device->get_device_features().device_api_core_version < VK_API_VERSION_1_2)
+		return false;
+
 	// The decoder is more lenient.
 	if (!device->supports_subgroup_size_log2(true, 4, 6))
 		return false;

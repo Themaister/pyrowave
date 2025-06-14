@@ -1185,6 +1185,9 @@ bool Encoder::init(Device *device, int width_, int height_)
 		return false;
 	}
 
+	if (device->get_device_features().device_api_core_version < VK_API_VERSION_1_2)
+		return false;
+
 	if (!device->get_device_features().vk12_features.subgroupBroadcastDynamicId)
 		return false;
 
