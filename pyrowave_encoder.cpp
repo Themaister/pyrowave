@@ -1188,7 +1188,11 @@ bool Encoder::init(Device *device, int width_, int height_)
 	if (!device->get_device_features().vk12_features.subgroupBroadcastDynamicId)
 		return false;
 
+	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess)
+		return false;
 	if (!device->get_device_features().vk12_features.shaderFloat16)
+		return false;
+	if (!device->get_device_features().enabled_features.shaderInt16)
 		return false;
 
 	// This should cover any HW I care about.

@@ -441,6 +441,9 @@ bool Decoder::init(Vulkan::Device *device, int width, int height)
 			VK_SUBGROUP_FEATURE_VOTE_BIT |
 			VK_SUBGROUP_FEATURE_QUAD_BIT |
 			VK_SUBGROUP_FEATURE_BALLOT_BIT |
+			VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
+			VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+			VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
 			VK_SUBGROUP_FEATURE_BASIC_BIT;
 
 	if ((ops & required_features) != required_features)
@@ -451,9 +454,11 @@ bool Decoder::init(Vulkan::Device *device, int width, int height)
 	}
 
 	// The decoder is more lenient.
-	if (!device->supports_subgroup_size_log2(true, 2, 6))
+	if (!device->supports_subgroup_size_log2(true, 4, 6))
 		return false;
 
+	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess)
+		return false;
 	if (!device->get_device_features().vk12_features.shaderFloat16)
 		return false;
 
