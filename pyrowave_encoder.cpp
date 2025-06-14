@@ -392,10 +392,16 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 		}
 	}
 
-	cmd.end_region();
 	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
 
+	cmd.set_program(shaders.analyze_rate_control_finalize);
+	cmd.dispatch(1, 1, 1);
+
+	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+
+	cmd.end_region();
 	auto end_analyze = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	device->register_time_interval("GPU", std::move(start_analyze), std::move(end_analyze), "Analyze");
 	return true;

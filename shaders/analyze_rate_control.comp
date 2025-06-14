@@ -27,7 +27,7 @@ struct RDOperation
 
 const int BLOCK_SPACE_SUBDIVISION = 16;
 
-layout(set = 0, binding = 0) coherent buffer Buckets
+layout(set = 0, binding = 0) buffer Buckets
 {
     uint count;
     uint consumed_payload;
@@ -219,29 +219,4 @@ void main()
 
     if (gl_SubgroupID == 0)
         emit_rdo_operations();
-
-    // Wait for atomics for all threads in the subgroup to go through.
-    memoryBarrierBuffer();
-    subgroupBarrier();
-
-    // Final pass.
-
-    uint subgroups_done_count;
-    if (subgroupElect())
-        subgroups_done_count = atomicAdd(buckets.count, 1) + 1;
-    subgroups_done_count = subgroupBroadcastFirst(subgroups_done_count);
-
-    if (subgroups_done_count == registers.total_wg_count * gl_NumSubgroups)
-    {
-        uint running_offset = 0;
-        uint total_sub_buckets = 128 * BLOCK_SPACE_SUBDIVISION;
-
-        for (uint i = 0; i < total_sub_buckets; i += gl_SubgroupSize)
-        {
-            uint v = buckets.total_savings_per_bucket[i + gl_SubgroupInvocationID];
-            v = subgroupInclusiveAdd(v);
-            buckets.total_savings_per_bucket[i + gl_SubgroupInvocationID] = v + running_offset;
-            running_offset += subgroupBroadcast(v, gl_SubgroupSize - 1);
-        }
-    }
 }
