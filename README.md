@@ -44,3 +44,7 @@ High Throughput JPEG2000 is likely a good place to look for that anyway.
 
 Being intra-only and encoding 64x64 blocks of coefficients in isolation ensures great recovery against packet loss.
 It's plausible pyrowave could be useful over fiber links.
+
+### Bitstream definition
+
+See [docs/bitstream.md]()

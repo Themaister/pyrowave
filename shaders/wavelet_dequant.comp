@@ -107,7 +107,7 @@ const int MaxScaleExp = 4;
 
 float decode_quant(uint quant_code)
 {
-    // Custom FP formulation for numbers in (0, 2) range.
+    // Custom FP formulation for numbers in (0, 16) range.
     int e = MaxScaleExp - int(quant_code >> 3);
     int m = int(quant_code) & 0x7;
     float inv_quant = (1.0 / (8.0 * 1024.0 * 1024.0)) * float((8 + m) * (1 << (20 + e)));
