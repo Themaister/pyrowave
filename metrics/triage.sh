@@ -3,23 +3,29 @@
 set -e
 
 input_file="$1"
+output_dir="$2"
 
 if [ -z $input_file ]; then
 	echo "Need to specify input."
 	exit 1
 fi
 
-mkdir -p /tmp/triage
-rm -f /tmp/triage/*.csv
+if [ -z $output_dir ]; then
+	echo "Need to specify output."
+	exit 1
+fi
+
+mkdir -p "$output_dir"
+rm -f "$output_dir"/*.csv
 
 csv_header="bpp,xpsnr,ssim,ssimulacra2,vmaf,vmafneg"
-echo $csv_header > /tmp/triage/h264_nvenc.csv
-echo $csv_header > /tmp/triage/hevc_nvenc.csv
-echo $csv_header > /tmp/triage/av1_nvenc.csv
-echo $csv_header > /tmp/triage/h264_vaapi.csv
-echo $csv_header > /tmp/triage/hevc_vaapi.csv
-echo $csv_header > /tmp/triage/av1_vaapi.csv
-echo $csv_header > /tmp/triage/pyrowave.csv
+echo $csv_header > "$output_dir"/h264_nvenc.csv
+echo $csv_header > "$output_dir"/hevc_nvenc.csv
+echo $csv_header > "$output_dir"/av1_nvenc.csv
+echo $csv_header > "$output_dir"/h264_vaapi.csv
+echo $csv_header > "$output_dir"/hevc_vaapi.csv
+echo $csv_header > "$output_dir"/av1_vaapi.csv
+echo $csv_header > "$output_dir"/pyrowave.csv
 
 append_stats_to_csv()
 {
@@ -41,8 +47,8 @@ encode_nvenc()
 	bit_rate=$1
 	buf_size=$2
 	codec=$3
-	encoded_name=/tmp/triage/${codec}_nvenc_${bit_rate}.mkv
-	stats="/tmp/triage/${codec}_nvenc_stats_${bit_rate}.txt"
+	encoded_name="$output_dir"/${codec}_nvenc_${bit_rate}.mkv
+	stats=""$output_dir"/${codec}_nvenc_stats_${bit_rate}.txt"
 
 	echo "============="
 	echo "Encoding with NVENC, bitrate ${bit_rate}."
@@ -60,7 +66,7 @@ encode_nvenc()
 	bpp=$(echo "scale=3; 12 * $actual_size / $input_size" | bc)
 	echo "BPP = $bpp" >> $stats
 
-	append_stats_to_csv $stats /tmp/triage/${codec}_nvenc.csv
+	append_stats_to_csv $stats "$output_dir"/${codec}_nvenc.csv
 }
 
 encode_vaapi()
@@ -68,8 +74,8 @@ encode_vaapi()
 	bit_rate=$1
 	buf_size=$2
 	codec=$3
-	encoded_name=/tmp/triage/${codec}_vaapi_${bit_rate}.mkv
-	stats="/tmp/triage/${codec}_vaapi_stats_${bit_rate}.txt"
+	encoded_name="$output_dir"/${codec}_vaapi_${bit_rate}.mkv
+	stats=""$output_dir"/${codec}_vaapi_stats_${bit_rate}.txt"
 	echo "============="
 	echo "Encoding with VAAPI, bitrate ${bit_rate}."
 	ffmpeg -y -vaapi_device /dev/dri/renderD128 -i $input_file -c:v ${codec}_vaapi \
@@ -87,15 +93,15 @@ encode_vaapi()
 	bpp=$(echo "scale=3; 12 * $actual_size / $input_size" | bc)
 	echo "BPP = $bpp" >> $stats
 
-	append_stats_to_csv $stats /tmp/triage/${codec}_vaapi.csv
+	append_stats_to_csv $stats "$output_dir"/${codec}_vaapi.csv
 }
 
 encode_pyrowave()
 {
 	bit_rate=$1
 	bytes_per_image=$2
-	encoded_name=/tmp/triage/pyrowave_${bit_rate}.y4m
-	stats="/tmp/triage/pyrowave_stats_${bit_rate}.txt"
+	encoded_name="$output_dir"/pyrowave_${bit_rate}.y4m
+	stats=""$output_dir"/pyrowave_stats_${bit_rate}.txt"
 	echo "============="
 	echo "Encoding with PyroWave, bitrate ${bit_rate}, $bytes_per_image bytes per image."
 	pyrowave-sandbox $input_file $encoded_name $bytes_per_image 2>/dev/null
@@ -105,7 +111,7 @@ encode_pyrowave()
 
 	bpp=$(echo "scale=3; 8 * $bytes_per_image / (1920 * 1080)" | bc)
 	echo "BPP = $bpp" >> $stats
-	append_stats_to_csv $stats /tmp/triage/pyrowave.csv
+	append_stats_to_csv $stats "$output_dir"/pyrowave.csv
 }
 
 encode_nvenc_group()
