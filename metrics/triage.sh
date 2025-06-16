@@ -22,9 +22,9 @@ csv_header="bpp,xpsnr,ssim,ssimulacra2,vmaf,vmafneg"
 echo $csv_header > "$output_dir"/h264_nvenc.csv
 echo $csv_header > "$output_dir"/hevc_nvenc.csv
 echo $csv_header > "$output_dir"/av1_nvenc.csv
-echo $csv_header > "$output_dir"/h264_vaapi.csv
-echo $csv_header > "$output_dir"/hevc_vaapi.csv
-echo $csv_header > "$output_dir"/av1_vaapi.csv
+#echo $csv_header > "$output_dir"/h264_vaapi.csv
+#echo $csv_header > "$output_dir"/hevc_vaapi.csv
+#echo $csv_header > "$output_dir"/av1_vaapi.csv
 echo $csv_header > "$output_dir"/pyrowave.csv
 
 append_stats_to_csv()
@@ -55,7 +55,7 @@ encode_nvenc()
 	ffmpeg -y -i $input_file -b:v $bit_rate -c:v ${codec}_nvenc \
 		-preset p1 -tune ull -g 1 -rc cbr -bufsize $buf_size $encoded_name >/dev/null 2>/dev/null
 	ffmpeg -y -i $encoded_name $encoded_name.y4m >/dev/null 2>/dev/null
-	psy-ex-scores.py $input_file $encoded_name.y4m -t 16 | ansi2txt > $stats
+	psy-ex-scores.py $input_file $encoded_name.y4m -t 16 -e 4 | ansi2txt > $stats
 	rm $encoded_name.y4m
 	echo "Stats in ${stats}, reference output in ${encoded_name}."
 	du -b $encoded_name
@@ -67,6 +67,8 @@ encode_nvenc()
 	echo "BPP = $bpp" >> $stats
 
 	append_stats_to_csv $stats "$output_dir"/${codec}_nvenc.csv
+
+	rm $encoded_name
 }
 
 encode_vaapi()
@@ -82,7 +84,7 @@ encode_vaapi()
 		-idr_interval 1 -g 1 -rc_mode CBR -b:v $bit_rate -bufsize $buf_size \
 		-vf format=nv12,hwupload $encoded_name >/dev/null 2>/dev/null
 	ffmpeg -y -i $encoded_name $encoded_name.y4m >/dev/null 2>/dev/null
-	psy-ex-scores.py $input_file $encoded_name.y4m -t 16 | ansi2txt > $stats
+	psy-ex-scores.py $input_file $encoded_name.y4m -t 16 -e 4 | ansi2txt > $stats
 	rm $encoded_name.y4m
 	echo "Stats in ${stats}, reference output in ${encoded_name}."
 	du -b $encoded_name
@@ -94,6 +96,8 @@ encode_vaapi()
 	echo "BPP = $bpp" >> $stats
 
 	append_stats_to_csv $stats "$output_dir"/${codec}_vaapi.csv
+
+	rm $encoded_name
 }
 
 encode_pyrowave()
@@ -105,13 +109,15 @@ encode_pyrowave()
 	echo "============="
 	echo "Encoding with PyroWave, bitrate ${bit_rate}, $bytes_per_image bytes per image."
 	pyrowave-sandbox $input_file $encoded_name $bytes_per_image 2>/dev/null
-	psy-ex-scores.py $input_file $encoded_name -t 16 | ansi2txt > $stats
+	psy-ex-scores.py $input_file $encoded_name -t 16 -e 4 | ansi2txt > $stats
 	echo "Stats in ${stats}, reference output in ${encoded_name}."
 	echo "============="
 
 	bpp=$(echo "scale=3; 8 * $bytes_per_image / (1920 * 1080)" | bc)
 	echo "BPP = $bpp" >> $stats
 	append_stats_to_csv $stats "$output_dir"/pyrowave.csv
+
+	rm $encoded_name
 }
 
 encode_nvenc_group()
@@ -137,20 +143,22 @@ encode_accel_group()
 
 encode_pyrowave 50000k $((50000000 / (60 * 8)))
 encode_pyrowave 75000k $((75000000 / (60 * 8)))
-#encode_pyrowave 100000k $((100000000 / (60 * 8)))
-#encode_pyrowave 150000k $((150000000 / (60 * 8)))
-#encode_pyrowave 200000k $((200000000 / (60 * 8)))
-#encode_pyrowave 250000k $((250000000 / (60 * 8)))
-#encode_pyrowave 300000k $((300000000 / (60 * 8)))
-#encode_pyrowave 400000k $((400000000 / (60 * 8)))
-#encode_pyrowave 500000k $((500000000 / (60 * 8)))
+encode_pyrowave 100000k $((100000000 / (60 * 8)))
+encode_pyrowave 150000k $((150000000 / (60 * 8)))
+encode_pyrowave 200000k $((200000000 / (60 * 8)))
+encode_pyrowave 250000k $((250000000 / (60 * 8)))
+encode_pyrowave 300000k $((300000000 / (60 * 8)))
+encode_pyrowave 400000k $((400000000 / (60 * 8)))
+encode_pyrowave 500000k $((500000000 / (60 * 8)))
 encode_accel_group 50000k 1000k
 encode_accel_group 75000k 1500k
-#encode_accel_group 100000k 2000k
-#encode_accel_group 150000k 3000k
-#encode_accel_group 200000k 4000k
-#encode_accel_group 250000k 5000k
-#encode_accel_group 300000k 6000k
-#encode_accel_group 400000k 8000k
-#encode_accel_group 500000k 10000k
+encode_accel_group 100000k 2000k
+encode_accel_group 150000k 3000k
+encode_accel_group 200000k 4000k
+encode_accel_group 250000k 5000k
+encode_accel_group 300000k 6000k
+encode_accel_group 400000k 8000k
+encode_accel_group 500000k 10000k
+
+python plot.py $output_dir
 

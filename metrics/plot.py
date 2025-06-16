@@ -18,7 +18,7 @@ def main():
             'pyrowave' : 'PyroWave' }
 
     metric_name = {
-            'xpsnr' : 'XPSNR',
+            'xpsnr' : 'W-XPSNR',
             'ssim' : 'SSIM',
             'ssimulacra2' : 'SSIMULACRA2',
             'vmaf' : 'VMAF',
