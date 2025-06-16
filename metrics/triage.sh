@@ -44,14 +44,17 @@ append_stats_to_csv()
 
 encode_nvenc()
 {
-	bit_rate=$1
-	buf_size=$2
-	codec=$3
+	bit_rate=$1k
+	# Round up to not give codec an impossible situation
+	buf_size=$(($1 / 60 + 1))k
+	codec=$2
 	encoded_name="$output_dir"/${codec}_nvenc_${bit_rate}.mkv
 	stats=""$output_dir"/${codec}_nvenc_stats_${bit_rate}.txt"
 
 	echo "============="
 	echo "Encoding with NVENC, bitrate ${bit_rate}."
+	echo ffmpeg -y -i $input_file -b:v $bit_rate -c:v ${codec}_nvenc \
+		-preset p1 -tune ull -g 1 -rc cbr -bufsize $buf_size $encoded_name
 	ffmpeg -y -i $input_file -b:v $bit_rate -c:v ${codec}_nvenc \
 		-preset p1 -tune ull -g 1 -rc cbr -bufsize $buf_size $encoded_name >/dev/null 2>/dev/null
 	ffmpeg -y -i $encoded_name $encoded_name.y4m >/dev/null 2>/dev/null
@@ -73,9 +76,10 @@ encode_nvenc()
 
 encode_vaapi()
 {
-	bit_rate=$1
-	buf_size=$2
-	codec=$3
+	bit_rate=${1}k
+	# Round up to not give codec an impossible situation
+	buf_size=$(($1 / 60 + 1))k
+	codec=$2
 	encoded_name="$output_dir"/${codec}_vaapi_${bit_rate}.mkv
 	stats=""$output_dir"/${codec}_vaapi_stats_${bit_rate}.txt"
 	echo "============="
@@ -102,8 +106,8 @@ encode_vaapi()
 
 encode_pyrowave()
 {
-	bit_rate=$1
-	bytes_per_image=$2
+	bit_rate=${1}k
+	bytes_per_image=$((($1 * 1000) / (60 * 8)))
 	encoded_name="$output_dir"/pyrowave_${bit_rate}.y4m
 	stats=""$output_dir"/pyrowave_stats_${bit_rate}.txt"
 	echo "============="
@@ -122,43 +126,43 @@ encode_pyrowave()
 
 encode_nvenc_group()
 {
-	encode_nvenc $1 $2 h264
-	encode_nvenc $1 $2 hevc
-	encode_nvenc $1 $2 av1
+	encode_nvenc $1 h264
+	encode_nvenc $1 hevc
+	encode_nvenc $1 av1
 }
 
 encode_vaapi_group()
 {
-	encode_vaapi $1 $2 h264
-	encode_vaapi $1 $2 hevc
-	encode_vaapi $1 $2 av1
+	encode_vaapi $1 h264
+	encode_vaapi $1 hevc
+	encode_vaapi $1 av1
 }
 
 encode_accel_group()
 {
-	encode_nvenc_group $1 $2
+	encode_nvenc_group $1
 	# VAAPI seems to not understand what CBR rate control means :') Ignore it.
-	#encode_vaapi_group $1 $2
+	#encode_vaapi_group $1
 }
 
-encode_pyrowave 50000k $((50000000 / (60 * 8)))
-encode_pyrowave 75000k $((75000000 / (60 * 8)))
-encode_pyrowave 100000k $((100000000 / (60 * 8)))
-encode_pyrowave 150000k $((150000000 / (60 * 8)))
-encode_pyrowave 200000k $((200000000 / (60 * 8)))
-encode_pyrowave 250000k $((250000000 / (60 * 8)))
-encode_pyrowave 300000k $((300000000 / (60 * 8)))
-encode_pyrowave 400000k $((400000000 / (60 * 8)))
-encode_pyrowave 500000k $((500000000 / (60 * 8)))
-encode_accel_group 50000k 1000k
-encode_accel_group 75000k 1500k
-encode_accel_group 100000k 2000k
-encode_accel_group 150000k 3000k
-encode_accel_group 200000k 4000k
-encode_accel_group 250000k 5000k
-encode_accel_group 300000k 6000k
-encode_accel_group 400000k 8000k
-encode_accel_group 500000k 10000k
+encode_pyrowave 50000
+encode_pyrowave 75000
+encode_pyrowave 100000
+encode_pyrowave 150000
+encode_pyrowave 200000
+encode_pyrowave 250000
+encode_pyrowave 300000
+encode_pyrowave 400000
+encode_pyrowave 500000
+encode_accel_group 50000
+encode_accel_group 75000
+encode_accel_group 100000
+encode_accel_group 150000
+encode_accel_group 200000
+encode_accel_group 250000
+encode_accel_group 300000
+encode_accel_group 400000
+encode_accel_group 500000
 
 python plot.py $output_dir
 
