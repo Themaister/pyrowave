@@ -32,16 +32,16 @@ vec2 generate_mirror_uv(ivec2 coord, bool even_x, bool even_y)
     return uv.yx; // Transpose on load.
 }
 
-void write_shared_4x4(ivec2 coord, f16vec4 texels0, f16vec4 texels1, f16vec4 texels2, f16vec4 texels3)
+void write_shared_4x4(ivec2 coord, VEC4 texels0, VEC4 texels1, VEC4 texels2, VEC4 texels3)
 {
-    store_shared(coord.y + 0, 2 * coord.x + 0, f16vec2(texels0.x, texels2.x));
-    store_shared(coord.y + 0, 2 * coord.x + 1, f16vec2(texels1.x, texels3.x));
-    store_shared(coord.y + 0, 2 * coord.x + 2, f16vec2(texels0.y, texels2.y));
-    store_shared(coord.y + 0, 2 * coord.x + 3, f16vec2(texels1.y, texels3.y));
-    store_shared(coord.y + 1, 2 * coord.x + 0, f16vec2(texels0.z, texels2.z));
-    store_shared(coord.y + 1, 2 * coord.x + 1, f16vec2(texels1.z, texels3.z));
-    store_shared(coord.y + 1, 2 * coord.x + 2, f16vec2(texels0.w, texels2.w));
-    store_shared(coord.y + 1, 2 * coord.x + 3, f16vec2(texels1.w, texels3.w));
+    store_shared(coord.y + 0, 2 * coord.x + 0, VEC2(texels0.x, texels2.x));
+    store_shared(coord.y + 0, 2 * coord.x + 1, VEC2(texels1.x, texels3.x));
+    store_shared(coord.y + 0, 2 * coord.x + 2, VEC2(texels0.y, texels2.y));
+    store_shared(coord.y + 0, 2 * coord.x + 3, VEC2(texels1.y, texels3.y));
+    store_shared(coord.y + 1, 2 * coord.x + 0, VEC2(texels0.z, texels2.z));
+    store_shared(coord.y + 1, 2 * coord.x + 1, VEC2(texels1.z, texels3.z));
+    store_shared(coord.y + 1, 2 * coord.x + 2, VEC2(texels0.w, texels2.w));
+    store_shared(coord.y + 1, 2 * coord.x + 3, VEC2(texels1.w, texels3.w));
 }
 
 void load_image_with_apron()
@@ -51,29 +51,29 @@ void load_image_with_apron()
     ivec2 coord0 = base_coord + local_coord0;
 
     // Transpose on load.
-    f16vec4 texels0 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, true, true), 0.0), 0)).wxzy;
-    f16vec4 texels1 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, false, true), 2.0), 0)).wxzy;
-    f16vec4 texels2 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, true, false), 1.0), 0)).wxzy;
-    f16vec4 texels3 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, false, false), 3.0), 0)).wxzy;
+    VEC4 texels0 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, true, true), 0.0), 0)).wxzy;
+    VEC4 texels1 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, false, true), 2.0), 0)).wxzy;
+    VEC4 texels2 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, true, false), 1.0), 0)).wxzy;
+    VEC4 texels3 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(coord0, false, false), 3.0), 0)).wxzy;
     write_shared_4x4(local_coord0, texels0, texels1, texels2, texels3);
 
     ivec2 local_coord_horiz = ivec2(BLOCK_SIZE_HALF + 2 * (local_index % 2u), 2 * (local_index / 2u));
     if (local_coord_horiz.y < BLOCK_SIZE_HALF + 2 * APRON_HALF)
     {
-        texels0 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, true, true), 0.0), 0)).wxzy;
-        texels1 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, false, true), 2.0), 0)).wxzy;
-        texels2 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, true, false), 1.0), 0)).wxzy;
-        texels3 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, false, false), 3.0), 0)).wxzy;
+        texels0 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, true, true), 0.0), 0)).wxzy;
+        texels1 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, false, true), 2.0), 0)).wxzy;
+        texels2 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, true, false), 1.0), 0)).wxzy;
+        texels3 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_horiz, false, false), 3.0), 0)).wxzy;
         write_shared_4x4(local_coord_horiz, texels0, texels1, texels2, texels3);
     }
 
     ivec2 local_coord_vert = local_coord_horiz.yx;
     if (local_coord_vert.x < BLOCK_SIZE_HALF)
     {
-        texels0 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, true, true), 0.0), 0)).wxzy;
-        texels1 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, false, true), 2.0), 0)).wxzy;
-        texels2 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, true, false), 1.0), 0)).wxzy;
-        texels3 = f16vec4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, false, false), 3.0), 0)).wxzy;
+        texels0 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, true, true), 0.0), 0)).wxzy;
+        texels1 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, false, true), 2.0), 0)).wxzy;
+        texels2 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, true, false), 1.0), 0)).wxzy;
+        texels3 = VEC4(textureGather(uTexture, vec3(generate_mirror_uv(base_coord + local_coord_vert, false, false), 3.0), 0)).wxzy;
         write_shared_4x4(local_coord_vert, texels0, texels1, texels2, texels3);
     }
 
@@ -85,14 +85,14 @@ void inverse_transform8x2()
     const int SIZE = 8;
     const int PADDED_SIZE = SIZE + 2 * APRON;
     const int PADDED_SIZE_HALF = PADDED_SIZE / 2;
-    f16vec2 values[PADDED_SIZE];
+    VEC2 values[PADDED_SIZE];
 
     ivec2 local_coord = ivec2(8 * (local_index % 4u), local_index / 4u);
 
     for (int i = 0; i < PADDED_SIZE; i += 2)
     {
-        f16vec2 v0 = load_shared(local_coord.y, local_coord.x + i + 0);
-        f16vec2 v1 = load_shared(local_coord.y, local_coord.x + i + 1);
+        VEC2 v0 = load_shared(local_coord.y, local_coord.x + i + 0);
+        VEC2 v1 = load_shared(local_coord.y, local_coord.x + i + 1);
         values[i + 0] = v0 * K;
         values[i + 1] = v1 * inv_K;
     }
@@ -113,12 +113,12 @@ void inverse_transform8x2()
 
     for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
     {
-        f16vec2 a = values[2 * i + 0];
-        f16vec2 b = values[2 * i + 1];
+        VEC2 a = values[2 * i + 0];
+        VEC2 b = values[2 * i + 1];
 
         // Transpose the 2x2 block.
-        f16vec2 t0 = f16vec2(a.x, b.x);
-        f16vec2 t1 = f16vec2(a.y, b.y);
+        VEC2 t0 = VEC2(a.x, b.x);
+        VEC2 t1 = VEC2(a.y, b.y);
 
         // Transpose write
         int y_coord = (local_coord.x >> 1) + (i - APRON_HALF);
@@ -132,7 +132,7 @@ void inverse_transform4x2(bool active_lane, int y_offset)
     const int SIZE = 4;
     const int PADDED_SIZE = SIZE + 2 * APRON;
     const int PADDED_SIZE_HALF = PADDED_SIZE / 2;
-    f16vec2 values[PADDED_SIZE];
+    VEC2 values[PADDED_SIZE];
 
     ivec2 local_coord = ivec2(4 * (local_index % 8u), local_index / 8u + y_offset);
 
@@ -140,8 +140,8 @@ void inverse_transform4x2(bool active_lane, int y_offset)
     {
         for (int i = 0; i < PADDED_SIZE; i += 2)
         {
-            f16vec2 v0 = load_shared(local_coord.y, local_coord.x + i + 0);
-            f16vec2 v1 = load_shared(local_coord.y, local_coord.x + i + 1);
+            VEC2 v0 = load_shared(local_coord.y, local_coord.x + i + 0);
+            VEC2 v1 = load_shared(local_coord.y, local_coord.x + i + 1);
             values[i + 0] = v0 * K;
             values[i + 1] = v1 * inv_K;
         }
@@ -165,12 +165,12 @@ void inverse_transform4x2(bool active_lane, int y_offset)
     {
         for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
         {
-            f16vec2 a = values[2 * i + 0];
-            f16vec2 b = values[2 * i + 1];
+            VEC2 a = values[2 * i + 0];
+            VEC2 b = values[2 * i + 1];
 
             // Transpose the 2x2 block.
-            f16vec2 t0 = f16vec2(a.x, b.x);
-            f16vec2 t1 = f16vec2(a.y, b.y);
+            VEC2 t0 = VEC2(a.x, b.x);
+            VEC2 t1 = VEC2(a.y, b.y);
 
             // Transpose write
             int y_coord = (local_coord.x >> 1) + (i - APRON_HALF);
@@ -205,9 +205,9 @@ void main()
     {
         for (int x = local_coord.x; x < BLOCK_SIZE; x += 8)
         {
-            f16vec2 v = load_shared(y, x);
+            VEC2 v = load_shared(y, x);
             if (DCShift)
-                v += 0.5hf;
+                v += FLOAT(0.5);
             imageStore(uOutput, ivec2(2 * y + 0, x) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), v.xxxx);
             imageStore(uOutput, ivec2(2 * y + 1, x) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), v.yyyy);
         }

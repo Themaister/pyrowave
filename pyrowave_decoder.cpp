@@ -307,7 +307,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 
 bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 {
-	cmd.set_program(shaders.idwt);
+	cmd.set_program(shaders.idwt[HighPrecision]);
 	cmd.enable_subgroup_size_control(true);
 	cmd.set_subgroup_size_log2(true, 2, 6);
 

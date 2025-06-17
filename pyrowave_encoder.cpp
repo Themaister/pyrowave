@@ -140,7 +140,7 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 float Encoder::Impl::get_quant_resolution(int level, int component, int band) const
 {
 	// FP16 range is limited, and this is more than a good enough initial estimate.
-	return std::min<float>(512.0f, get_noise_power_normalized_quant_resolution(level, component, band));
+	return std::min<float>(HighPrecision ? 2048.0f : 512.0f, get_noise_power_normalized_quant_resolution(level, component, band));
 }
 
 float Encoder::Impl::get_noise_power_normalized_quant_resolution(int level, int component, int band) const
@@ -149,7 +149,7 @@ float Encoder::Impl::get_noise_power_normalized_quant_resolution(int level, int 
 	// The low-pass gain for CDF 9/7 is 6 dB (1 bit). Every decomposition level subtracts 6 dB.
 
 	// Maybe make this based on the max rate to have a decent initial estimate.
-	int bits = 6;
+	int bits = HighPrecision ? 8 : 6;
 
 	if (band == 0)
 		bits += 2;
@@ -491,7 +491,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 	} push = {};
 
 	// Forward transforms.
-	cmd.set_program(shaders.dwt);
+	cmd.set_program(shaders.dwt[HighPrecision]);
 
 	// Only need simple 2-lane swaps.
 	cmd.set_subgroup_size_log2(true, 2, 7);
@@ -1234,7 +1234,7 @@ size_t Encoder::packetize(Packet *packets, size_t packet_boundary,
 	return impl->packetize(packets, packet_boundary, bitstream, size, mapped_meta, mapped_bitstream);
 }
 
-void Encoder::report_stats(const void *mapped_meta, const void *mapped_bitstream) const
+void Encoder::report_stats(const void *, const void *) const
 {
 	//impl->report_stats(mapped_meta, mapped_bitstream);
 }

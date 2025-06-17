@@ -3,7 +3,10 @@
 		{
 			"name": "dwt",
 			"compute": true,
-			"path": "dwt.comp"
+			"path": "dwt.comp",
+			"variants": [
+				{ "define": "FP32", "count": 2, "resolve": false }
+			]
 		},
 		{
 			"name": "block_packing",
@@ -13,7 +16,10 @@
 		{
 			"name": "idwt",
 			"compute": true,
-			"path": "idwt.comp"
+			"path": "idwt.comp",
+			"variants": [
+				{ "define": "FP32", "count": 2, "resolve": false }
+			]
 		},
 		{
 			"name": "power_to_db",

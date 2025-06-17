@@ -116,6 +116,12 @@ static constexpr int MinimumImageSize = 4 << DecompositionLevels;
 static constexpr int NumComponents = 3;
 static constexpr int NumFrequencyBandsPerLevel = 4;
 
+#ifdef PYROWAVE_HIGH_PRECISION
+static constexpr bool HighPrecision = bool(PYROWAVE_HIGH_PRECISION);
+#else
+static constexpr bool HighPrecision = false;
+#endif
+
 static inline int align(int value, int align)
 {
 	return (value + align - 1) & ~(align - 1);

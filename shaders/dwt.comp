@@ -39,11 +39,11 @@ void load_image_with_apron()
     ivec2 local_coord0 = 2 * unswizzle8x8(local_index);
     ivec2 coord0 = base_coord + local_coord0;
 
-    f16vec4 texels0 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0))).wzxy;
-    f16vec4 texels1 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 0)))).wzxy;
-    f16vec4 texels2 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(0, 16)))).wzxy;
-    f16vec4 texels3 = f16vec4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 16)))).wzxy;
-    if (DCShift) { texels0 -= 0.5hf; texels1 -= 0.5hf; texels2 -= 0.5hf; texels3 -= 0.5hf; }
+    VEC4 texels0 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0))).wzxy;
+    VEC4 texels1 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 0)))).wzxy;
+    VEC4 texels2 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(0, 16)))).wzxy;
+    VEC4 texels3 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 16)))).wzxy;
+    if (DCShift) { texels0 -= FLOAT(0.5); texels1 -= FLOAT(0.5); texels2 -= FLOAT(0.5); texels3 -= FLOAT(0.5); }
 
     int local_coord0_y_half = local_coord0.y >> 1;
 
@@ -60,8 +60,8 @@ void load_image_with_apron()
     // Load the top-right apron
     {
         ivec2 local_coord = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), 2 * (local_index / 4u));
-        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
-        if (DCShift) { texels -= 0.5hf; }
+        VEC4 texels = VEC4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (DCShift) { texels -= FLOAT(0.5); }
         store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
         store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
     }
@@ -69,8 +69,8 @@ void load_image_with_apron()
     // Load the bottom-left apron
     {
         ivec2 local_coord = ivec2(2 * (local_index % 16u), BLOCK_SIZE + 2 * (local_index / 16u));
-        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
-        if (DCShift) { texels -= 0.5hf; }
+        VEC4 texels = VEC4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (DCShift) { texels -= FLOAT(0.5); }
         store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
         store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
     }
@@ -79,8 +79,8 @@ void load_image_with_apron()
     {
         // Load the bottom-right apron
         ivec2 local_coord = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), BLOCK_SIZE + 2 * (local_index / 4u));
-        f16vec4 texels = f16vec4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
-        if (DCShift) { texels -= 0.5hf; }
+        VEC4 texels = VEC4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (DCShift) { texels -= FLOAT(0.5); }
         store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
         store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
     }
@@ -91,13 +91,13 @@ void forward_transform8x2()
     const int SIZE = 8;
     const int PADDED_SIZE = SIZE + 2 * APRON;
     const int PADDED_SIZE_HALF = PADDED_SIZE / 2;
-    f16vec2 values[PADDED_SIZE];
+    VEC2 values[PADDED_SIZE];
 
     ivec2 local_coord = ivec2(8 * (local_index % 4u), local_index / 4u);
 
     for (int i = 0; i < PADDED_SIZE; i++)
     {
-        f16vec2 v = load_shared(local_coord.y, local_coord.x + i);
+        VEC2 v = load_shared(local_coord.y, local_coord.x + i);
         values[i] = v;
     }
 
@@ -117,16 +117,16 @@ void forward_transform8x2()
 
     for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
     {
-        f16vec2 a = values[2 * i + 0];
-        f16vec2 b = values[2 * i + 1];
+        VEC2 a = values[2 * i + 0];
+        VEC2 b = values[2 * i + 1];
 
         // Filter kernel rescale.
         a *= inv_K;
         b *= K;
 
         // Transpose the 2x2 block.
-        f16vec2 t0 = f16vec2(a.x, b.x);
-        f16vec2 t1 = f16vec2(a.y, b.y);
+        VEC2 t0 = VEC2(a.x, b.x);
+        VEC2 t1 = VEC2(a.y, b.y);
 
         // Transpose write
         int y_coord = (local_coord.x >> 1) + (i - APRON_HALF);
@@ -140,7 +140,7 @@ void forward_transform4x2(bool active_lane, int y_offset)
     const int SIZE = 4;
     const int PADDED_SIZE = SIZE + 2 * APRON;
     const int PADDED_SIZE_HALF = PADDED_SIZE / 2;
-    f16vec2 values[PADDED_SIZE];
+    VEC2 values[PADDED_SIZE];
 
     ivec2 local_coord = ivec2(4 * (local_index % 8u), local_index / 8u + y_offset);
 
@@ -148,7 +148,7 @@ void forward_transform4x2(bool active_lane, int y_offset)
     {
         for (int i = 0; i < PADDED_SIZE; i++)
         {
-            f16vec2 v = load_shared(local_coord.y, local_coord.x + i);
+            VEC2 v = load_shared(local_coord.y, local_coord.x + i);
             values[i] = v;
         }
 
@@ -171,16 +171,16 @@ void forward_transform4x2(bool active_lane, int y_offset)
     {
         for (int i = APRON_HALF; i < PADDED_SIZE_HALF - APRON_HALF; i++)
         {
-            f16vec2 a = values[2 * i + 0];
-            f16vec2 b = values[2 * i + 1];
+            VEC2 a = values[2 * i + 0];
+            VEC2 b = values[2 * i + 1];
 
             // Filter kernel rescale.
             a *= inv_K;
             b *= K;
 
             // Transpose the 2x2 block.
-            f16vec2 t0 = f16vec2(a.x, b.x);
-            f16vec2 t1 = f16vec2(a.y, b.y);
+            VEC2 t0 = VEC2(a.x, b.x);
+            VEC2 t1 = VEC2(a.y, b.y);
 
             // Transpose write
             int y_coord = (local_coord.x >> 1) + (i - APRON_HALF);
@@ -216,8 +216,8 @@ void main()
     {
         for (int x = local_coord.x * 2; x < BLOCK_SIZE; x += 16)
         {
-            f16vec2 v0 = load_shared(y, x + 0);
-            f16vec2 v1 = load_shared(y, x + 1);
+            VEC2 v0 = load_shared(y, x + 0);
+            VEC2 v1 = load_shared(y, x + 1);
 
             int img_x = x >> 1;
             int img_y = y;

@@ -24,7 +24,8 @@ void WaveletBuffers::init_samplers()
 void WaveletBuffers::allocate_images()
 {
 	auto info = ImageCreateInfo::immutable_2d_image(
-			aligned_width / 2, aligned_height / 2, VK_FORMAT_R16_SFLOAT);
+			aligned_width / 2, aligned_height / 2,
+			HighPrecision ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_SFLOAT);
 	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
 	             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
