@@ -2,9 +2,39 @@
 // SPDX-License-Identifier: MIT
 #include "pyrowave_common.hpp"
 
+#if PYROWAVE_PRECISION < 0 || PYROWAVE_PRECISION > 2
+#error "PYROWAVE_PRECISION must be in range [0, 2]."
+#endif
+
+constexpr int WaveletFP16Levels = 2;
+
 namespace PyroWave
 {
 using namespace Vulkan;
+
+Configuration::Configuration()
+{
+	precision = PYROWAVE_PRECISION;
+	if (const char *env = getenv("PYROWAVE_PRECISION"))
+		precision = int(strtol(env, nullptr, 0));
+
+	if (precision < 0 || precision > 2)
+	{
+		fprintf(stderr, "pyrowave: precision must be in range [0, 2].\n");
+		precision = PYROWAVE_PRECISION;
+	}
+}
+
+Configuration &Configuration::get()
+{
+	static Configuration config;
+	return config;
+}
+
+int Configuration::get_precision() const
+{
+	return precision;
+}
 
 void WaveletBuffers::init_samplers()
 {
@@ -25,24 +55,45 @@ void WaveletBuffers::allocate_images()
 {
 	auto info = ImageCreateInfo::immutable_2d_image(
 			aligned_width / 2, aligned_height / 2,
-			HighPrecision ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_SFLOAT);
+			Configuration::get().get_precision() == 2 ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_SFLOAT);
 	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
 	             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	info.layers = NumFrequencyBandsPerLevel * NumComponents;
-	info.levels = DecompositionLevels;
+	info.levels = Configuration::get().get_precision() != 1 ? DecompositionLevels : WaveletFP16Levels;
 
-	wavelet_img = device->create_image(info);
-	wavelet_img->set_layout(Layout::General);
-	device->set_name(*wavelet_img, "wavelet-buffer");
+	wavelet_img_high_res = device->create_image(info);
+	wavelet_img_high_res->set_layout(Layout::General);
+	device->set_name(*wavelet_img_high_res, "wavelet-buffer-high-res");
+
+	if (Configuration::get().get_precision() == 1)
+	{
+		// For the lowest level bands, we want to maintain precision as much as possible and bandwidth here is trivial.
+		info.levels = DecompositionLevels - info.levels;
+		info.format = VK_FORMAT_R32_SFLOAT;
+		info.width >>= WaveletFP16Levels;
+		info.height >>= WaveletFP16Levels;
+		wavelet_img_low_res = device->create_image(info);
+		wavelet_img_low_res->set_layout(Layout::General);
+		device->set_name(*wavelet_img_low_res, "wavelet-buffer-low-res");
+	}
 
 	for (int level = 0; level < DecompositionLevels; level++)
 	{
 		ImageViewCreateInfo view_info = {};
 		view_info.levels = 1;
-		view_info.base_level = level;
-		view_info.image = wavelet_img.get();
 		view_info.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+
+		if (Configuration::get().get_precision() != 1 || level < WaveletFP16Levels)
+		{
+			view_info.base_level = level;
+			view_info.image = wavelet_img_high_res.get();
+		}
+		else
+		{
+			view_info.base_level = level - WaveletFP16Levels;
+			view_info.image = wavelet_img_low_res.get();
+		}
 
 		for (int component = 0; component < NumComponents; component++)
 		{
@@ -93,8 +144,8 @@ void WaveletBuffers::init_block_meta()
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				uint32_t level_width = wavelet_img->get_width(level);
-				uint32_t level_height = wavelet_img->get_height(level);
+				uint32_t level_width = wavelet_img_high_res->get_width(level);
+				uint32_t level_height = wavelet_img_high_res->get_height(level);
 
 				int blocks_x_8x8 = (level_width + 7) / 8;
 				int blocks_y_8x8 = (level_height + 7) / 8;

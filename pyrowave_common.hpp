@@ -116,12 +116,6 @@ static constexpr int MinimumImageSize = 4 << DecompositionLevels;
 static constexpr int NumComponents = 3;
 static constexpr int NumFrequencyBandsPerLevel = 4;
 
-#ifdef PYROWAVE_HIGH_PRECISION
-static constexpr bool HighPrecision = bool(PYROWAVE_HIGH_PRECISION);
-#else
-static constexpr bool HighPrecision = false;
-#endif
-
 static inline int align(int value, int align)
 {
 	return (value + align - 1) & ~(align - 1);
@@ -150,12 +144,23 @@ static inline uint8_t encode_quant(float decoder_q_scale)
 	return (e << 3) | m;
 }
 
+class Configuration
+{
+public:
+	static Configuration &get();
+	int get_precision() const;
+private:
+	Configuration();
+	int precision;
+};
+
 struct WaveletBuffers
 {
 	bool init(Vulkan::Device *device, int width, int height);
 
 	Vulkan::Device *device = nullptr;
-	Vulkan::ImageHandle wavelet_img;
+	Vulkan::ImageHandle wavelet_img_low_res;
+	Vulkan::ImageHandle wavelet_img_high_res;
 	Vulkan::SamplerHandle mirror_repeat_sampler;
 	Vulkan::SamplerHandle border_sampler;
 	Vulkan::ImageViewHandle component_layer_views[NumComponents][DecompositionLevels];

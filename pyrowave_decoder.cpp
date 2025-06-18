@@ -256,10 +256,18 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 	cmd.begin_region("DWT dequant");
 	auto start_dequant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+	cmd.image_barrier(*wavelet_img_high_res, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
 	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
 	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 	                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	if (wavelet_img_low_res)
+	{
+		cmd.image_barrier(*wavelet_img_low_res, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+		                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+		                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		                  VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+	}
 
 	// De-quantize
 	for (int level = 0; level < DecompositionLevels; level++)
@@ -276,8 +284,8 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				push.resolution.x = wavelet_img->get_width(level);
-				push.resolution.y = wavelet_img->get_height(level);
+				push.resolution.x = wavelet_img_high_res->get_width(level);
+				push.resolution.y = wavelet_img_high_res->get_height(level);
 				push.output_layer = band;
 				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
 				push.block_stride_32x32 = block_meta[component][level][band].block_stride_32x32;
@@ -293,9 +301,8 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 		}
 	}
 
-	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
 	auto end_dequant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	cmd.end_region();
@@ -307,7 +314,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 
 bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 {
-	cmd.set_program(shaders.idwt[HighPrecision]);
+	cmd.set_program(shaders.idwt[Configuration::get().get_precision()]);
 	cmd.enable_subgroup_size_control(true);
 	cmd.set_subgroup_size_log2(true, 2, 6);
 

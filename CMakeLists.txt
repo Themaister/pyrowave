@@ -30,7 +30,16 @@ target_include_directories(pyrowave PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(pyrowave PRIVATE ${PYROWAVE_CXX_FLAGS})
 
 option(PYROWAVE_STANDALONE "Build PyroWave as a standalone sandbox." ON)
-option(PYROWAVE_HIGH_PRECISION "Build PyroWave for FP32 (slower, but allows highest quality at very high bit-rates)." OFF)
+
+option(PYROWAVE_FP32_STORAGE "Configure for full FP32 and extended precision." OFF)
+option(PYROWAVE_FP32_MATH "Configure for FP32 arithmetic, but reduced range storage." ON)
+if (PYROWAVE_FP32_STORAGE)
+    target_compile_definitions(pyrowave PRIVATE PYROWAVE_PRECISION=2)
+elseif(PYROWAVE_FP32_MATH)
+    target_compile_definitions(pyrowave PRIVATE PYROWAVE_PRECISION=1)
+else()
+    target_compile_definitions(pyrowave PRIVATE PYROWAVE_PRECISION=0)
+endif()
 
 if (PYROWAVE_STANDALONE)
     add_library(pyrowave-utils STATIC yuv4mpeg.cpp yuv4mpeg.hpp)
@@ -60,7 +69,3 @@ if (PYROWAVE_STANDALONE)
 endif()
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
-
-if (PYROWAVE_HIGH_PRECISION)
-    target_compile_definitions(pyrowave PRIVATE PYROWAVE_HIGH_PRECISION=1)
-endif()

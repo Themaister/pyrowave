@@ -140,7 +140,9 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 float Encoder::Impl::get_quant_resolution(int level, int component, int band) const
 {
 	// FP16 range is limited, and this is more than a good enough initial estimate.
-	return std::min<float>(HighPrecision ? 2048.0f : 512.0f, get_noise_power_normalized_quant_resolution(level, component, band));
+	return std::min<float>(
+			Configuration::get().get_precision() >= 1 ? 4096.0f : 512.0f,
+			get_noise_power_normalized_quant_resolution(level, component, band));
 }
 
 float Encoder::Impl::get_noise_power_normalized_quant_resolution(int level, int component, int band) const
@@ -149,7 +151,7 @@ float Encoder::Impl::get_noise_power_normalized_quant_resolution(int level, int 
 	// The low-pass gain for CDF 9/7 is 6 dB (1 bit). Every decomposition level subtracts 6 dB.
 
 	// Maybe make this based on the max rate to have a decent initial estimate.
-	int bits = HighPrecision ? 8 : 6;
+	int bits = Configuration::get().get_precision() >= 1 ? 8 : 6;
 
 	if (band == 0)
 		bits += 2;
@@ -222,8 +224,8 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 
 	for (int level = 0; level < DecompositionLevels; level++)
 	{
-		auto level_width = wavelet_img->get_width(level);
-		auto level_height = wavelet_img->get_height(level);
+		auto level_width = wavelet_img_high_res->get_width(level);
+		auto level_height = wavelet_img_high_res->get_height(level);
 
 		for (int component = 0; component < NumComponents; component++)
 		{
@@ -364,8 +366,8 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
 			{
-				auto level_width = wavelet_img->get_width(level);
-				auto level_height  = wavelet_img->get_height(level);
+				auto level_width = wavelet_img_high_res->get_width(level);
+				auto level_height  = wavelet_img_high_res->get_height(level);
 
 				push.resolution.x = level_width;
 				push.resolution.y = level_height;
@@ -443,8 +445,8 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 			{
 				float quant_res = quant_scale < 0.0f ? get_quant_resolution(level, component, band) : quant_scale;
 
-				push.resolution.x = wavelet_img->get_width(level);
-				push.resolution.y = wavelet_img->get_height(level);
+				push.resolution.x = wavelet_img_high_res->get_width(level);
+				push.resolution.y = wavelet_img_high_res->get_height(level);
 				push.resolution_8x8_blocks.x = (push.resolution.x + 7) / 8;
 				push.resolution_8x8_blocks.y = (push.resolution.y + 7) / 8;
 				push.inv_resolution.x = 1.0f / float(push.resolution.x);
@@ -491,7 +493,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 	} push = {};
 
 	// Forward transforms.
-	cmd.set_program(shaders.dwt[HighPrecision]);
+	cmd.set_program(shaders.dwt[PYROWAVE_PRECISION]);
 
 	// Only need simple 2-lane swaps.
 	cmd.set_subgroup_size_log2(true, 2, 7);
@@ -1139,9 +1141,16 @@ bool Encoder::Impl::encode(CommandBuffer &cmd, const ViewBuffers &views, const B
 {
 	sequence_count = (sequence_count + 1) & SequenceCountMask;
 
-	cmd.image_barrier(*wavelet_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+	cmd.image_barrier(*wavelet_img_high_res, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
 	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
 	                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+	if (wavelet_img_low_res)
+	{
+		cmd.image_barrier(*wavelet_img_low_res, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+		                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+		                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+	}
 
 	cmd.fill_buffer(*payload_data, 0, 0, 2 * sizeof(uint32_t));
 	cmd.fill_buffer(*bucket_buffer, 0);
