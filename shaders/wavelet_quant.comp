@@ -66,6 +66,7 @@ layout(push_constant) uniform Registers
     float quant_resolution;
     int block_offset;
     int block_stride;
+    float rdo_distortion_scale;
 } registers;
 
 float max4(vec4 v)
@@ -123,7 +124,7 @@ float compute_square_error(mat2x4 v, int q, out uint num_significant_values)
     iv = mat2x4(trunc(ldexp(iv[0], ivec4(q))), trunc(ldexp(iv[1], ivec4(q))));
     mat2x4 err = v - iv;
     num_significant_values = subgroupClusteredAdd(num_significant_values, 8);
-    return dot(err[0], err[0]) + dot(err[1], err[1]);
+    return (dot(err[0], err[0]) + dot(err[1], err[1])) * registers.rdo_distortion_scale;
 }
 
 struct QuantResult
@@ -244,7 +245,7 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels)
         if ((gl_SubgroupInvocationID & 7u) == 0)
         {
             block_stats.stats[block_index].errors[q] = QuantStats(
-                float16_t(square_error),
+                float16_t(min(square_error, 60000.0)),
                 uint16_t(quant_result.encode_cost_late_bits));
         }
     }
@@ -252,7 +253,7 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels)
     // Record distortion for throwing away everything.
     float square_error = subgroupClusteredAdd((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * inv_quant_squared, 8);
     if ((gl_SubgroupInvocationID & 7u) == 0)
-        block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(square_error), uint16_t(0));
+        block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(min(60000.0, square_error)), uint16_t(0));
 
     uint byte_offset = scan + global_offset;
     bool need_sign = result.block4x2_shifted != 0 || quality_planes != 0;

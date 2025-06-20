@@ -56,7 +56,6 @@ layout(push_constant) uniform Registers
 {
     ivec2 resolution;
     ivec2 resolution_8x8_blocks;
-    float rdo_distortion_scale;
     int block_offset_8x8;
     int block_stride_8x8;
     int block_offset_32x32;
@@ -175,7 +174,7 @@ void main()
         if (block8x8_in_range)
         {
             QuantStats stats = block_stats.stats[block_index_8x8].errors[min(i, num_active_planes)];
-            dist = float(stats.square_error) * registers.rdo_distortion_scale;
+            dist = float(stats.square_error);
             cost = uint(stats.payload_cost);
         }
 

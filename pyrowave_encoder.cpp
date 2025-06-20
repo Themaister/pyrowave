@@ -34,6 +34,7 @@ struct QuantizerPushData
 	float quant_resolution;
 	int32_t block_offset;
 	int32_t block_stride;
+	float rdo_distortion_scale;
 };
 
 struct BlockPackingPushData
@@ -53,7 +54,6 @@ struct AnalyzeRateControlPushData
 {
 	ivec2 resolution;
 	ivec2 resolution_8x8_blocks;
-	float rdo_distortion_scale;
 	int32_t block_offset_8x8;
 	int32_t block_stride_8x8;
 	int32_t block_offset_32x32;
@@ -373,7 +373,6 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 				push.resolution.y = level_height;
 				push.resolution_8x8_blocks.x = (level_width + 7) / 8;
 				push.resolution_8x8_blocks.y = (level_height + 7) / 8;
-				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
 				push.block_offset_8x8 = block_meta[component][level][band].block_offset_8x8;
 				push.block_stride_8x8 = block_meta[component][level][band].block_stride_8x8;
 				push.block_offset_32x32 = block_meta[component][level][band].block_offset_32x32;
@@ -453,6 +452,7 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 				push.inv_resolution.y = 1.0f / float(push.resolution.y);
 				push.input_layer = float(band);
 				push.quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res));
+				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
 
 				int blocks_x = (push.resolution.x + 31) / 32;
 				int blocks_y = (push.resolution.y + 31) / 32;
