@@ -452,7 +452,7 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 				push.inv_resolution.y = 1.0f / float(push.resolution.y);
 				push.input_layer = float(band);
 				push.quant_resolution = 1.0f / decode_quant(encode_quant(1.0f / quant_res));
-				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band);
+				push.rdo_distortion_scale = get_quant_rdo_distortion_scale(level, component, band) * (1.0f / 256.0f);
 
 				int blocks_x = (push.resolution.x + 31) / 32;
 				int blocks_y = (push.resolution.y + 31) / 32;
