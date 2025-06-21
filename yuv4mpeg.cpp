@@ -85,9 +85,9 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 		format = Format::YUV420P16;
 		unorm_scale = float(0xffff);
 	}
-	else if (params.find("C420") != std::string::npos)
+	else if (params.find("C444") != std::string::npos)
 	{
-		format = Format::YUV420P;
+		format = Format::YUV444P;
 	}
 	else
 	{

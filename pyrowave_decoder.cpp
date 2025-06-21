@@ -122,6 +122,12 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 				return false;
 			}
 
+			if (seq->chroma_resolution != int(chroma))
+			{
+				LOGE("Chroma resolution mismatch!\n");
+				return false;
+			}
+
 			uint8_t diff = (header->sequence - last_seq) & SequenceCountMask;
 			if (last_seq != UINT32_MAX && diff > (SequenceCountMask / 2))
 			{
@@ -142,12 +148,6 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 				{
 					LOGE("Dimension mismatch in seq packet, (%d, %d) != (%d, %d)\n",
 					     seq->width_minus_1 + 1, seq->height_minus_1 + 1, width, height);
-					return false;
-				}
-
-				if (seq->chroma_resolution != CHROMA_RESOLUTION_420)
-				{
-					LOGE("Only support 420 subsampling.\n");
 					return false;
 				}
 
@@ -275,7 +275,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 		for (int component = 0; component < NumComponents; component++)
 		{
 			// Ignore top-level CbCr when doing 420 subsampling.
-			if (level == 0 && component != 0)
+			if (level == 0 && component != 0 && chroma == ChromaSubsampling::Chroma420)
 				continue;
 
 			char label[128];
@@ -339,24 +339,28 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 		if (input_level == 0)
 		{
-			cmd.set_storage_texture(0, 1, *views.planes[0]);
-			cmd.begin_region("iDWT final");
-
-#if 0
-			if (mode == Mode::RGB)
+			cmd.set_specialization_constant(0, true);
+			if (chroma == ChromaSubsampling::Chroma444)
 			{
 				for (int c = 0; c < NumComponents; c++)
-					cmd.set_texture(0, c, *component_layer_views[c][input_level], *mirror_repeat_sampler);
+				{
+					char label[64];
+					snprintf(label, sizeof(label), "iDWT final, component %u", c);
+					cmd.begin_region(label);
+					cmd.set_storage_texture(0, 1, *views.planes[c]);
+					cmd.set_texture(0, 0, *component_layer_views[c][input_level], *mirror_repeat_sampler);
+					cmd.dispatch((push.resolution.x + 15) / 16, (push.resolution.y + 15) / 16, 1);
+					cmd.end_region();
+				}
 			}
 			else
-#endif
 			{
-				cmd.set_specialization_constant(0, true);
+				cmd.set_storage_texture(0, 1, *views.planes[0]);
+				cmd.begin_region("iDWT final");
 				cmd.set_texture(0, 0, *component_layer_views[0][input_level], *mirror_repeat_sampler);
+				cmd.dispatch((push.resolution.x + 15) / 16, (push.resolution.y + 15) / 16, 1);
+				cmd.end_region();
 			}
-
-			cmd.dispatch((push.resolution.x + 15) / 16, (push.resolution.y + 15) / 16, 1);
-			cmd.end_region();
 		}
 		else
 		{
@@ -364,7 +368,7 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 			{
 				cmd.set_texture(0, 0, *component_layer_views[c][input_level], *mirror_repeat_sampler);
 
-				if (/*mode == Mode::YCbCr_420 &&*/ c != 0 && input_level == 1)
+				if (chroma == ChromaSubsampling::Chroma420 && c != 0 && input_level == 1)
 				{
 					cmd.set_storage_texture(0, 1, *views.planes[c]);
 					cmd.set_specialization_constant(0, true);
@@ -441,7 +445,7 @@ void Decoder::Impl::clear()
 	payload_data_cpu.clear();
 }
 
-bool Decoder::init(Vulkan::Device *device, int width, int height)
+bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma_)
 {
 	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
 	constexpr VkSubgroupFeatureFlags required_features =
@@ -472,7 +476,7 @@ bool Decoder::init(Vulkan::Device *device, int width, int height)
 	if (!device->get_device_features().vk12_features.shaderFloat16)
 		return false;
 
-	if (!impl->init(device, width, height))
+	if (!impl->init(device, width, height, chroma_))
 		return false;
 	clear();
 	return true;

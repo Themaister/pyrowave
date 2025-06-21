@@ -156,7 +156,7 @@ private:
 
 struct WaveletBuffers
 {
-	bool init(Vulkan::Device *device, int width, int height);
+	bool init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma);
 
 	Vulkan::Device *device = nullptr;
 	Vulkan::ImageHandle wavelet_img_low_res;
@@ -196,6 +196,7 @@ protected:
 	void init_samplers();
 	void allocate_images();
 	virtual void init_block_meta();
+	ChromaSubsampling chroma = {};
 
 	Shaders<> shaders;
 

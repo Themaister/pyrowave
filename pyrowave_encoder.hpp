@@ -34,7 +34,7 @@ public:
 		size_t target_size;
 	};
 
-	bool init(Vulkan::Device *device, int width, int height);
+	bool init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma);
 	bool encode(Vulkan::CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers);
 
 	// Debug hackery

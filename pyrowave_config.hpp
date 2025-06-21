@@ -13,4 +13,10 @@ struct ViewBuffers
 {
 	const Vulkan::ImageView *planes[3];
 };
+
+enum class ChromaSubsampling
+{
+	Chroma420,
+	Chroma444
+};
 }

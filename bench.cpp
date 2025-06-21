@@ -68,7 +68,7 @@ struct YCbCrImages
 	PyroWave::ViewBuffers views;
 };
 
-static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt = VK_FORMAT_R8_UNORM)
+static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt, PyroWave::ChromaSubsampling chroma)
 {
 	YCbCrImages images;
 	auto info = ImageCreateInfo::immutable_2d_image(width, height, fmt);
@@ -79,8 +79,11 @@ static YCbCrImages create_ycbcr_images(Device &device, int width, int height, Vk
 	images.images[0] = device.create_image(info);
 	device.set_name(*images.images[0], "Y");
 
-	info.width >>= 1;
-	info.height >>= 1;
+	if (chroma == PyroWave::ChromaSubsampling::Chroma420)
+	{
+		info.width >>= 1;
+		info.height >>= 1;
+	}
 
 	images.images[1] = device.create_image(info);
 	device.set_name(*images.images[1], "Cb");
@@ -104,10 +107,14 @@ static void run_vulkan_test(Device &device, const char *in_path)
 	auto width = input.get_width();
 	auto height = input.get_height();
 
-	auto inputs = create_ycbcr_images(device, width, height);
+	auto chroma = input.get_format() == YUV4MPEGFile::Format::YUV444P ?
+	              PyroWave::ChromaSubsampling::Chroma444 : PyroWave::ChromaSubsampling::Chroma420;
+	auto fmt = input.get_format() == YUV4MPEGFile::Format::YUV420P16 ?
+	           VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+	auto inputs = create_ycbcr_images(device, width, height, fmt, chroma);
 
 	PyroWave::Encoder enc;
-	if (!enc.init(&device, width, height))
+	if (!enc.init(&device, width, height, chroma))
 		return;
 
 	if (!input.begin_frame())

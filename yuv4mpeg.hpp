@@ -24,6 +24,7 @@ public:
 	enum class Format
 	{
 		YUV420P,
+		YUV444P,
 		YUV420P16
 	};
 

@@ -22,7 +22,7 @@ public:
 	Decoder();
 	~Decoder();
 
-	bool init(Vulkan::Device *device, int width, int height);
+	bool init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma);
 	void clear();
 	bool push_packet(const void *data, size_t size);
 	bool decode(Vulkan::CommandBuffer &cmd, const ViewBuffers &views);

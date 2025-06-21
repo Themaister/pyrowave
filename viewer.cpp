@@ -24,7 +24,7 @@ struct YCbCrImages
 	PyroWave::ViewBuffers views;
 };
 
-static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt = VK_FORMAT_R8_UNORM)
+static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt, PyroWave::ChromaSubsampling chroma)
 {
 	YCbCrImages images;
 	auto info = ImageCreateInfo::immutable_2d_image(width, height, fmt);
@@ -35,8 +35,11 @@ static YCbCrImages create_ycbcr_images(Device &device, int width, int height, Vk
 	images.images[0] = device.create_image(info);
 	device.set_name(*images.images[0], "Y");
 
-	info.width >>= 1;
-	info.height >>= 1;
+	if (chroma == PyroWave::ChromaSubsampling::Chroma420)
+	{
+		info.width >>= 1;
+		info.height >>= 1;
+	}
 
 	images.images[1] = device.create_image(info);
 	device.set_name(*images.images[1], "Cb");
@@ -122,10 +125,11 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 	void on_device_created(const DeviceCreatedEvent &e)
 	{
 		auto format = file.get_format() == YUV4MPEGFile::Format::YUV420P16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-		in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format);
-		out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format);
-		enc.init(&e.get_device(), file.get_width(), file.get_height());
-		dec.init(&e.get_device(), file.get_width(), file.get_height());
+		auto chroma = file.get_format() == YUV4MPEGFile::Format::YUV444P ? PyroWave::ChromaSubsampling::Chroma444 : PyroWave::ChromaSubsampling::Chroma420;
+		in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
+		out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
+		enc.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
+		dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
 	}
 
 	void on_device_destroyed(const DeviceCreatedEvent &)

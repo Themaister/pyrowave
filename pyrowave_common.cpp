@@ -139,7 +139,7 @@ void WaveletBuffers::init_block_meta()
 		for (int component = 0; component < NumComponents; component++)
 		{
 			// Ignore top-level CbCr when doing 420 subsampling.
-			if (level == 0 && component != 0)
+			if (level == 0 && component != 0 && chroma == ChromaSubsampling::Chroma420)
 				continue;
 
 			for (int band = (level == DecompositionLevels - 1 ? 0 : 1); band < 4; band++)
@@ -162,11 +162,12 @@ void WaveletBuffers::init_block_meta()
 	}
 }
 
-bool WaveletBuffers::init(Device *device_, int width_, int height_)
+bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsampling chroma_)
 {
 	device = device_;
 	width = width_;
 	height = height_;
+	chroma = chroma_;
 
 	aligned_width = align(width, Alignment);
 	aligned_height = align(height, Alignment);

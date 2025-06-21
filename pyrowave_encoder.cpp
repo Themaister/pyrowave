@@ -126,7 +126,13 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 
 	// Heavily discount chroma quality.
 	if (component != 0 && level != DecompositionLevels - 1)
-		csf *= 0.4f;
+	{
+		// Consider chroma a little more important if we're not subsampling.
+		if (chroma == ChromaSubsampling::Chroma444)
+			csf *= 0.8f;
+		else
+			csf *= 0.4f;
+	}
 
 	// Due to filtering, distortion in lower bands will result in more noise power.
 	// By scaling the distortion by this factor, we ensure uniform results.
@@ -230,7 +236,7 @@ bool Encoder::Impl::block_packing(CommandBuffer &cmd, const BitstreamBuffers &bu
 		for (int component = 0; component < NumComponents; component++)
 		{
 			// Ignore top-level CbCr when doing 420 subsampling.
-			if (level == 0 && component != 0)
+			if (level == 0 && component != 0 && chroma == ChromaSubsampling::Chroma420)
 				continue;
 
 			char label[128];
@@ -355,7 +361,7 @@ bool Encoder::Impl::analyze_rdo(CommandBuffer &cmd)
 		for (int component = 0; component < NumComponents; component++)
 		{
 			// Ignore top-level CbCr when doing 420 subsampling.
-			if (level == 0 && component != 0)
+			if (level == 0 && component != 0 && chroma == ChromaSubsampling::Chroma420)
 				continue;
 
 			AnalyzeRateControlPushData push = {};
@@ -431,7 +437,7 @@ bool Encoder::Impl::quant(CommandBuffer &cmd, float quant_scale)
 		for (int component = 0; component < NumComponents; component++)
 		{
 			// Ignore top-level CbCr when doing 420 subsampling.
-			if (level == 0 && component != 0)
+			if (level == 0 && component != 0 && chroma == ChromaSubsampling::Chroma420)
 				continue;
 
 			QuantizerPushData push = {};
@@ -523,25 +529,35 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 		if (output_level == 0)
 		{
-			cmd.set_specialization_constant(0, /*mode == Mode::YCbCr_420*/ true);
-			cmd.set_texture(0, 0, *views.planes[0], *mirror_repeat_sampler);
-			cmd.set_storage_texture(0, 1, *component_layer_views[0][output_level]);
+			cmd.set_specialization_constant(0, true);
 
-			//if (mode == Mode::RGB)
-			//	cmd.begin_region("DWT RGB -> YCbCr");
-			//else
+			if (chroma == ChromaSubsampling::Chroma444)
 			{
-				cmd.begin_region("DWT level 0 Y");
+				for (int c = 0; c < NumComponents; c++)
+				{
+					char label[64];
+					snprintf(label, sizeof(label), "DWT level 0, component %u", c);
+					cmd.begin_region(label);
+					cmd.set_texture(0, 0, *views.planes[c], *mirror_repeat_sampler);
+					cmd.set_storage_texture(0, 1, *component_layer_views[c][output_level]);
+					cmd.dispatch((push.aligned_resolution.x + 31) / 32, (push.aligned_resolution.y + 31) / 32, 1);
+					cmd.end_region();
+				}
 			}
-
-			cmd.dispatch((push.aligned_resolution.x + 31) / 32, (push.aligned_resolution.y + 31) / 32, 1);
-			cmd.end_region();
+			else
+			{
+				cmd.set_texture(0, 0, *views.planes[0], *mirror_repeat_sampler);
+				cmd.set_storage_texture(0, 1, *component_layer_views[0][output_level]);
+				cmd.begin_region("DWT level 0 Y");
+				cmd.dispatch((push.aligned_resolution.x + 31) / 32, (push.aligned_resolution.y + 31) / 32, 1);
+				cmd.end_region();
+			}
 		}
 		else
 		{
 			for (int c = 0; c < NumComponents; c++)
 			{
-				if (c != 0 && output_level == 1)
+				if (chroma == ChromaSubsampling::Chroma420 && c != 0 && output_level == 1)
 				{
 					push.resolution = uvec2(views.planes[c]->get_view_width(), views.planes[c]->get_view_height());
 					push.aligned_resolution.x = aligned_width >> output_level;
@@ -562,9 +578,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 				char label[64];
 				snprintf(label, sizeof(label), "DWT level %u, component %u", output_level, c);
 				cmd.begin_region(label);
-				{
-					cmd.dispatch((push.aligned_resolution.x + 31) / 32, (push.aligned_resolution.y + 31) / 32, 1);
-				}
+				cmd.dispatch((push.aligned_resolution.x + 31) / 32, (push.aligned_resolution.y + 31) / 32, 1);
 				cmd.end_region();
 			}
 		}
@@ -1059,6 +1073,7 @@ size_t Encoder::Impl::packetize(Packet *packets, size_t packet_boundary,
 	header.extended = 1;
 	header.code = BITSTREAM_EXTENDED_CODE_START_OF_FRAME;
 	header.total_blocks = num_non_zero_blocks;
+	header.chroma_resolution = chroma == ChromaSubsampling::Chroma444 ? CHROMA_RESOLUTION_444 : CHROMA_RESOLUTION_420;
 
 	assert(sizeof(header) <= size);
 	memcpy(output_bitstream, &header, sizeof(header));
@@ -1174,7 +1189,7 @@ Encoder::Encoder()
 	impl.reset(new Impl);
 }
 
-bool Encoder::init(Device *device, int width_, int height_)
+bool Encoder::init(Device *device, int width_, int height_, ChromaSubsampling chroma_)
 {
 	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
 	constexpr VkSubgroupFeatureFlags required_features =
@@ -1213,7 +1228,7 @@ bool Encoder::init(Device *device, int width_, int height_)
 	    !device->supports_subgroup_size_log2(true, 6, 6))
 		return false;
 
-	return impl->init(device, width_, height_);
+	return impl->init(device, width_, height_, chroma_);
 }
 
 bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
