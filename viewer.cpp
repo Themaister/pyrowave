@@ -105,6 +105,12 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 				mode = Mode::Delta;
 			else if (e.get_key() == Key::S)
 				mode = Mode::Slide;
+			else if (e.get_key() == Key::P)
+			{
+				get_wsi().set_backbuffer_format(
+						get_wsi().get_backbuffer_format() == BackbufferFormat::HDR10 ?
+						BackbufferFormat::UNORM : BackbufferFormat::HDR10);
+			}
 		}
 
 		if (e.get_key_state() == KeyState::Pressed && e.get_key() == Key::Space)
@@ -115,8 +121,9 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 	void on_device_created(const DeviceCreatedEvent &e)
 	{
-		in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height());
-		out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height());
+		auto format = file.get_format() == YUV4MPEGFile::Format::YUV420P16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+		in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format);
+		out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format);
 		enc.init(&e.get_device(), file.get_width(), file.get_height());
 		dec.init(&e.get_device(), file.get_width(), file.get_height());
 	}
@@ -154,7 +161,8 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			for (int i = 0; i < 3; i++)
 			{
 				auto *y = cmd->update_image(*in_images.images[i]);
-				if (!file.read(y, in_images.images[i]->get_width() * in_images.images[i]->get_height()))
+				auto bytes_per_pixel = file.get_format() == YUV4MPEGFile::Format::YUV420P16 ? 2 : 1;
+				if (!file.read(y, in_images.images[i]->get_width() * in_images.images[i]->get_height() * bytes_per_pixel))
 				{
 					LOGE("Failed to read plane.\n");
 					device.submit_discard(cmd);
@@ -259,10 +267,16 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 		cmd->begin_render_pass(device.get_swapchain_render_pass(SwapchainRenderPass::ColorOnly));
 		cmd->set_sampler(0, 3, StockSampler::LinearClamp);
 
+		cmd->set_specialization_constant_mask(3);
+		cmd->set_specialization_constant(0, file.get_format() == YUV4MPEGFile::Format::YUV420P16);
+		cmd->set_specialization_constant(1, file.is_full_range());
+
 		CommandBufferUtil::setup_fullscreen_quad(*cmd, "builtin://shaders/quad.vert", "assets://yuv2rgb.frag",
 		                                         {{ "DELTA", mode == Mode::Delta ? 1 : 0 }});
 
 		x_slide = clamp(x_slide, 50, int(cmd->get_viewport().width) - 50);
+
+		const float full_color = get_wsi().get_backbuffer_format() == BackbufferFormat::HDR10 ? 0.75f : 1.0f;
 
 		if (mode == Mode::Flicker)
 		{
@@ -287,7 +301,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 					 double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
 			         paused ? " (paused)" : "");
 			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
-			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(1.0f, 1.0f, 0.0f, 1.0f),
+			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(full_color, full_color, 0.0f, 1.0f),
 			                          Font::Alignment::TopLeft);
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}
@@ -315,14 +329,14 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			         double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
 			         paused ? " (paused)" : "");
 			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
-			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(1.0f, 1.0f, 0.0f, 1.0f),
+			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(full_color, full_color, 0.0f, 1.0f),
 			                          Font::Alignment::TopLeft);
 			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
 			                          text, vec3(18, 22, 0.5f), vec2(400, 200), vec4(0.0f, 0.0f, 0.0f, 1.0f),
 			                          Font::Alignment::TopLeft);
 			flat_renderer.render_quad(vec3(float(x_slide), 0.0f, 0.8f),
 			                          vec2(2.0f, cmd->get_viewport().height),
-			                          vec4(1.0f, 1.0f, 0.0f, 1.0f));
+			                          vec4(full_color, full_color, 0.0f, 1.0f));
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}
 		else
@@ -338,7 +352,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			         double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
 			         paused ? " (paused)" : "");
 			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
-			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(1.0f, 1.0f, 0.0f, 1.0f),
+			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(full_color, full_color, 0.0f, 1.0f),
 			                          Font::Alignment::TopLeft);
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}

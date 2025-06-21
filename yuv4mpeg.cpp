@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 #include "yuv4mpeg.hpp"
 #include <string.h>
+#include <stdint.h>
 
 bool YUV4MPEGFile::open_read(const std::string &path)
 {
@@ -63,6 +64,42 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 		return false;
 	height = strtol(params.c_str() + h_pos + 1, nullptr, 0);
 
+	if (params.find("C420p10") != std::string::npos)
+	{
+		// Crude up-convert.
+		format = Format::YUV420P16;
+		unorm_scale = float(1 << 10) - 1.0f;
+	}
+	else if (params.find("C420p12") != std::string::npos)
+	{
+		format = Format::YUV420P16;
+		unorm_scale = float(1 << 12) - 1.0f;
+	}
+	else if (params.find("C420p14") != std::string::npos)
+	{
+		format = Format::YUV420P16;
+		unorm_scale = float(1 << 14) - 1.0f;
+	}
+	else if (params.find("C420p16") != std::string::npos)
+	{
+		format = Format::YUV420P16;
+		unorm_scale = float(0xffff);
+	}
+	else if (params.find("C420") != std::string::npos)
+	{
+		format = Format::YUV420P;
+	}
+	else
+	{
+		// Fallback.
+		format = Format::YUV420P;
+	}
+
+	if (params.find("XCOLORRANGE=LIMITED") != std::string::npos)
+		full_range = false;
+	else if (params.find("XCOLORRANGE=FULL") != std::string::npos)
+		full_range = true;
+
 	// Just assume normal 420 for now.
 	return width > 0 && height > 0;
 }
@@ -87,12 +124,55 @@ bool YUV4MPEGFile::begin_frame()
 
 bool YUV4MPEGFile::read(void *pixels, size_t size)
 {
-	return fread(pixels, 1, size, file.get()) == size;
+	if (format == Format::YUV420P16)
+	{
+		// Recale to P016.
+		auto *out = static_cast<uint16_t *>(pixels);
+		uint16_t buffer[1024];
+		size /= 2;
+
+		while (size)
+		{
+			auto to_read = std::min<size_t>(size, 1024);
+			if (fread(buffer, 2, to_read, file.get()) != to_read)
+				return false;
+			for (size_t i = 0; i < to_read; i++)
+				out[i] = uint16_t(std::min<float>(1.0f, float(buffer[i]) / unorm_scale) * float(0xffff) + 0.5f);
+
+			size -= to_read;
+			out += to_read;
+		}
+
+		return true;
+	}
+	else
+		return fread(pixels, 1, size, file.get()) == size;
 }
 
 bool YUV4MPEGFile::write(const void *pixels, size_t size)
 {
-	return fwrite(pixels, 1, size, file.get()) == size;
+	if (format == Format::YUV420P16)
+	{
+		auto *inputs = static_cast<const uint16_t *>(pixels);
+		uint16_t buffer[1024];
+		size /= 2;
+
+		while (size)
+		{
+			auto to_write = std::min<size_t>(size, 1024);
+			for (size_t i = 0; i < to_write; i++)
+				buffer[i] = uint16_t(unorm_scale * float(inputs[i]) / float(0xffff) + 0.5f);
+			if (fwrite(buffer, 2, to_write, file.get()) != to_write)
+				return false;
+
+			size -= to_write;
+			inputs += to_write;
+		}
+
+		return true;
+	}
+	else
+		return fwrite(pixels, 1, size, file.get()) == size;
 }
 
 int YUV4MPEGFile::get_width() const
@@ -108,4 +188,14 @@ int YUV4MPEGFile::get_height() const
 const std::string &YUV4MPEGFile::get_params() const
 {
 	return params;
+}
+
+YUV4MPEGFile::Format YUV4MPEGFile::get_format() const
+{
+	return format;
+}
+
+bool YUV4MPEGFile::is_full_range() const
+{
+	return full_range;
 }

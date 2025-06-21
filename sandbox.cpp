@@ -158,10 +158,11 @@ static void run_encoder_test(Device &device,
 #endif
 
 	BufferHandle out_buffers[3];
+	int bytes_per_pixel = f.get_format() == YUV4MPEGFile::Format::YUV420P16 ? 2 : 1;
 	for (int i = 0; i < 3; i++)
 	{
 		BufferCreateInfo info = {};
-		info.size = outputs.planes[i]->get_view_width() * outputs.planes[i]->get_view_height();
+		info.size = outputs.planes[i]->get_view_width() * outputs.planes[i]->get_view_height() * bytes_per_pixel;
 		info.domain = BufferDomain::CachedHost;
 		info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 		out_buffers[i] = device.create_buffer(info);
@@ -443,8 +444,9 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 	auto width = input.get_width();
 	auto height = input.get_height();
 
-	auto inputs = create_ycbcr_images(device, width, height);
-	auto outputs = create_ycbcr_images(device, width, height);
+	int bytes_per_pixel = input.get_format() == YUV4MPEGFile::Format::YUV420P16 ? 2 : 1;
+	auto inputs = create_ycbcr_images(device, width, height, bytes_per_pixel == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM);
+	auto outputs = create_ycbcr_images(device, width, height, bytes_per_pixel == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM);
 
 	PyroWave::Encoder enc;
 	if (!enc.init(&device, width, height))
@@ -480,7 +482,7 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 		for (int i = 0; i < 3; i++)
 		{
 			auto *y = cmd->update_image(*inputs.images[i]);
-			if (!input.read(y, inputs.images[i]->get_width() * inputs.images[i]->get_height()))
+			if (!input.read(y, inputs.images[i]->get_width() * inputs.images[i]->get_height() * bytes_per_pixel))
 			{
 				LOGE("Failed to read plane.\n");
 				device.submit_discard(cmd);

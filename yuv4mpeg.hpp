@@ -21,6 +21,15 @@ public:
 	bool write(const void *pixels, size_t size);
 	bool read(void *pixels, size_t size);
 
+	enum class Format
+	{
+		YUV420P,
+		YUV420P16
+	};
+
+	Format get_format() const;
+	bool is_full_range() const;
+
 private:
 	enum class Mode { Read, Write };
 	bool open(const std::string &path, Mode mode);
@@ -29,4 +38,7 @@ private:
 	int width = 0, height = 0;
 	std::string params;
 	Mode mode = {};
+	Format format = {};
+	bool full_range = false;
+	float unorm_scale = 1.0f;
 };
