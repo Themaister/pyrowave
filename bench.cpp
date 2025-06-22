@@ -107,10 +107,8 @@ static void run_vulkan_test(Device &device, const char *in_path)
 	auto width = input.get_width();
 	auto height = input.get_height();
 
-	auto chroma = input.get_format() == YUV4MPEGFile::Format::YUV444P ?
-	              PyroWave::ChromaSubsampling::Chroma444 : PyroWave::ChromaSubsampling::Chroma420;
-	auto fmt = input.get_format() == YUV4MPEGFile::Format::YUV420P16 ?
-	           VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+	auto fmt = YUV4MPEGFile::format_to_bytes_per_component(input.get_format()) == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+	auto chroma = YUV4MPEGFile::format_has_subsampling(input.get_format()) ? PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
 	auto inputs = create_ycbcr_images(device, width, height, fmt, chroma);
 
 	PyroWave::Encoder enc;

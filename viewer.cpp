@@ -124,8 +124,8 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 	void on_device_created(const DeviceCreatedEvent &e)
 	{
-		auto format = file.get_format() == YUV4MPEGFile::Format::YUV420P16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-		auto chroma = file.get_format() == YUV4MPEGFile::Format::YUV444P ? PyroWave::ChromaSubsampling::Chroma444 : PyroWave::ChromaSubsampling::Chroma420;
+		auto format = YUV4MPEGFile::format_to_bytes_per_component(file.get_format()) == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+		auto chroma = YUV4MPEGFile::format_has_subsampling(file.get_format()) ? PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
 		in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
 		out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
 		enc.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
@@ -165,8 +165,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			for (int i = 0; i < 3; i++)
 			{
 				auto *y = cmd->update_image(*in_images.images[i]);
-				auto bytes_per_pixel = file.get_format() == YUV4MPEGFile::Format::YUV420P16 ? 2 : 1;
-				if (!file.read(y, in_images.images[i]->get_width() * in_images.images[i]->get_height() * bytes_per_pixel))
+				if (!file.read(y, in_images.images[i]->get_width() * in_images.images[i]->get_height() * YUV4MPEGFile::format_to_bytes_per_component(file.get_format())))
 				{
 					LOGE("Failed to read plane.\n");
 					device.submit_discard(cmd);

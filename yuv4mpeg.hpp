@@ -25,11 +25,15 @@ public:
 	{
 		YUV420P,
 		YUV444P,
-		YUV420P16
+		YUV420P16,
+		YUV444P16
 	};
 
 	Format get_format() const;
 	bool is_full_range() const;
+
+	static int format_to_bytes_per_component(Format format);
+	static bool format_has_subsampling(Format format);
 
 private:
 	enum class Mode { Read, Write };

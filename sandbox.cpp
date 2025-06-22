@@ -158,7 +158,7 @@ static void run_encoder_test(Device &device,
 #endif
 
 	BufferHandle out_buffers[3];
-	int bytes_per_pixel = f.get_format() == YUV4MPEGFile::Format::YUV420P16 ? 2 : 1;
+	int bytes_per_pixel = YUV4MPEGFile::format_to_bytes_per_component(f.get_format());
 	for (int i = 0; i < 3; i++)
 	{
 		BufferCreateInfo info = {};
@@ -267,13 +267,10 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 	auto width = input.get_width();
 	auto height = input.get_height();
 
-	int bytes_per_pixel = input.get_format() == YUV4MPEGFile::Format::YUV420P16 ? 2 : 1;
-
-	auto chroma = input.get_format() == YUV4MPEGFile::Format::YUV444P ? PyroWave::ChromaSubsampling::Chroma444 :
-	              PyroWave::ChromaSubsampling::Chroma420;
-
-	auto inputs = create_ycbcr_images(device, width, height, bytes_per_pixel == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM, chroma);
-	auto outputs = create_ycbcr_images(device, width, height, bytes_per_pixel == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM, chroma);
+	auto fmt = YUV4MPEGFile::format_to_bytes_per_component(input.get_format()) == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+	auto chroma = YUV4MPEGFile::format_has_subsampling(input.get_format()) ? PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
+	auto inputs = create_ycbcr_images(device, width, height, fmt, chroma);
+	auto outputs = create_ycbcr_images(device, width, height, fmt, chroma);
 
 	PyroWave::Encoder enc;
 	if (!enc.init(&device, width, height, chroma))
@@ -309,7 +306,7 @@ static void run_vulkan_test(Device &device, const char *in_path, const char *out
 		for (int i = 0; i < 3; i++)
 		{
 			auto *y = cmd->update_image(*inputs.images[i]);
-			if (!input.read(y, inputs.images[i]->get_width() * inputs.images[i]->get_height() * bytes_per_pixel))
+			if (!input.read(y, inputs.images[i]->get_width() * inputs.images[i]->get_height() * YUV4MPEGFile::format_to_bytes_per_component(input.get_format())))
 			{
 				LOGE("Failed to read plane.\n");
 				device.submit_discard(cmd);

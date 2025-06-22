@@ -15,6 +15,32 @@ bool YUV4MPEGFile::open_write(const std::string &path, const std::string &params
 	return open(path, Mode::Write);
 }
 
+int YUV4MPEGFile::format_to_bytes_per_component(Format format)
+{
+	switch (format)
+	{
+	case Format::YUV420P16:
+	case Format::YUV444P16:
+		return 2;
+
+	default:
+		return 1;
+	}
+}
+
+bool YUV4MPEGFile::format_has_subsampling(Format format)
+{
+	switch (format)
+	{
+	case Format::YUV420P:
+	case Format::YUV420P16:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
 bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 {
 	mode = mode_;
@@ -85,6 +111,26 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 		format = Format::YUV420P16;
 		unorm_scale = float(0xffff);
 	}
+	else if (params.find("C444p10") != std::string::npos)
+	{
+		format = Format::YUV444P16;
+		unorm_scale = float(1 << 10) - 1.0f;
+	}
+	else if (params.find("C444p12") != std::string::npos)
+	{
+		format = Format::YUV444P16;
+		unorm_scale = float(1 << 12) - 1.0f;
+	}
+	else if (params.find("C444p14") != std::string::npos)
+	{
+		format = Format::YUV444P16;
+		unorm_scale = float(1 << 14) - 1.0f;
+	}
+	else if (params.find("C444p16") != std::string::npos)
+	{
+		format = Format::YUV444P16;
+		unorm_scale = float(0xffff);
+	}
 	else if (params.find("C444") != std::string::npos)
 	{
 		format = Format::YUV444P;
@@ -100,7 +146,6 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 	else if (params.find("XCOLORRANGE=FULL") != std::string::npos)
 		full_range = true;
 
-	// Just assume normal 420 for now.
 	return width > 0 && height > 0;
 }
 
