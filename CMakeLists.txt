@@ -66,6 +66,13 @@ if (PYROWAVE_STANDALONE)
     add_granite_application(pyrowave-viewer viewer.cpp)
     target_link_libraries(pyrowave-viewer PRIVATE pyrowave pyrowave-utils)
     target_compile_definitions(pyrowave-viewer PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
+
+    if (WIN32)
+        add_executable(d3d12-interop-test d3d12_interop_test.cpp)
+        target_link_libraries(d3d12-interop-test PRIVATE granite-vulkan dxgi d3d12 SDL3-static granite-application-global-init pyrowave)
+        target_compile_definitions(d3d12-interop-test PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
+    endif()
 endif()
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
+
