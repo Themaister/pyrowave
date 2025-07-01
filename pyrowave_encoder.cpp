@@ -128,10 +128,8 @@ float Encoder::Impl::get_quant_rdo_distortion_scale(int level, int component, in
 	if (component != 0 && level != DecompositionLevels - 1)
 	{
 		// Consider chroma a little more important if we're not subsampling.
-		if (chroma == ChromaSubsampling::Chroma444)
-			csf *= 0.8f;
-		else
-			csf *= 0.4f;
+		if (chroma == ChromaSubsampling::Chroma420)
+			csf *= 0.6f;
 	}
 
 	// Due to filtering, distortion in lower bands will result in more noise power.
