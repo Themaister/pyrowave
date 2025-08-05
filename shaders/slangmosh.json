@@ -5,7 +5,8 @@
 			"compute": true,
 			"path": "dwt.comp",
 			"variants": [
-				{ "define": "PRECISION", "count": 3, "resolve": false }
+				{ "define": "PRECISION", "count": 3, "resolve": false },
+				{ "define": "FP16", "count": 2, "resolve": true }
 			]
 		},
 		{
@@ -18,7 +19,8 @@
 			"compute": true,
 			"path": "idwt.comp",
 			"variants": [
-				{ "define": "PRECISION", "count": 3, "resolve": false }
+				{ "define": "PRECISION", "count": 3, "resolve": false },
+				{ "define": "FP16", "count": 2, "resolve": true }
 			]
 		},
 		{

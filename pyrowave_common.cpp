@@ -180,7 +180,12 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsam
 	init_block_meta();
 
 	Vulkan::ResourceLayout layout;
-	shaders = Shaders<>(*device, layout, 0);
+
+	shaders = Shaders<>(*device, layout, [this](const char *, const char *env) {
+		if (strcmp(env, "FP16") == 0)
+			return device->get_device_features().vk12_features.shaderFloat16 ? 1 : 0;
+		return 0;
+	});
 
 	return true;
 }

@@ -473,8 +473,6 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 
 	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess)
 		return false;
-	if (!device->get_device_features().vk12_features.shaderFloat16)
-		return false;
 
 	if (!impl->init(device, width, height, chroma_))
 		return false;

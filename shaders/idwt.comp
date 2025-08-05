@@ -4,8 +4,11 @@
 
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_quad : require
+
+#if FP16
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_EXT_shader_subgroup_extended_types_float16 : require
+#endif
 
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const bool DCShift = false;
