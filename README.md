@@ -48,3 +48,14 @@ It's plausible pyrowave could be useful over fiber links.
 ### Bitstream definition
 
 See [docs/bitstream.md]()
+
+## Building
+
+PyroWave is intended to be built alongside PyroFling with Granite.
+For the sample and test applications in this repo however, check out
+https://github.com/Themaister/Granite before invoking CMake.
+
+```
+git clone --depth 1 --recursive --shallow-submodules https://github.com/Themaister/Granite Granite
+```
+
