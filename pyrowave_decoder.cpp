@@ -21,7 +21,7 @@ struct DequantizerPushData
 	int32_t block_stride_32x32;
 };
 
-struct Decoder::Impl : public WaveletBuffers
+struct Decoder::Impl final : public WaveletBuffers
 {
 	BufferHandle dequant_offset_buffer, payload_data;
 

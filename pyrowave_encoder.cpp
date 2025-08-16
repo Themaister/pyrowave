@@ -70,7 +70,7 @@ struct RDOperation
 	uint16_t block_saving;
 };
 
-struct Encoder::Impl : public WaveletBuffers
+struct Encoder::Impl final : public WaveletBuffers
 {
 	BufferHandle bucket_buffer, meta_buffer, block_stat_buffer, payload_data, quant_buffer;
 

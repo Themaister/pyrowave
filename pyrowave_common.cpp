@@ -23,6 +23,8 @@ Configuration::Configuration()
 		fprintf(stderr, "pyrowave: precision must be in range [0, 2].\n");
 		precision = PYROWAVE_PRECISION;
 	}
+
+	LOGI("Selection precision level: %d\n", precision);
 }
 
 Configuration &Configuration::get()

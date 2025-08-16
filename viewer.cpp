@@ -393,15 +393,26 @@ Application *application_create(int argc, char **argv)
 {
 	GRANITE_APPLICATION_SETUP_FILESYSTEM();
 
+#ifndef __ANDROID__
 	if (argc != 2)
 	{
 		LOGE("Usage: pyrowave-viewer test.y4m\n");
 		return nullptr;
 	}
+#endif
+
+	const char *path = nullptr;
+	if (argc >= 2)
+		path = argv[1];
+
+#ifdef __ANDROID__
+	if (!path)
+		path = "/data/local/tmp/test.y4m";
+#endif
 
 	try
 	{
-		auto *app = new ViewerApplication(argv[1]);
+		auto *app = new ViewerApplication(path);
 		return app;
 	}
 	catch (const std::exception &e)
