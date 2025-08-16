@@ -18,7 +18,7 @@ I'm mostly doing this for my own amusement, and I don't expect this codec to be 
 
 ### Colorspace
 
-Currently implemented YCbCr 4:2:0. 4:4:4 can also be supported trivially.
+Currently implemented YCbCr 4:2:0 and 4:4:4.
 
 ### Wavelets
 
