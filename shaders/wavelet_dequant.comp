@@ -6,8 +6,11 @@
 #extension GL_KHR_shader_subgroup_vote : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_shader_subgroup_shuffle_relative : require
+
+#if STORAGE_8BIT
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_16bit_storage : require
+#endif
 
 layout(local_size_x = 128) in;
 
@@ -18,6 +21,7 @@ layout(set = 0, binding = 1) readonly buffer PayloadOffsets
     uint data[];
 } payload_offsets;
 
+#if STORAGE_8BIT
 layout(set = 0, binding = 2) readonly buffer Payloads
 {
     uint data[];
@@ -32,6 +36,11 @@ layout(set = 0, binding = 2) readonly buffer Payloads8
 {
     uint8_t data[];
 } payload_data_u8;
+#else
+layout(set = 0, binding = 2) uniform usamplerBuffer PayloadU32;
+layout(set = 0, binding = 3) uniform mediump usamplerBuffer PayloadU16;
+layout(set = 0, binding = 4) uniform mediump usamplerBuffer PayloadU8;
+#endif
 
 #include "dwt_swizzle.h"
 #include "dwt_quant_scale.h"
@@ -64,9 +73,13 @@ mat2x4 decode_payload(uint code_word, uint q_bits, uint offset, uint block_index
         bitCount(bitfieldExtract(msbs, 0, bit_offset)) +
         q_bits * block_index + offset;
 
+#if STORAGE_8BIT
     // Eagerly load the data to keep latency down.
     // Also forces the descriptor to be loaded early.
     uint payload = uint(payload_data_u8.data[byte_offset]);
+#else
+    uint payload = texelFetch(PayloadU8, int(byte_offset)).x;
+#endif
 
     uint local_control_word = bitfieldExtract(code_word, bit_offset, 2);
     int decoded_abs[8] = int[8](0, 0, 0, 0, 0, 0, 0, 0);
@@ -80,7 +93,11 @@ mat2x4 decode_payload(uint code_word, uint q_bits, uint offset, uint block_index
             decoded_abs[b] = bitfieldInsert(decoded_abs[b], decoded, q, 1);
         }
         byte_offset++;
+#if STORAGE_8BIT
         payload = uint(payload_data_u8.data[byte_offset]);
+#else
+        payload = texelFetch(PayloadU8, int(byte_offset)).x;
+#endif
     }
 
     mat2x4 m;
@@ -187,8 +204,13 @@ void main()
         return;
     }
 
+#if STORAGE_8BIT
     uint ballot = payload_data_u32.data[offset_u32] & 0xffff;
     uint q_code = payload_data_u32.data[offset_u32 + 1] & 0xff;
+#else
+    uint ballot = texelFetch(PayloadU32, int(offset_u32)).x & 0xffff;
+    uint q_code = texelFetch(PayloadU32, int(offset_u32) + 1).x & 0xff;
+#endif
 
     if (local_index < 16)
     {
@@ -198,8 +220,13 @@ void main()
         if (bitfieldExtract(ballot, int(local_index), 1) != 0)
         {
             uint local_code_offset = bitCount(bitfieldExtract(ballot, 0, int(local_index)));
+#if STORAGE_8BIT
             control_word = uint(payload_data_u16.data[offset_u32 * 2 + 4 + local_code_offset]);
             q_bits = uint(payload_data_u8.data[offset_u32 * 4 + 8 + bitCount(ballot) * 2 + local_code_offset]) & 0xfu;
+#else
+            control_word = texelFetch(PayloadU16, int(offset_u32 * 2 + 4 + local_code_offset)).x;
+            q_bits = texelFetch(PayloadU8, int(offset_u32 * 4 + 8 + bitCount(ballot) * 2 + local_code_offset)).x & 0xfu;
+#endif
         }
 
         uint lsbs = control_word & 0x5555u;
@@ -222,8 +249,14 @@ void main()
     if (bitfieldExtract(ballot, int(linear_block), 1) != 0)
     {
         uint local_code_offset = bitCount(bitfieldExtract(ballot, 0, int(linear_block)));
+
+#if STORAGE_8BIT
         uint control_word = uint(payload_data_u16.data[offset_u32 * 2 + 4 + local_code_offset]);
         uint control_word2 = uint(payload_data_u8.data[offset_u32 * 4 + 8 + bitCount(ballot) * 2 + local_code_offset]);
+#else
+        uint control_word = texelFetch(PayloadU16, int(offset_u32 * 2 + 4 + local_code_offset)).x;
+        uint control_word2 = texelFetch(PayloadU8, int(offset_u32 * 4 + 8 + bitCount(ballot) * 2 + local_code_offset)).x;
+#endif
 
         v = decode_payload(control_word, control_word2 & 0xfu,
             shared_plane_byte_offsets[linear_block], block_local_index);
@@ -268,8 +301,14 @@ void main()
 
     // Read out all sign bits we could possibly access per thread.
     // On AMD at least, this 64-bit load should be vectorizable.
+#if STORAGE_8BIT
     uint sign_word = payload_data_u32.data[sign_offset / 32 + 0];
     uint sign_word_upper = payload_data_u32.data[sign_offset / 32 + 1];
+#else
+    uint sign_word = texelFetch(PayloadU32, int(sign_offset / 32 + 0)).x;
+    uint sign_word_upper = texelFetch(PayloadU32, int(sign_offset / 32 + 1)).x;
+#endif
+
     uint masked_sign_offset = sign_offset & 31u;
     if (masked_sign_offset != 0)
     {

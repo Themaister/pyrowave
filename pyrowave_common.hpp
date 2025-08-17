@@ -192,6 +192,8 @@ struct WaveletBuffers
 	int aligned_width = 0;
 	int aligned_height = 0;
 
+	bool use_readonly_texel_buffer = false;
+
 protected:
 	void init_samplers();
 	void allocate_images();

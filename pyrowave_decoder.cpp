@@ -24,6 +24,7 @@ struct DequantizerPushData
 struct Decoder::Impl final : public WaveletBuffers
 {
 	BufferHandle dequant_offset_buffer, payload_data;
+	BufferViewHandle payload_u32_view, payload_u16_view, payload_u8_view;
 
 	std::vector<uint32_t> dequant_offset_buffer_cpu;
 	std::vector<uint32_t> payload_data_cpu;
@@ -66,10 +67,27 @@ void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 	{
 		BufferCreateInfo bufinfo;
 		bufinfo.size = std::max<VkDeviceSize>(64 * 1024, required_size_padded * 2);
-		bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		bufinfo.usage =
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+			VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
 		bufinfo.domain = BufferDomain::Device;
 		payload_data = device->create_buffer(bufinfo);
 		device->set_name(*payload_data, "payload-data");
+
+		if (use_readonly_texel_buffer)
+		{
+			BufferViewCreateInfo view_info = {};
+			view_info.buffer = payload_data.get();
+			view_info.range = VK_WHOLE_SIZE;
+
+			view_info.format = VK_FORMAT_R8_UINT;
+			payload_u8_view = device->create_buffer_view(view_info);
+			view_info.format = VK_FORMAT_R16_UINT;
+			payload_u16_view = device->create_buffer_view(view_info);
+			view_info.format = VK_FORMAT_R32_UINT;
+			payload_u32_view = device->create_buffer_view(view_info);
+		}
 	}
 
 	if (!payload_data_cpu.empty())
@@ -297,7 +315,16 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 
 				cmd.set_storage_texture(0, 0, *component_layer_views[component][level]);
 				cmd.set_storage_buffer(0, 1, *dequant_offset_buffer);
-				cmd.set_storage_buffer(0, 2, *payload_data);
+
+				if (use_readonly_texel_buffer)
+				{
+					cmd.set_buffer_view(0, 2, *payload_u32_view);
+					cmd.set_buffer_view(0, 3, *payload_u16_view);
+					cmd.set_buffer_view(0, 4, *payload_u8_view);
+				}
+				else
+					cmd.set_storage_buffer(0, 2, *payload_data);
+
 				cmd.dispatch((push.resolution.x + 31) / 32, (push.resolution.y + 31) / 32, 1);
 			}
 
@@ -421,7 +448,8 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 		       dequant_offset_buffer_cpu.data(), dequant_offset_buffer_cpu.size() * sizeof(dequant_offset_buffer_cpu.front()));
 
 		cmd.barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-		            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+		            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+		            use_readonly_texel_buffer ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
 	}
 	cmd.end_region();
 
@@ -469,8 +497,11 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 	if (!device->supports_subgroup_size_log2(true, 2, 7))
 		return false;
 
-	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess)
+	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess &&
+	    !impl->use_readonly_texel_buffer)
+	{
 		return false;
+	}
 
 	if (!impl->init(device, width, height, chroma_))
 		return false;

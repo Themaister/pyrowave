@@ -183,9 +183,25 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsam
 
 	Vulkan::ResourceLayout layout;
 
+	// If the GPU is sufficiently competent with texel buffers, we can use that as a fallback to 8-bit storage.
+	if (device->get_gpu_properties().limits.maxTexelBufferElements >= 16 * 1024 * 1024)
+	{
+		auto vendor_id = device->get_gpu_properties().vendorID;
+		if (!device->get_device_features().vk12_features.storageBuffer8BitAccess ||
+		    (vendor_id != VENDOR_ID_AMD && vendor_id != VENDOR_ID_INTEL && vendor_id != VENDOR_ID_NVIDIA))
+		{
+			use_readonly_texel_buffer = true;
+		}
+	}
+
+	if (use_readonly_texel_buffer)
+		LOGI("Using texel buffers instead of SSBO.\n");
+
 	shaders = Shaders<>(*device, layout, [this](const char *, const char *env) {
 		if (strcmp(env, "FP16") == 0)
 			return device->get_device_features().vk12_features.shaderFloat16 ? 1 : 0;
+		if (strcmp(env, "STORAGE_8BIT") == 0)
+			return use_readonly_texel_buffer ? 0 : 1;
 		return 0;
 	});
 
