@@ -315,8 +315,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 {
 	cmd.set_program(shaders.idwt[Configuration::get().get_precision()]);
-	cmd.enable_subgroup_size_control(true);
-	cmd.set_subgroup_size_log2(true, 2, 6);
+	cmd.enable_subgroup_size_control(false);
 
 	auto start_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -391,8 +390,6 @@ bool Decoder::Impl::idwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 	auto end_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	device->register_time_interval("GPU", std::move(start_idwt), std::move(end_idwt), "iDWT");
-
-	cmd.enable_subgroup_size_control(false);
 	return true;
 }
 
