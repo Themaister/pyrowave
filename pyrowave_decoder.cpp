@@ -479,7 +479,6 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
 	constexpr VkSubgroupFeatureFlags required_features =
 			VK_SUBGROUP_FEATURE_VOTE_BIT |
-			VK_SUBGROUP_FEATURE_QUAD_BIT |
 			VK_SUBGROUP_FEATURE_BALLOT_BIT |
 			VK_SUBGROUP_FEATURE_ARITHMETIC_BIT |
 			VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
