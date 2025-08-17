@@ -242,9 +242,13 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 	cmd.set_specialization_constant_mask(0);
 	cmd.enable_subgroup_size_control(true);
 
-	if (device->supports_subgroup_size_log2(true, 4, 6))
+	if (device->supports_subgroup_size_log2(true, 4, 7))
 	{
-		cmd.set_subgroup_size_log2(true, 4, 6);
+		cmd.set_subgroup_size_log2(true, 4, 7);
+	}
+	else if (device->supports_subgroup_size_log2(true, 2, 7))
+	{
+		cmd.set_subgroup_size_log2(true, 2, 7);
 	}
 	else
 	{
@@ -462,7 +466,7 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 	}
 
 	// The decoder is more lenient.
-	if (!device->supports_subgroup_size_log2(true, 4, 6))
+	if (!device->supports_subgroup_size_log2(true, 2, 7))
 		return false;
 
 	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess)

@@ -101,7 +101,7 @@ mat2x4 decode_payload(uint code_word, uint q_bits, uint offset, uint block_index
 
 shared uint shared_sign_offset;
 shared uint shared_plane_byte_offsets[16];
-shared uint shared_sign_scan[8];
+shared uint shared_sign_scan[128 / 4];
 
 const int MaxScaleExp = 4;
 
@@ -114,7 +114,7 @@ float decode_quant(uint quant_code)
     return inv_quant;
 }
 
-uint scan8(uint v)
+uint scan_subgroups(uint v)
 {
     for (uint i = 1; i < gl_NumSubgroups; i *= 2)
     {
@@ -124,6 +124,38 @@ uint scan8(uint v)
 
     return v;
 }
+
+void scan_subgroups_fallback(uint local_index)
+{
+    barrier();
+
+    // Slow LDS fallback for devices with wave size smaller than 16.
+    bool active_lane = local_index < gl_NumSubgroups;
+
+    uint v = 0;
+    if (active_lane)
+        v = shared_sign_scan[local_index];
+
+    for (uint i = 1; i < gl_NumSubgroups; i *= 2)
+    {
+        uint up = 0;
+        bool do_work = local_index >= i && active_lane;
+        if (do_work)
+            up = shared_sign_scan[local_index - i];
+
+		// Resolve write-after-read hazard.
+        barrier();
+
+        if (do_work)
+        {
+            v += up;
+            shared_sign_scan[local_index] = v;
+        }
+
+        barrier();
+    }
+}
+
 
 void main()
 {
@@ -217,12 +249,17 @@ void main()
     if (gl_SubgroupInvocationID == gl_SubgroupSize - 1)
         shared_sign_scan[gl_SubgroupID] = significant_scan;
 
-    barrier();
-
-    if (local_index < 8)
-        shared_sign_scan[local_index] = scan8(shared_sign_scan[local_index]);
-
-    barrier();
+    if (gl_NumSubgroups <= 8)
+    {
+        barrier();
+        if (local_index < gl_NumSubgroups)
+            shared_sign_scan[local_index] = scan_subgroups(shared_sign_scan[local_index]);
+        barrier();
+    }
+    else
+    {
+        scan_subgroups_fallback(local_index);
+    }
 
     // Compute where we need to start reading sign bits from.
     uint sign_offset = shared_sign_offset + significant_scan - significant_count;
