@@ -494,16 +494,24 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 
 	// The decoder is more lenient.
 	if (!device->supports_subgroup_size_log2(true, 2, 7))
-		return false;
-
-	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess &&
-	    !impl->use_readonly_texel_buffer)
 	{
+		LOGE("Device doesn't support basic subgroup size control.\n");
 		return false;
 	}
 
 	if (!impl->init(device, width, height, chroma_))
+	{
+		LOGE("Failed to initialize.\n");
 		return false;
+	}
+
+	if (!device->get_device_features().vk12_features.storageBuffer8BitAccess &&
+	    !impl->use_readonly_texel_buffer)
+	{
+		LOGE("Device doesn't support 8-bit storage or large texel buffers.\n");
+		return false;
+	}
+
 	clear();
 	return true;
 }
