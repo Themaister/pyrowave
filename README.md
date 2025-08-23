@@ -55,7 +55,22 @@ PyroWave is intended to be built alongside PyroFling with Granite.
 For the sample and test applications in this repo however, check out
 https://github.com/Themaister/Granite before invoking CMake.
 
-```
+```shell
 git clone --depth 1 --recursive --shallow-submodules https://github.com/Themaister/Granite Granite
+```
+
+## Basic encoder/decoder CLI
+
+The basic CLI takes a y4m and dumps out a raw bitstream.
+
+```shell
+pyrowave-encode test.y4m out.wave 400000
+```
+
+This encodes a raw bitstream where each frame consumes maximum 400 KB.
+To decode back to y4m:
+
+```shell
+pyrowave-decode out.wave out.y4m
 ```
 
