@@ -508,7 +508,7 @@ Application *application_create(int argc, char **argv)
 
 #ifdef __ANDROID__
 	if (!path)
-		path = "/data/local/tmp/test.y4m";
+		path = "/data/local/tmp/test.wave";
 #endif
 
 	try
