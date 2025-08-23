@@ -340,9 +340,11 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 		cmd->begin_render_pass(device.get_swapchain_render_pass(SwapchainRenderPass::ColorOnly));
 		cmd->set_sampler(0, 3, StockSampler::LinearClamp);
 
+		auto fmt = rawfile ? rawparam.format : file.get_format();
+
 		cmd->set_specialization_constant_mask(3);
-		cmd->set_specialization_constant(0, file.get_format() == YUV4MPEGFile::Format::YUV420P16);
-		cmd->set_specialization_constant(1, file.is_full_range());
+		cmd->set_specialization_constant(0, fmt == YUV4MPEGFile::Format::YUV420P16 || fmt == YUV4MPEGFile::Format::YUV444P16);
+		cmd->set_specialization_constant(1, rawfile ? bool(rawparam.is_full_range) : file.is_full_range());
 
 		CommandBufferUtil::setup_fullscreen_quad(*cmd, "builtin://shaders/quad.vert", "assets://yuv2rgb.frag",
 		                                         {{ "DELTA", mode == Mode::Delta ? 1 : 0 }});
