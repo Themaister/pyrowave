@@ -24,6 +24,18 @@
 			]
 		},
 		{
+			"name": "idwt_vs",
+			"path": "idwt.vert"
+		},
+		{
+			"name": "idwt_fs",
+			"path": "idwt.frag",
+			"variants": [
+				{ "define": "INPUT_PLANES_MINUS_1", "count": 3 },
+				{ "define": "OUTPUT_PLANES_MINUS_1", "count": 3 }
+			]
+		},
+		{
 			"name": "power_to_db",
 			"compute": true,
 			"path": "power_to_db.comp"
