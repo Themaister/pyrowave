@@ -35,12 +35,16 @@ public:
 	static int format_to_bytes_per_component(Format format);
 	static bool format_has_subsampling(Format format);
 
+	int get_frame_rate_num() const;
+	int get_frame_rate_den() const;
+
 private:
 	enum class Mode { Read, Write };
 	bool open(const std::string &path, Mode mode);
 	struct FileDeleter { void operator()(FILE *f) { if (f) fclose(f); } };
 	std::unique_ptr<FILE, FileDeleter> file;
 	int width = 0, height = 0;
+	int frame_rate_num = 60, frame_rate_den = 1;
 	std::string params;
 	Mode mode = {};
 	Format format = {};

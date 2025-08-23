@@ -66,6 +66,14 @@ if (PYROWAVE_STANDALONE)
     target_link_libraries(pyrowave-bench PRIVATE pyrowave)
     target_link_libraries(pyrowave-bench PRIVATE granite-vulkan pyrowave-utils)
 
+    add_granite_offline_tool(pyrowave-encode encode.cpp)
+    target_link_libraries(pyrowave-encode PRIVATE pyrowave)
+    target_link_libraries(pyrowave-encode PRIVATE granite-vulkan pyrowave-utils)
+
+    add_granite_offline_tool(pyrowave-decode decode.cpp)
+    target_link_libraries(pyrowave-decode PRIVATE pyrowave)
+    target_link_libraries(pyrowave-decode PRIVATE granite-vulkan pyrowave-utils)
+
     add_granite_offline_tool(pyrowave-psnr psnr.cpp)
     target_link_libraries(pyrowave-psnr PRIVATE pyrowave-utils)
 

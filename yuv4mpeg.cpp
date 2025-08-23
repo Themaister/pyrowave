@@ -90,6 +90,15 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 		return false;
 	height = strtol(params.c_str() + h_pos + 1, nullptr, 0);
 
+	auto f_pos = params.find_first_of('F');
+	if (f_pos != std::string::npos)
+	{
+		char *end_ptr;
+		frame_rate_num = strtol(params.c_str() + f_pos + 1, &end_ptr, 0);
+		if (*end_ptr == ':')
+			frame_rate_den = strtol(end_ptr + 1, nullptr, 0);
+	}
+
 	if (params.find("C420p10") != std::string::npos)
 	{
 		// Crude up-convert.
@@ -228,6 +237,16 @@ int YUV4MPEGFile::get_width() const
 int YUV4MPEGFile::get_height() const
 {
 	return height;
+}
+
+int YUV4MPEGFile::get_frame_rate_num() const
+{
+	return frame_rate_num;
+}
+
+int YUV4MPEGFile::get_frame_rate_den() const
+{
+	return frame_rate_den;
 }
 
 const std::string &YUV4MPEGFile::get_params() const
