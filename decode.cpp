@@ -137,8 +137,6 @@ static bool read_payload(FILE *file, PyroWave::Decoder &decoder)
 		if (decoder.decode_is_ready(false))
 			return true;
 	}
-
-	return false;
 }
 
 static const char *format_to_str(YUV4MPEGFile::Format fmt)

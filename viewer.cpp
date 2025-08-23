@@ -59,7 +59,16 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 		: path(path_)
 	{
 		if (!file.open_read(path))
-			throw std::runtime_error("Failed to open.");
+		{
+			rawfile.reset(fopen(path, "rb"));
+			if (!rawfile)
+				throw std::runtime_error("Failed to open.");
+			char magic[9] = {};
+			if (fread(magic, 1, 8, rawfile.get()) != 8 || strcmp(magic, "PYROWAVE") != 0)
+				throw std::runtime_error("Failed to open.");
+			if (fread(&rawparam, sizeof(rawparam), 1, rawfile.get()) != 1)
+				throw std::runtime_error("Failed to open.");
+		}
 
 		get_wsi().set_backbuffer_format(BackbufferFormat::UNORM);
 		EVENT_MANAGER_REGISTER_LATCH(ViewerApplication, on_device_created, on_device_destroyed, DeviceCreatedEvent);
@@ -124,18 +133,56 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 	void on_device_created(const DeviceCreatedEvent &e)
 	{
-		auto format = YUV4MPEGFile::format_to_bytes_per_component(file.get_format()) == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-		auto chroma = YUV4MPEGFile::format_has_subsampling(file.get_format()) ? PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
-		in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
-		out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
-		enc.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
-		dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
+		if (rawfile)
+		{
+			auto format = YUV4MPEGFile::format_to_bytes_per_component(rawparam.format) == 2 ?
+					VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+			auto chroma = YUV4MPEGFile::format_has_subsampling(rawparam.format) ?
+			              PyroWave::ChromaSubsampling::Chroma420 :
+			              PyroWave::ChromaSubsampling::Chroma444;
+
+			out_images = create_ycbcr_images(e.get_device(), rawparam.width, rawparam.height, format, chroma);
+			dec.init(&e.get_device(), rawparam.width, rawparam.height, chroma);
+		}
+		else
+		{
+			auto format = YUV4MPEGFile::format_to_bytes_per_component(file.get_format()) == 2 ? VK_FORMAT_R16_UNORM
+			                                                                                  : VK_FORMAT_R8_UNORM;
+			auto chroma = YUV4MPEGFile::format_has_subsampling(file.get_format())
+			              ? PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
+			in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
+			out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
+			enc.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
+			dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
+		}
 	}
 
 	void on_device_destroyed(const DeviceCreatedEvent &)
 	{
 		in_images = {};
 		out_images = {};
+	}
+
+	std::vector<uint8_t> packetized_data;
+
+	bool read_raw_payload()
+	{
+		uint32_t u32_size;
+
+		for (;;)
+		{
+			if (fread(&u32_size, sizeof(u32_size), 1, rawfile.get()) != 1)
+				return false;
+			packetized_data.resize(u32_size);
+			if (fread(packetized_data.data(), 1, u32_size, rawfile.get()) != u32_size)
+				return false;
+
+			if (!dec.push_packet(packetized_data.data(), packetized_data.size()))
+				return false;
+
+			if (dec.decode_is_ready(false))
+				return true;
+		}
 	}
 
 	void render_frame(double, double elapsed_time) override
@@ -145,7 +192,20 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 		if (!paused)
 		{
-			if (!file.begin_frame())
+			if (rawfile)
+			{
+				if (!read_raw_payload())
+				{
+					fseek(rawfile.get(), strlen("PYROWAVE") + sizeof(rawparam), SEEK_SET);
+					dec.clear();
+					if (!read_raw_payload())
+					{
+						request_shutdown();
+						return;
+					}
+				}
+			}
+			else if (!file.begin_frame())
 			{
 				file = {};
 				if (!file.open_read(path) || !file.begin_frame())
@@ -155,106 +215,116 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 				}
 			}
 
-			for (int i = 0; i < 3; i++)
+			if (!rawfile)
 			{
-				cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-				                   0, 0,
-				                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-			}
-
-			for (int i = 0; i < 3; i++)
-			{
-				auto *y = cmd->update_image(*in_images.images[i]);
-				if (!file.read(y, in_images.images[i]->get_width() * in_images.images[i]->get_height() * YUV4MPEGFile::format_to_bytes_per_component(file.get_format())))
+				for (int i = 0; i < 3; i++)
 				{
-					LOGE("Failed to read plane.\n");
-					device.submit_discard(cmd);
-					request_shutdown();
-					return;
+					cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_UNDEFINED,
+					                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					                   0, 0,
+					                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 				}
-			}
 
-			for (int i = 0; i < 3; i++)
-			{
-				cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-				                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-				                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+				for (int i = 0; i < 3; i++)
+				{
+					auto *y = cmd->update_image(*in_images.images[i]);
+					if (!file.read(y, in_images.images[i]->get_width() * in_images.images[i]->get_height() *
+					                  YUV4MPEGFile::format_to_bytes_per_component(file.get_format())))
+					{
+						LOGE("Failed to read plane.\n");
+						device.submit_discard(cmd);
+						request_shutdown();
+						return;
+					}
+				}
+
+				for (int i = 0; i < 3; i++)
+				{
+					cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+					                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+				}
 			}
 		}
 
 		unsigned bitstream_size = bit_rate_mbit * 1000000ull / (60 * 8);
-		bitstream_size &= ~3u;
 
-		BufferCreateInfo buffer_info = {};
-		buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-
-		buffer_info.size = enc.get_meta_required_size();
-		buffer_info.domain = BufferDomain::Device;
-		auto meta = device.create_buffer(buffer_info);
-		buffer_info.domain = BufferDomain::CachedHost;
-		auto meta_host = device.create_buffer(buffer_info);
-
-		buffer_info.size = bitstream_size + 2 * enc.get_meta_required_size();
-		buffer_info.domain = BufferDomain::Device;
-		auto bitstream = device.create_buffer(buffer_info);
-		buffer_info.domain = BufferDomain::CachedHost;
-		auto bitstream_host = device.create_buffer(buffer_info);
-
-		PyroWave::Encoder::BitstreamBuffers buffers = {};
-		buffers.meta.buffer = meta.get();
-		buffers.meta.size = meta->get_create_info().size;
-		buffers.bitstream.buffer = bitstream.get();
-		buffers.bitstream.size = bitstream->get_create_info().size;
-		buffers.target_size = bitstream_size;
-
-		enc.encode(*cmd, in_images.views, buffers);
-		cmd->copy_buffer(*bitstream_host, *bitstream);
-		cmd->copy_buffer(*meta_host, *meta);
-		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-		             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
-
-		Fence fence;
-		device.submit(cmd, &fence);
-		fence->wait();
-
-		auto *mapped_meta = static_cast<const PyroWave::BitstreamPacket *>(
-				device.map_host_buffer(*meta_host, MEMORY_ACCESS_READ_BIT));
-		auto *mapped_bits = static_cast<const uint32_t *>(
-				device.map_host_buffer(*bitstream_host, MEMORY_ACCESS_READ_BIT));
-
-		std::vector<uint8_t> reordered_packet_buffer(bitstream_size * 2);
-		size_t num_packets = enc.compute_num_packets(mapped_meta, 8 * 1024);
-		std::vector<PyroWave::Encoder::Packet> packets(num_packets);
-		size_t out_packets = enc.packetize(packets.data(), 8 * 1024,
-		                                   reordered_packet_buffer.data(),
-		                                   reordered_packet_buffer.size(),
-		                                   mapped_meta, mapped_bits);
-		(void)out_packets;
-
-		size_t encoded_size = 0;
-		for (auto &p : packets)
-			encoded_size += p.size;
-
-		LOGI("Total encoded size: %zu\n", encoded_size);
-
-		if (encoded_size > bitstream_size)
+		if (!rawfile)
 		{
-			LOGE("Broken rate control\n");
-			return;
-		}
+			bitstream_size &= ~3u;
 
-		assert(out_packets == num_packets);
+			BufferCreateInfo buffer_info = {};
+			buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 
-		for (auto &p : packets)
-			if (!dec.push_packet(reordered_packet_buffer.data() + p.offset, p.size))
+			buffer_info.size = enc.get_meta_required_size();
+			buffer_info.domain = BufferDomain::Device;
+			auto meta = device.create_buffer(buffer_info);
+			buffer_info.domain = BufferDomain::CachedHost;
+			auto meta_host = device.create_buffer(buffer_info);
+
+			buffer_info.size = bitstream_size + 2 * enc.get_meta_required_size();
+			buffer_info.domain = BufferDomain::Device;
+			auto bitstream = device.create_buffer(buffer_info);
+			buffer_info.domain = BufferDomain::CachedHost;
+			auto bitstream_host = device.create_buffer(buffer_info);
+
+			PyroWave::Encoder::BitstreamBuffers buffers = {};
+			buffers.meta.buffer = meta.get();
+			buffers.meta.size = meta->get_create_info().size;
+			buffers.bitstream.buffer = bitstream.get();
+			buffers.bitstream.size = bitstream->get_create_info().size;
+			buffers.target_size = bitstream_size;
+
+			enc.encode(*cmd, in_images.views, buffers);
+			cmd->copy_buffer(*bitstream_host, *bitstream);
+			cmd->copy_buffer(*meta_host, *meta);
+			cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+			             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+			Fence fence;
+			device.submit(cmd, &fence);
+			fence->wait();
+
+			auto *mapped_meta = static_cast<const PyroWave::BitstreamPacket *>(
+					device.map_host_buffer(*meta_host, MEMORY_ACCESS_READ_BIT));
+			auto *mapped_bits = static_cast<const uint32_t *>(
+					device.map_host_buffer(*bitstream_host, MEMORY_ACCESS_READ_BIT));
+
+			std::vector<uint8_t> reordered_packet_buffer(bitstream_size * 2);
+			size_t num_packets = enc.compute_num_packets(mapped_meta, 8 * 1024);
+			std::vector<PyroWave::Encoder::Packet> packets(num_packets);
+			size_t out_packets = enc.packetize(packets.data(), 8 * 1024,
+			                                   reordered_packet_buffer.data(),
+			                                   reordered_packet_buffer.size(),
+			                                   mapped_meta, mapped_bits);
+			(void) out_packets;
+
+			size_t encoded_size = 0;
+			for (auto &p: packets)
+				encoded_size += p.size;
+
+			LOGI("Total encoded size: %zu\n", encoded_size);
+
+			if (encoded_size > bitstream_size)
+			{
+				LOGE("Broken rate control\n");
 				return;
+			}
 
-		cmd = device.request_command_buffer();
+			assert(out_packets == num_packets);
+
+			for (auto &p: packets)
+				if (!dec.push_packet(reordered_packet_buffer.data() + p.offset, p.size))
+					return;
+
+			cmd = device.request_command_buffer();
+		}
 
 		for (int i = 0; i < 3; i++)
 		{
 			cmd->image_barrier(*out_images.images[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-			                   0, 0,
+			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
 			                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
 		}
 
@@ -281,7 +351,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 		const float full_color = get_wsi().get_backbuffer_format() == BackbufferFormat::HDR10 ? 0.75f : 1.0f;
 
-		if (mode == Mode::Flicker)
+		if (mode == Mode::Flicker && !rawfile)
 		{
 			if (muglm::fract(elapsed_time * 10.0) < 0.5)
 			{
@@ -308,39 +378,50 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			                          Font::Alignment::TopLeft);
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}
-		else if (mode == Mode::Slide)
+		else if (mode == Mode::Slide || rawfile)
 		{
-			cmd->set_texture(0, 0, *in_images.views.planes[0]);
-			cmd->set_texture(0, 1, *in_images.views.planes[1]);
-			cmd->set_texture(0, 2, *in_images.views.planes[2]);
-			cmd->set_scissor({{ 0, 0 }, { uint32_t(x_slide), uint32_t(cmd->get_viewport().height) }});
-			cmd->draw(3);
+			if (!rawfile)
+			{
+				cmd->set_texture(0, 0, *in_images.views.planes[0]);
+				cmd->set_texture(0, 1, *in_images.views.planes[1]);
+				cmd->set_texture(0, 2, *in_images.views.planes[2]);
+				cmd->set_scissor({{ 0, 0 },
+				                  { uint32_t(x_slide), uint32_t(cmd->get_viewport().height) }});
+				cmd->draw(3);
+			}
 
 			cmd->set_texture(0, 0, *out_images.views.planes[0]);
 			cmd->set_texture(0, 1, *out_images.views.planes[1]);
 			cmd->set_texture(0, 2, *out_images.views.planes[2]);
-			cmd->set_scissor({{ int32_t(x_slide), 0 },
-			                  { uint32_t(cmd->get_viewport().width), uint32_t(cmd->get_viewport().height) }});
+			if (!rawfile)
+			{
+				cmd->set_scissor({{ int32_t(x_slide), 0 },
+				                  { uint32_t(cmd->get_viewport().width), uint32_t(cmd->get_viewport().height) }});
+			}
 			cmd->draw(3);
 
 			cmd->set_scissor({{ 0, 0 },
 			                  { uint32_t(cmd->get_viewport().width), uint32_t(cmd->get_viewport().height) }});
 
-			flat_renderer.begin();
-			char text[64];
-			snprintf(text, sizeof(text), "%u mbits | %.3f bpp @ 60 fps%s", bit_rate_mbit,
-			         double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
-			         paused ? " (paused)" : "");
-			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
-			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(full_color, full_color, 0.0f, 1.0f),
-			                          Font::Alignment::TopLeft);
-			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
-			                          text, vec3(18, 22, 0.5f), vec2(400, 200), vec4(0.0f, 0.0f, 0.0f, 1.0f),
-			                          Font::Alignment::TopLeft);
-			flat_renderer.render_quad(vec3(float(x_slide), 0.0f, 0.8f),
-			                          vec2(2.0f, cmd->get_viewport().height),
-			                          vec4(full_color, full_color, 0.0f, 1.0f));
-			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
+			if (!rawfile)
+			{
+				flat_renderer.begin();
+				char text[64];
+				snprintf(text, sizeof(text), "%u mbits | %.3f bpp @ 60 fps%s", bit_rate_mbit,
+				         double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
+				         paused ? " (paused)" : "");
+				flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
+				                          text, vec3(20, 20, 0), vec2(400, 200),
+				                          vec4(full_color, full_color, 0.0f, 1.0f),
+				                          Font::Alignment::TopLeft);
+				flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
+				                          text, vec3(18, 22, 0.5f), vec2(400, 200), vec4(0.0f, 0.0f, 0.0f, 1.0f),
+				                          Font::Alignment::TopLeft);
+				flat_renderer.render_quad(vec3(float(x_slide), 0.0f, 0.8f),
+				                          vec2(2.0f, cmd->get_viewport().height),
+				                          vec4(full_color, full_color, 0.0f, 1.0f));
+				flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
+			}
 		}
 		else
 		{
@@ -351,12 +432,13 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			flat_renderer.begin();
 			char text[64];
 			snprintf(text, sizeof(text), "DELTA %u mbits | %.3f bpp @ 60 fps%s",
-			         bit_rate_mbit,
-			         double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
-			         paused ? " (paused)" : "");
+					 bit_rate_mbit,
+					 double(bitstream_size * 8) / double(file.get_width() * file.get_height()),
+					 paused ? " (paused)" : "");
 			flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
-			                          text, vec3(20, 20, 0), vec2(400, 200), vec4(full_color, full_color, 0.0f, 1.0f),
-			                          Font::Alignment::TopLeft);
+									  text, vec3(20, 20, 0), vec2(400, 200),
+									  vec4(full_color, full_color, 0.0f, 1.0f),
+									  Font::Alignment::TopLeft);
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}
 
@@ -367,12 +449,12 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 	unsigned get_default_width() override
 	{
-		return file.get_width();
+		return rawfile ? rawparam.width : file.get_width();
 	}
 
 	unsigned get_default_height() override
 	{
-		return file.get_height();
+		return rawfile ? rawparam.height : file.get_height();
 	}
 
 	PyroWave::Encoder enc;
@@ -383,6 +465,23 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 	const char *path;
 	unsigned bit_rate_mbit = 200;
 	FlatRenderer flat_renderer;
+
+	struct RawParameters
+	{
+		int32_t width;
+		int32_t height;
+		YUV4MPEGFile::Format format;
+		PyroWave::ChromaSubsampling chroma;
+		uint32_t is_full_range;
+		int32_t frame_rate_num;
+		int32_t frame_rate_den;
+		uint32_t chroma_siting;
+	};
+	static_assert(sizeof(RawParameters) == 32, "RawParameters size mismatch.");
+	struct FILEDeleter { void operator()(FILE *f) { if (f) fclose(f); } };
+
+	std::unique_ptr<FILE, FILEDeleter> rawfile;
+	RawParameters rawparam = {};
 
 	int x_slide = 100;
 };
