@@ -438,21 +438,23 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 
 			uint32_t render_width = rp_info.color_attachments[0]->get_view_width();
 			uint32_t render_height = rp_info.color_attachments[0]->get_view_height();
+
+			// Set mirror point.
 			cmd.push_constants(&render_height, 0, sizeof(render_height));
 
 			// Render top edge condition.
 			cmd.set_specialization_constant(3, -1);
-			cmd.set_scissor({{ 0, 0 }, { render_width, 4 }});
+			cmd.set_scissor({{ 0, 0 }, { render_width, 8 }});
 			cmd.draw(3);
 
 			// Render normal path
 			cmd.set_specialization_constant(3, 0);
-			cmd.set_scissor({{ 0, 4 }, { render_width, render_height - 8 }});
+			cmd.set_scissor({{ 0, 8 }, { render_width, render_height - 16 }});
 			cmd.draw(3);
 
 			// Render bottom edge condition
 			cmd.set_specialization_constant(3, +1);
-			cmd.set_scissor({{ 0, int(render_height) - 4 }, { render_width, 4 }});
+			cmd.set_scissor({{ 0, int(render_height) - 8 }, { render_width, 8 }});
 			cmd.draw(3);
 
 			cmd.end_render_pass();
@@ -504,25 +506,37 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 		uint32_t aligned_render_width = aligned_width >> (output_level + 1);
 		uint32_t aligned_render_height = aligned_height >> (output_level + 1);
 
+		// Chroma output might be smaller than Y in output_level == 0 due to not using alignment.
+		// This is reflected in the actual render area, which is equal to default viewport.
+		auto render_width = uint32_t(cmd.get_viewport().width);
+		auto render_height = uint32_t(cmd.get_viewport().height);
+
 		// In case we're rendering to an output texture,
 		// the render area might be smaller than we expect for purposes of alignment.
+		// Use properly scaled viewport that we scissor away as needed.
 		cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
+
+		// Set mirror point.
 		cmd.push_constants(&aligned_render_width, 0, sizeof(aligned_render_width));
 
 		// Render left edge condition.
 		cmd.set_specialization_constant(3, -1);
-		cmd.set_scissor({{ 0, 0 }, { 4, aligned_render_height }});
+		cmd.set_scissor({{ 0, 0 }, { 8, render_height }});
 		cmd.draw(3);
 
 		// Render normal condition
 		cmd.set_specialization_constant(3, 0);
-		cmd.set_scissor({{ 4, 0 }, { aligned_render_width - 8, aligned_render_height }});
+		cmd.set_scissor({{ 8, 0 }, { std::min<uint32_t>(render_width - 8, aligned_render_width - 16), render_height }});
 		cmd.draw(3);
 
-		// Render right edge condition
-		cmd.set_specialization_constant(3, +1);
-		cmd.set_scissor({{ int(aligned_render_width) - 4, 0 }, { 4, aligned_render_height }});
-		cmd.draw(3);
+		uint32_t aligned_x = aligned_render_width - 8;
+		if (aligned_x < render_width)
+		{
+			// Render right edge condition
+			cmd.set_specialization_constant(3, +1);
+			cmd.set_scissor({{ int(aligned_x), 0 }, { render_width - aligned_x, render_height }});
+			cmd.draw(3);
+		}
 
 		cmd.end_render_pass();
 
@@ -559,14 +573,15 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 				rp_info.render_area.offset.y = rp_info.color_attachments[1]->get_view_height();
 
 				cmd.begin_render_pass(rp_info);
-				cmd.set_program(horiz_prog);
+				cmd.set_program(device->request_program(shaders.idwt_vs, shaders.idwt_fs[0]));
 				cmd.set_opaque_sprite_state();
 				cmd.set_texture(0, 0, fragment.levels[input_level].vert[0][0]->get_view());
 				cmd.set_texture(0, 1, fragment.levels[input_level].vert[1][0]->get_view());
 				cmd.set_sampler(0, 2, *mirror_repeat_sampler);
+				cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
 				cmd.set_specialization_constant_mask(0x8);
-				cmd.push_constants(&aligned_render_width, 0, sizeof(aligned_render_width));
-				cmd.set_specialization_constant(3, true); // Always consider edge handling.
+				cmd.push_constants(&aligned_render_height, 0, sizeof(aligned_render_height));
+				cmd.set_specialization_constant(3, 1); // Always consider edge handling.
 				cmd.draw(3);
 				cmd.end_render_pass();
 			}
@@ -584,14 +599,15 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 				rp_info.render_area.offset.y = 0;
 
 				cmd.begin_render_pass(rp_info);
-				cmd.set_program(horiz_prog);
+				cmd.set_program(device->request_program(shaders.idwt_vs, shaders.idwt_fs[0]));
 				cmd.set_opaque_sprite_state();
 				cmd.set_texture(0, 0, fragment.levels[input_level].vert[0][0]->get_view());
 				cmd.set_texture(0, 1, fragment.levels[input_level].vert[1][0]->get_view());
 				cmd.set_sampler(0, 2, *mirror_repeat_sampler);
+				cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
 				cmd.set_specialization_constant_mask(0x8);
 				cmd.push_constants(&aligned_render_width, 0, sizeof(aligned_render_width));
-				cmd.set_specialization_constant(3, true); // Always consider edge handling.
+				cmd.set_specialization_constant(3, 1); // Always consider edge handling.
 				cmd.draw(3);
 				cmd.end_render_pass();
 			}
