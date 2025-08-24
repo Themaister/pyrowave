@@ -748,7 +748,7 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 	if (!dequant(cmd))
 		return false;
 
-	cmd.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT, 0);
+	cmd.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
 
 	if (fragment_path)
 	{
