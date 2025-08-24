@@ -427,10 +427,14 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 			cmd.set_texture(0, 0, *fragment.levels[input_level].decoded[0][vert_pass + 0]);
 			cmd.set_texture(0, 1, *fragment.levels[input_level].decoded[0][vert_pass + 2]);
 			cmd.set_sampler(0, 2, *mirror_repeat_sampler);
-			cmd.set_texture(0, 3, *fragment.levels[input_level].decoded[1][vert_pass + 0]);
-			cmd.set_texture(0, 4, *fragment.levels[input_level].decoded[1][vert_pass + 2]);
-			cmd.set_texture(0, 5, *fragment.levels[input_level].decoded[2][vert_pass + 0]);
-			cmd.set_texture(0, 6, *fragment.levels[input_level].decoded[2][vert_pass + 2]);
+
+			if (has_chroma_output)
+			{
+				cmd.set_texture(0, 3, *fragment.levels[input_level].decoded[1][vert_pass + 0]);
+				cmd.set_texture(0, 4, *fragment.levels[input_level].decoded[1][vert_pass + 2]);
+				cmd.set_texture(0, 5, *fragment.levels[input_level].decoded[2][vert_pass + 0]);
+				cmd.set_texture(0, 6, *fragment.levels[input_level].decoded[2][vert_pass + 2]);
+			}
 
 			cmd.draw(3);
 			cmd.end_render_pass();
@@ -472,8 +476,12 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 		cmd.set_texture(0, 0, fragment.levels[input_level].vert[0][0]->get_view());
 		cmd.set_texture(0, 1, fragment.levels[input_level].vert[1][0]->get_view());
 		cmd.set_sampler(0, 2, *mirror_repeat_sampler);
-		cmd.set_texture(0, 3, fragment.levels[input_level].vert[0][1]->get_view());
-		cmd.set_texture(0, 4, fragment.levels[input_level].vert[1][1]->get_view());
+
+		if (has_chroma_output)
+		{
+			cmd.set_texture(0, 3, fragment.levels[input_level].vert[0][1]->get_view());
+			cmd.set_texture(0, 4, fragment.levels[input_level].vert[1][1]->get_view());
+		}
 
 		// In case we're rendering to an output texture,
 		// the render area might be smaller than we expect for purposes of alignment.
@@ -483,6 +491,73 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 
 		cmd.draw(3);
 		cmd.end_render_pass();
+
+		// If chroma is subsampled, we cannot render the fully padded region in one render pass due to
+		// rules regarding renderArea. renderArea cannot exceed the smallest image in the render pass.
+		// We cannot use subpasses either, so split the render pass, but that's mostly fine,
+		// since renderArea is non-overlapping.
+		if (output_level == 0 && chroma == ChromaSubsampling::Chroma420)
+		{
+			rp_info.num_color_attachments = 1;
+			rp_info.store_attachments = 0x1;
+
+			VkMemoryBarrier2 by_region = { VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+			by_region.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+			by_region.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+			by_region.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			by_region.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			VkDependencyInfo dep = { VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+			dep.memoryBarrierCount = 1;
+			dep.pMemoryBarriers = &by_region;
+			dep.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+			// Need vertical fixup (very common for 1080p).
+			if (rp_info.color_attachments[1]->get_view_height() < rp_info.color_attachments[0]->get_view_height())
+			{
+				// Insert a simple by_region barrier to ensure we follow Vulkan rules for RW access.
+				cmd.barrier(dep);
+
+				rp_info.render_area.extent.width = rp_info.color_attachments[0]->get_view_width();
+				rp_info.render_area.extent.height =
+						rp_info.color_attachments[0]->get_view_height() -
+						rp_info.color_attachments[1]->get_view_height();
+				rp_info.render_area.offset.x = 0;
+				rp_info.render_area.offset.y = rp_info.color_attachments[1]->get_view_height();
+
+				cmd.begin_render_pass(rp_info);
+				cmd.set_program(horiz_prog);
+				cmd.set_opaque_sprite_state();
+				cmd.set_specialization_constant_mask(0);
+				cmd.set_texture(0, 0, fragment.levels[input_level].vert[0][0]->get_view());
+				cmd.set_texture(0, 1, fragment.levels[input_level].vert[1][0]->get_view());
+				cmd.set_sampler(0, 2, *mirror_repeat_sampler);
+				cmd.draw(3);
+				cmd.end_render_pass();
+			}
+
+			// Need horizontal fixup (very rare).
+			if (rp_info.color_attachments[1]->get_view_width() < rp_info.color_attachments[0]->get_view_width())
+			{
+				cmd.barrier(dep);
+
+				rp_info.render_area.extent.width =
+						rp_info.color_attachments[0]->get_view_width() -
+						rp_info.color_attachments[1]->get_view_width();
+				rp_info.render_area.extent.height = rp_info.color_attachments[0]->get_view_height();
+				rp_info.render_area.offset.x = rp_info.color_attachments[1]->get_view_width();
+				rp_info.render_area.offset.y = 0;
+
+				cmd.begin_render_pass(rp_info);
+				cmd.set_program(horiz_prog);
+				cmd.set_opaque_sprite_state();
+				cmd.set_specialization_constant_mask(0);
+				cmd.set_texture(0, 0, fragment.levels[input_level].vert[0][0]->get_view());
+				cmd.set_texture(0, 1, fragment.levels[input_level].vert[1][0]->get_view());
+				cmd.set_sampler(0, 2, *mirror_repeat_sampler);
+				cmd.draw(3);
+				cmd.end_render_pass();
+			}
+		}
 
 		if (output_level >= 0)
 		{
