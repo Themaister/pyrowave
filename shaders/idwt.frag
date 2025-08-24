@@ -46,6 +46,7 @@ layout(set = 0, binding = 4) uniform mediump texture2D uCbCrOdd;
 layout(constant_id = 0) const bool VERTICAL = false;
 layout(constant_id = 1) const bool FINAL_Y = false;
 layout(constant_id = 2) const bool FINAL_CBCR = false;
+layout(constant_id = 3) const int EDGE_CONDITION = 0;
 const ivec2 OFFSET_M2 = VERTICAL ? ivec2(0, -2) : ivec2(-2, 0);
 const ivec2 OFFSET_M1 = VERTICAL ? ivec2(0, -1) : ivec2(-1, 0);
 const ivec2 OFFSET_P1 = VERTICAL ? ivec2(0, +1) : ivec2(+1, 0);
@@ -62,14 +63,20 @@ const float SYNTHESIS_HP_2 = -0.078223266529;
 const float SYNTHESIS_HP_3 = 0.016864118443;
 const float SYNTHESIS_HP_4 = 0.026748757411;
 
+layout(push_constant) uniform Registers
+{
+	int aligned_transform_size;
+};
+
 void main()
 {
-	bool is_odd;
-
+	int integer_coord;
 	if (VERTICAL)
-		is_odd = (int(gl_FragCoord.y) & 1) != 0;
+		integer_coord = int(gl_FragCoord.y);
 	else
-		is_odd = (int(gl_FragCoord.x) & 1) != 0;
+		integer_coord = int(gl_FragCoord.x);
+
+	bool is_odd = (integer_coord & 1) != 0;
 
 #define SAMPLE_COMPONENT(comp, swiz, T) \
 	T comp##1 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_M2).swiz); \
@@ -99,7 +106,41 @@ void main()
 	vec2 CbCr9 = vec2(Cb9, Cr9);
 #endif
 
-	// TODO: Deal with edge handling.
+	if (EDGE_CONDITION < 0)
+	{
+		// The mirroring rules are particular.
+		// For odd inputs we can rely on the mirrored sampling to get intended behavior.
+		if (integer_coord == 0)
+		{
+			// Y4 is the pivot.
+			Y2 = Y6;
+#if INPUT_SAMPLES > 1
+			CbCr2 = CbCr6;
+#endif
+		}
+	}
+	else if (EDGE_CONDITION > 0)
+	{
+		if (integer_coord + 2 >= aligned_transform_size)
+		{
+			// We're on the last two pixels.
+			// Y5 is the pivot. LP inputs behave as expected when using mirroring.
+			Y7 = Y3;
+			Y9 = Y1;
+#if INPUT_SAMPLES > 1
+			CbCr7 = CbCr3;
+			CbCr9 = CbCr1;
+#endif
+		}
+		else if (integer_coord + 4 >= aligned_transform_size)
+		{
+			// Y7 is the pivot.
+			Y9 = Y5;
+#if INPUT_SAMPLES > 1
+			CbCr9 = CbCr5;
+#endif
+		}
+	}
 
 #if INPUT_PLANES > 1
 #define AccumT vec3
