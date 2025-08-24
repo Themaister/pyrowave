@@ -28,6 +28,8 @@ public:
 	bool init(Vulkan::Device *device, int width, int height,
 	          ChromaSubsampling chroma, bool fragment_path = false);
 
+	static bool device_prefers_fragment_path(Vulkan::Device &device);
+
 	void clear();
 	bool push_packet(const void *data, size_t size);
 

@@ -334,7 +334,7 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 	}
 
 	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (fragment_path ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
+	            fragment_path ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
 	            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
 	auto end_dequant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -628,6 +628,10 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 	device->register_time_interval("GPU", std::move(start_idwt), std::move(end_idwt), "iDWT fragment");
 
 	cmd.set_specialization_constant_mask(0);
+
+	// Avoid WAR hazard for dequantization.
+	cmd.barrier(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0);
+
 	return true;
 }
 
@@ -746,11 +750,16 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 
 	cmd.barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, 0, VK_PIPELINE_STAGE_2_COPY_BIT, 0);
 
-	if (!idwt(cmd, views))
-		return false;
-
-	if (!idwt_fragment(cmd, views))
-		return false;
+	if (fragment_path)
+	{
+		if (!idwt_fragment(cmd, views))
+			return false;
+	}
+	else
+	{
+		if (!idwt(cmd, views))
+			return false;
+	}
 
 	decoded_frame_for_current_sequence = true;
 	return true;
@@ -763,6 +772,11 @@ void Decoder::Impl::clear()
 	decoded_frame_for_current_sequence = false;
 	total_blocks_in_sequence = block_count_32x32;
 	payload_data_cpu.clear();
+}
+
+bool Decoder::device_prefers_fragment_path(Vulkan::Device &device)
+{
+	return false;
 }
 
 bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma_, bool fragment_path_)
