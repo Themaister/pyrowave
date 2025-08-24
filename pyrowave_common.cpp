@@ -44,6 +44,9 @@ void WaveletBuffers::init_samplers()
 	samp.address_mode_u = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
 	samp.address_mode_v = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
 	samp.address_mode_w = VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+	samp.min_filter = VK_FILTER_NEAREST;
+	samp.mag_filter = VK_FILTER_NEAREST;
+	samp.mipmap_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	mirror_repeat_sampler = device->create_sampler(samp);
 
 	samp.address_mode_u = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
@@ -51,6 +54,84 @@ void WaveletBuffers::init_samplers()
 	samp.address_mode_w = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samp.border_color = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 	border_sampler = device->create_sampler(samp);
+}
+
+void WaveletBuffers::allocate_images_fragment()
+{
+	auto full_format = Configuration::get().get_precision() == 2 ?
+	                   VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_SFLOAT;
+	auto half_format = Configuration::get().get_precision() == 2 ?
+	                   VK_FORMAT_R32G32_SFLOAT : VK_FORMAT_R16G16_SFLOAT;
+
+	for (int level = 0; level < DecompositionLevels; level++)
+	{
+		uint32_t full_width = aligned_width >> (level + 1);
+		uint32_t half_width = full_width >> 1;
+
+		auto info = ImageCreateInfo::render_target(
+				aligned_width >> (level + 1), aligned_height >> (level + 1), full_format);
+
+		info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+		if (level < DecompositionLevels - 1)
+		{
+			char label[64];
+			for (int comp = 0; comp < 2; comp++)
+			{
+				info.width = full_width;
+				info.format = full_format;
+				fragment.levels[level].horiz[comp] = device->create_image(info);
+				snprintf(label, sizeof(label), "Horiz Output (level %u, comp %u)", level, comp);
+				device->set_name(*fragment.levels[level].horiz[comp], label);
+
+				info.width = half_width;
+				info.format = comp == 0 ? full_format : half_format;
+				fragment.levels[level].vert[0][comp] = device->create_image(info);
+				fragment.levels[level].vert[1][comp] = device->create_image(info);
+
+				snprintf(label, sizeof(label), "Vert Even Output (level %u, comp %u)", level, comp);
+				device->set_name(*fragment.levels[level].vert[0][comp], label);
+				snprintf(label, sizeof(label), "Vert Odd Output (level %u, comp %u)", level, comp);
+				device->set_name(*fragment.levels[level].vert[1][comp], label);
+			}
+
+			info.width = full_width;
+			info.format = full_format;
+			fragment.levels[level].horiz[2] = device->create_image(info);
+			snprintf(label, sizeof(label), "Horiz Output (level %u, comp 2)", level);
+			device->set_name(*fragment.levels[level].horiz[2], label);
+		}
+
+		for (int comp = 0; comp < NumComponents; comp++)
+		{
+			auto &dequant_view = component_layer_views[comp][level];
+
+			for (int band = 0; band < NumFrequencyBandsPerLevel; band++)
+			{
+				Vulkan::ImageViewCreateInfo view_info = {};
+				view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
+				view_info.levels = 1;
+				view_info.layers = 1;
+
+				if (band == 0 && level < DecompositionLevels - 1)
+				{
+					view_info.image = fragment.levels[level].horiz[comp].get();
+					view_info.base_level = 0;
+					view_info.base_layer = 0;
+				}
+				else if (dequant_view)
+				{
+					view_info.image = dequant_view->get_create_info().image;
+					view_info.base_level = dequant_view->get_create_info().base_level;
+					view_info.base_layer = dequant_view->get_create_info().base_layer;
+					view_info.base_layer += band;
+				}
+
+				fragment.levels[level].decoded[comp][band] = device->create_image_view(view_info);
+			}
+		}
+	}
 }
 
 void WaveletBuffers::allocate_images()
@@ -164,12 +245,13 @@ void WaveletBuffers::init_block_meta()
 	}
 }
 
-bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsampling chroma_)
+bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsampling chroma_, bool fragment_path_)
 {
 	device = device_;
 	width = width_;
 	height = height_;
 	chroma = chroma_;
+	fragment_path = fragment_path_;
 
 	aligned_width = align(width, Alignment);
 	aligned_height = align(height, Alignment);
@@ -178,6 +260,8 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsam
 
 	init_samplers();
 	allocate_images();
+	if (fragment_path)
+		allocate_images_fragment();
 
 	init_block_meta();
 

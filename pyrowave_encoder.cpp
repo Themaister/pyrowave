@@ -1218,7 +1218,7 @@ bool Encoder::init(Device *device, int width_, int height_, ChromaSubsampling ch
 	    !device->supports_subgroup_size_log2(true, 6, 6))
 		return false;
 
-	return impl->init(device, width_, height_, chroma_);
+	return impl->init(device, width_, height_, chroma_, false);
 }
 
 bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)

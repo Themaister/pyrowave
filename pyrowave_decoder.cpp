@@ -41,6 +41,7 @@ struct Decoder::Impl final : public WaveletBuffers
 
 	bool dequant(CommandBuffer &cmd);
 	bool idwt(CommandBuffer &cmd, const ViewBuffers &views);
+	bool idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views);
 	void init_block_meta() override;
 	void clear();
 
@@ -333,13 +334,121 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 	}
 
 	cmd.barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+	            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | (fragment_path ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0),
+	            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
 	auto end_dequant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	cmd.end_region();
 	cmd.enable_subgroup_size_control(false);
 	device->register_time_interval("GPU", std::move(start_dequant), std::move(end_dequant), "Dequant");
 
+	return true;
+}
+
+bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
+{
+	const auto add_discard = [&](const Vulkan::Image *img) {
+		if (!img)
+			return;
+
+		cmd.image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+						  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+						  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+	};
+
+	const auto add_read_only = [&](const Vulkan::Image *img) {
+		if (!img)
+			return;
+
+		cmd.image_barrier(*img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+						  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+	};
+
+	cmd.begin_barrier_batch();
+	for (auto &level : fragment.levels)
+	{
+		for (auto &vert : level.vert)
+			for (auto &comp : vert)
+				add_discard(comp.get());
+		for (auto &comp : level.horiz)
+			add_discard(comp.get());
+	}
+	cmd.end_barrier_batch();
+
+	auto *vert_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[2][1]);
+	auto *horiz_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[1][2]);
+
+	for (int output_level = DecompositionLevels - 2; output_level > 0; output_level--)
+	{
+		char label[128];
+		snprintf(label, sizeof(label), "Fragment iDWT level %u", output_level);
+		cmd.begin_region(label);
+
+		int input_level = output_level + 1;
+		Vulkan::RenderPassInfo rp_info = {};
+		rp_info.store_attachments = 0x3;
+		rp_info.num_color_attachments = 2;
+
+		// Vertical passes.
+		for (int vert_pass = 0; vert_pass < 2; vert_pass++)
+		{
+			rp_info.color_attachments[0] = &fragment.levels[output_level].vert[vert_pass][0]->get_view();
+			rp_info.color_attachments[1] = &fragment.levels[output_level].vert[vert_pass][1]->get_view();
+
+			cmd.begin_render_pass(rp_info);
+			cmd.set_program(vert_prog);
+			cmd.set_opaque_sprite_state();
+			cmd.set_specialization_constant_mask(1);
+			cmd.set_specialization_constant(0, true);
+
+			cmd.set_texture(0, 0, *fragment.levels[input_level].decoded[0][vert_pass + 0]);
+			cmd.set_texture(0, 1, *fragment.levels[input_level].decoded[0][vert_pass + 2]);
+			cmd.set_sampler(0, 2, *mirror_repeat_sampler);
+			cmd.set_texture(0, 3, *fragment.levels[input_level].decoded[1][vert_pass + 0]);
+			cmd.set_texture(0, 4, *fragment.levels[input_level].decoded[1][vert_pass + 2]);
+			cmd.set_texture(0, 5, *fragment.levels[input_level].decoded[2][vert_pass + 0]);
+			cmd.set_texture(0, 6, *fragment.levels[input_level].decoded[2][vert_pass + 2]);
+
+			cmd.draw(3);
+			cmd.end_render_pass();
+		}
+
+		cmd.begin_barrier_batch();
+		for (auto &vert : fragment.levels[output_level].vert)
+			for (auto &comp : vert)
+				add_read_only(comp.get());
+		cmd.end_barrier_batch();
+
+		rp_info.num_color_attachments = 3;
+		rp_info.store_attachments = 0x7;
+		for (int comp = 0; comp < 3; comp++)
+			rp_info.color_attachments[comp] = &fragment.levels[output_level].horiz[comp]->get_view();
+
+		cmd.begin_render_pass(rp_info);
+		cmd.set_program(horiz_prog);
+		cmd.set_opaque_sprite_state();
+		cmd.set_specialization_constant_mask(1);
+		cmd.set_specialization_constant(0, false);
+
+		cmd.set_texture(0, 0, fragment.levels[output_level].vert[0][0]->get_view());
+		cmd.set_texture(0, 1, fragment.levels[output_level].vert[1][0]->get_view());
+		cmd.set_sampler(0, 2, *mirror_repeat_sampler);
+		cmd.set_texture(0, 3, fragment.levels[output_level].vert[0][1]->get_view());
+		cmd.set_texture(0, 4, fragment.levels[output_level].vert[1][1]->get_view());
+
+		cmd.draw(3);
+		cmd.end_render_pass();
+
+		cmd.begin_barrier_batch();
+		for (auto &comp : fragment.levels[output_level].horiz)
+			add_read_only(comp.get());
+		cmd.end_barrier_batch();
+
+		cmd.end_region();
+	}
+
+	cmd.set_specialization_constant_mask(0);
 	return true;
 }
 
@@ -461,6 +570,9 @@ bool Decoder::Impl::decode(CommandBuffer &cmd, const ViewBuffers &views)
 	if (!idwt(cmd, views))
 		return false;
 
+	if (!idwt_fragment(cmd, views))
+		return false;
+
 	decoded_frame_for_current_sequence = true;
 	return true;
 }
@@ -499,7 +611,7 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 		return false;
 	}
 
-	if (!impl->init(device, width, height, chroma_))
+	if (!impl->init(device, width, height, chroma_, true))
 	{
 		LOGE("Failed to initialize.\n");
 		return false;
