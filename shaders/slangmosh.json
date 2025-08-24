@@ -31,8 +31,7 @@
 			"name": "idwt_fs",
 			"path": "idwt.frag",
 			"variants": [
-				{ "define": "INPUT_PLANES_MINUS_1", "count": 3 },
-				{ "define": "OUTPUT_PLANES_MINUS_1", "count": 3 }
+				{ "define": "CHROMA_CONFIG", "count": 3 }
 			]
 		},
 		{

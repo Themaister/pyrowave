@@ -29,7 +29,8 @@ static YCbCrImages create_ycbcr_images(Device &device, int width, int height, Vk
 	YCbCrImages images;
 	auto info = ImageCreateInfo::immutable_2d_image(width, height, fmt);
 	info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-	             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+	             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	images.images[0] = device.create_image(info);
@@ -48,7 +49,10 @@ static YCbCrImages create_ycbcr_images(Device &device, int width, int height, Vk
 	device.set_name(*images.images[2], "Cr");
 
 	for (int i = 0; i < 3; i++)
+	{
+		images.images[i]->set_layout(Vulkan::Layout::General);
 		images.views.planes[i] = &images.images[i]->get_view();
+	}
 
 	return images;
 }
@@ -142,7 +146,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			              PyroWave::ChromaSubsampling::Chroma444;
 
 			out_images = create_ycbcr_images(e.get_device(), rawparam.width, rawparam.height, format, chroma);
-			dec.init(&e.get_device(), rawparam.width, rawparam.height, chroma);
+			dec.init(&e.get_device(), rawparam.width, rawparam.height, chroma, true);
 		}
 		else
 		{
@@ -153,7 +157,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
 			out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
 			enc.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
-			dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
+			dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma, true);
 		}
 	}
 
@@ -220,7 +224,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 				for (int i = 0; i < 3; i++)
 				{
 					cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_UNDEFINED,
-					                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					                   VK_IMAGE_LAYOUT_GENERAL,
 					                   0, 0,
 					                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 				}
@@ -240,8 +244,8 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 				for (int i = 0; i < 3; i++)
 				{
-					cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+					cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_GENERAL,
+					                   VK_IMAGE_LAYOUT_GENERAL,
 					                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 					                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 				}

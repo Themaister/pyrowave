@@ -58,49 +58,45 @@ void WaveletBuffers::init_samplers()
 
 void WaveletBuffers::allocate_images_fragment()
 {
-	auto full_format = Configuration::get().get_precision() == 2 ?
-	                   VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_SFLOAT;
-	auto half_format = Configuration::get().get_precision() == 2 ?
-	                   VK_FORMAT_R32G32_SFLOAT : VK_FORMAT_R16G16_SFLOAT;
+	auto format = Configuration::get().get_precision() == 2 ?
+	              VK_FORMAT_R32_SFLOAT : VK_FORMAT_R16_SFLOAT;
+	auto vert_chroma_format = Configuration::get().get_precision() == 2 ?
+	                          VK_FORMAT_R32G32_SFLOAT : VK_FORMAT_R16G16_SFLOAT;
 
 	for (int level = 0; level < DecompositionLevels; level++)
 	{
-		uint32_t full_width = aligned_width >> (level + 1);
-		uint32_t half_width = full_width >> 1;
+		uint32_t horiz_output_width = aligned_width >> (level + 1);
+		uint32_t horiz_output_height = aligned_height >> (level + 1);
+		uint32_t vert_input_width = horiz_output_width;
+		uint32_t vert_input_height = horiz_output_height * 2;
 
-		auto info = ImageCreateInfo::render_target(
-				aligned_width >> (level + 1), aligned_height >> (level + 1), full_format);
-
+		auto info = ImageCreateInfo::render_target(horiz_output_width, horiz_output_height, format);
 		info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 		info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-		if (level < DecompositionLevels - 1)
+		char label[64];
+		for (int comp = 0; comp < 3; comp++)
 		{
-			char label[64];
-			for (int comp = 0; comp < 2; comp++)
-			{
-				info.width = full_width;
-				info.format = full_format;
-				fragment.levels[level].horiz[comp] = device->create_image(info);
-				snprintf(label, sizeof(label), "Horiz Output (level %u, comp %u)", level, comp);
-				device->set_name(*fragment.levels[level].horiz[comp], label);
+			info.width = horiz_output_width;
+			info.height = horiz_output_height;
+			info.format = format;
+			fragment.levels[level].horiz[comp] = device->create_image(info);
+			snprintf(label, sizeof(label), "Horiz Output (level %u, comp %u)", level, comp);
+			device->set_name(*fragment.levels[level].horiz[comp], label);
 
-				info.width = half_width;
-				info.format = comp == 0 ? full_format : half_format;
+			if (comp < 2)
+			{
+				info.width = vert_input_width;
+				info.height = vert_input_height;
+				info.format = comp == 0 ? format : vert_chroma_format;
 				fragment.levels[level].vert[0][comp] = device->create_image(info);
 				fragment.levels[level].vert[1][comp] = device->create_image(info);
 
-				snprintf(label, sizeof(label), "Vert Even Output (level %u, comp %u)", level, comp);
+				snprintf(label, sizeof(label), "Vert Even Input (level %u, comp %u)", level, comp);
 				device->set_name(*fragment.levels[level].vert[0][comp], label);
-				snprintf(label, sizeof(label), "Vert Odd Output (level %u, comp %u)", level, comp);
+				snprintf(label, sizeof(label), "Vert Odd Input (level %u, comp %u)", level, comp);
 				device->set_name(*fragment.levels[level].vert[1][comp], label);
 			}
-
-			info.width = full_width;
-			info.format = full_format;
-			fragment.levels[level].horiz[2] = device->create_image(info);
-			snprintf(label, sizeof(label), "Horiz Output (level %u, comp 2)", level);
-			device->set_name(*fragment.levels[level].horiz[2], label);
 		}
 
 		for (int comp = 0; comp < NumComponents; comp++)

@@ -4,10 +4,23 @@
 
 layout(location = 0) in vec2 vUV;
 
+#if CHROMA_CONFIG == 0
+#define OUTPUT_PLANES 1
+#define INPUT_PLANES 1
+#elif CHROMA_CONFIG == 1
+#define OUTPUT_PLANES 2
+#define INPUT_PLANES 3
+#elif CHROMA_CONFIG == 2
+#define OUTPUT_PLANES 3
+#define INPUT_PLANES 2
+#else
+#error "Invalid chroma config"
+#endif
+
 layout(location = 0) out mediump float oY;
-#if OUTPUT_PLANES_MINUS_1 == 1
+#if OUTPUT_PLANES == 2
 layout(location = 1) out mediump vec2 oCbCr;
-#elif OUTPUT_PLANES_MINUS_1 == 2
+#elif OUTPUT_PLANES == 3
 layout(location = 1) out mediump float oCb;
 layout(location = 2) out mediump float oCr;
 #endif
@@ -15,20 +28,15 @@ layout(location = 2) out mediump float oCr;
 layout(set = 0, binding = 0) uniform mediump texture2D uYEven;
 layout(set = 0, binding = 1) uniform mediump texture2D uYOdd;
 layout(set = 0, binding = 2) uniform mediump sampler uSampler;
-#if INPUT_PLANES_MINUS_1 == 2
+#if INPUT_PLANES == 3
 layout(set = 0, binding = 3) uniform mediump texture2D uCbEven;
-layout(set = 0, binding = 4) uniform mediump texture2D uCrEven;
-layout(set = 0, binding = 5) uniform mediump texture2D uCbOdd;
+layout(set = 0, binding = 4) uniform mediump texture2D uCbOdd;
+layout(set = 0, binding = 5) uniform mediump texture2D uCrEven;
 layout(set = 0, binding = 6) uniform mediump texture2D uCrOdd;
-#elif INPUT_PLANES_MINUS_1 == 1
+#elif INPUT_PLANES == 2
 layout(set = 0, binding = 3) uniform mediump texture2D uCbCrEven;
 layout(set = 0, binding = 4) uniform mediump texture2D uCbCrOdd;
 #endif
-
-#if (!INPUT_PLANES_MINUS_1 && OUTPUT_PLANES_MINUS_1) || (!OUTPUT_PLANES_MINUS_1 && INPUT_PLANES_MINUS_1)
-// Degenerate scenario.
-void main() {}
-#else
 
 // Direct and naive implementing of the CDF 9/7 synthesis filters.
 // Optimized for the mobile GPUs which don't have any
@@ -36,6 +44,8 @@ void main() {}
 // i.e. anything not AMD/NV/Intel.
 
 layout(constant_id = 0) const bool VERTICAL = false;
+layout(constant_id = 1) const bool FINAL_Y = false;
+layout(constant_id = 2) const bool FINAL_CBCR = false;
 const ivec2 OFFSET_M2 = VERTICAL ? ivec2(0, -2) : ivec2(-2, 0);
 const ivec2 OFFSET_M1 = VERTICAL ? ivec2(0, -1) : ivec2(-1, 0);
 const ivec2 OFFSET_P1 = VERTICAL ? ivec2(0, +1) : ivec2(+1, 0);
@@ -73,9 +83,9 @@ void main()
 	T comp##9 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_P2).swiz)
 
 	SAMPLE_COMPONENT(Y, x, float);
-#if INPUT_PLANES_MINUS_1 == 1
+#if INPUT_PLANES == 2
 	SAMPLE_COMPONENT(CbCr, xy, vec2);
-#elif INPUT_PLANES_MINUS_1 == 2
+#elif INPUT_PLANES == 3
 	SAMPLE_COMPONENT(Cb, x, float);
 	SAMPLE_COMPONENT(Cr, x, float);
 	vec2 CbCr1 = vec2(Cb1, Cr1);
@@ -91,7 +101,7 @@ void main()
 
 	// TODO: Deal with edge handling.
 
-#if INPUT_PLANES_MINUS_1 > 0
+#if INPUT_PLANES > 1
 #define AccumT vec3
 #define GenInput(comp) vec3(Y##comp, CbCr##comp)
 #else
@@ -136,15 +146,27 @@ void main()
 
 	AccumT result = C0 * W0 + C1 * W1 + C2 * W2 + C3 * W3 + C4 * W4;
 
-#if OUTPUT_PLANES_MINUS_1 == 2
+#if OUTPUT_PLANES == 3
 	oY = result.x;
 	oCb = result.y;
 	oCr = result.z;
-#elif OUTPUT_PLANES_MINUS_1 == 1
+#elif OUTPUT_PLANES == 2
 	oY = result.x;
 	oCbCr = result.yz;
 #else
 	oY = result;
 #endif
-}
+
+	if (FINAL_Y)
+		oY += 0.5;
+
+	if (FINAL_CBCR)
+	{
+#if OUTPUT_PLANES == 3
+		oCb += 0.5;
+		oCr += 0.5;
+#elif OUTPUT_PLANES == 2
+		oCbCr += 0.5;
 #endif
+	}
+}

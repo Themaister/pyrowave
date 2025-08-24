@@ -348,21 +348,21 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 {
 	const auto add_discard = [&](const Vulkan::Image *img) {
-		if (!img)
-			return;
-
-		cmd.image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-						  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-						  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+		if (img)
+		{
+			cmd.image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+			                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+		}
 	};
 
 	const auto add_read_only = [&](const Vulkan::Image *img) {
-		if (!img)
-			return;
-
-		cmd.image_barrier(*img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-						  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+		if (img)
+		{
+			cmd.image_barrier(*img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+		}
 	};
 
 	cmd.begin_barrier_batch();
@@ -376,25 +376,47 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 	}
 	cmd.end_barrier_batch();
 
-	auto *vert_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[2][1]);
-	auto *horiz_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[1][2]);
+	auto start_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
-	for (int output_level = DecompositionLevels - 2; output_level > 0; output_level--)
+	for (int input_level = DecompositionLevels - 1; input_level >= 0; input_level--)
 	{
+		int output_level = input_level - 1;
+
 		char label[128];
-		snprintf(label, sizeof(label), "Fragment iDWT level %u", output_level);
+		if (output_level >= 0)
+			snprintf(label, sizeof(label), "Fragment iDWT level %u", output_level);
+		else
+			snprintf(label, sizeof(label), "Fragment iDWT final");
 		cmd.begin_region(label);
 
-		int input_level = output_level + 1;
 		Vulkan::RenderPassInfo rp_info = {};
-		rp_info.store_attachments = 0x3;
-		rp_info.num_color_attachments = 2;
+
+		bool has_chroma_output = output_level >= 0 || chroma == ChromaSubsampling::Chroma444;
+
+		Vulkan::Program *vert_prog;
+		Vulkan::Program *horiz_prog;
+
+		if (has_chroma_output)
+		{
+			rp_info.store_attachments = 0x3;
+			rp_info.num_color_attachments = 2;
+			vert_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[1]);
+			horiz_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[2]);
+		}
+		else
+		{
+			rp_info.store_attachments = 0x1;
+			rp_info.num_color_attachments = 1;
+			vert_prog = device->request_program(shaders.idwt_vs, shaders.idwt_fs[0]);
+			horiz_prog = vert_prog;
+		}
 
 		// Vertical passes.
 		for (int vert_pass = 0; vert_pass < 2; vert_pass++)
 		{
-			rp_info.color_attachments[0] = &fragment.levels[output_level].vert[vert_pass][0]->get_view();
-			rp_info.color_attachments[1] = &fragment.levels[output_level].vert[vert_pass][1]->get_view();
+			rp_info.color_attachments[0] = &fragment.levels[input_level].vert[vert_pass][0]->get_view();
+			if (has_chroma_output)
+				rp_info.color_attachments[1] = &fragment.levels[input_level].vert[vert_pass][1]->get_view();
 
 			cmd.begin_render_pass(rp_info);
 			cmd.set_program(vert_prog);
@@ -415,38 +437,66 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 		}
 
 		cmd.begin_barrier_batch();
-		for (auto &vert : fragment.levels[output_level].vert)
+		for (auto &vert : fragment.levels[input_level].vert)
 			for (auto &comp : vert)
 				add_read_only(comp.get());
 		cmd.end_barrier_batch();
 
-		rp_info.num_color_attachments = 3;
-		rp_info.store_attachments = 0x7;
-		for (int comp = 0; comp < 3; comp++)
-			rp_info.color_attachments[comp] = &fragment.levels[output_level].horiz[comp]->get_view();
+		if (has_chroma_output)
+		{
+			rp_info.num_color_attachments = 3;
+			rp_info.store_attachments = 0x7;
+		}
+		else
+		{
+			rp_info.num_color_attachments = 1;
+			rp_info.store_attachments = 0x1;
+		}
+
+		for (uint32_t comp = 0; comp < rp_info.num_color_attachments; comp++)
+		{
+			if (output_level < 0 || (output_level == 0 && chroma == ChromaSubsampling::Chroma420 && comp != 0))
+				rp_info.color_attachments[comp] = views.planes[comp];
+			else
+				rp_info.color_attachments[comp] = &fragment.levels[output_level].horiz[comp]->get_view();
+		}
 
 		cmd.begin_render_pass(rp_info);
 		cmd.set_program(horiz_prog);
 		cmd.set_opaque_sprite_state();
-		cmd.set_specialization_constant_mask(1);
+		cmd.set_specialization_constant_mask(7);
 		cmd.set_specialization_constant(0, false);
+		cmd.set_specialization_constant(1, output_level < 0);
+		cmd.set_specialization_constant(2, output_level < 0 || (output_level == 0 && chroma == ChromaSubsampling::Chroma420));
 
-		cmd.set_texture(0, 0, fragment.levels[output_level].vert[0][0]->get_view());
-		cmd.set_texture(0, 1, fragment.levels[output_level].vert[1][0]->get_view());
+		cmd.set_texture(0, 0, fragment.levels[input_level].vert[0][0]->get_view());
+		cmd.set_texture(0, 1, fragment.levels[input_level].vert[1][0]->get_view());
 		cmd.set_sampler(0, 2, *mirror_repeat_sampler);
-		cmd.set_texture(0, 3, fragment.levels[output_level].vert[0][1]->get_view());
-		cmd.set_texture(0, 4, fragment.levels[output_level].vert[1][1]->get_view());
+		cmd.set_texture(0, 3, fragment.levels[input_level].vert[0][1]->get_view());
+		cmd.set_texture(0, 4, fragment.levels[input_level].vert[1][1]->get_view());
+
+		// In case we're rendering to an output texture,
+		// the render area might be smaller than we expect for purposes of alignment.
+		cmd.set_viewport({ 0, 0,
+		                   float(aligned_width >> (output_level + 1)), float(aligned_height >> (output_level + 1)),
+		                   0, 1 });
 
 		cmd.draw(3);
 		cmd.end_render_pass();
 
-		cmd.begin_barrier_batch();
-		for (auto &comp : fragment.levels[output_level].horiz)
-			add_read_only(comp.get());
-		cmd.end_barrier_batch();
+		if (output_level >= 0)
+		{
+			cmd.begin_barrier_batch();
+			for (auto &comp: fragment.levels[output_level].horiz)
+				add_read_only(comp.get());
+			cmd.end_barrier_batch();
+		}
 
 		cmd.end_region();
 	}
+
+	auto end_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+	device->register_time_interval("GPU", std::move(start_idwt), std::move(end_idwt), "iDWT fragment");
 
 	cmd.set_specialization_constant_mask(0);
 	return true;
@@ -586,7 +636,7 @@ void Decoder::Impl::clear()
 	payload_data_cpu.clear();
 }
 
-bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma_)
+bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma_, bool fragment_path_)
 {
 	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
 	constexpr VkSubgroupFeatureFlags required_features =
@@ -611,7 +661,7 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 		return false;
 	}
 
-	if (!impl->init(device, width, height, chroma_, true))
+	if (!impl->init(device, width, height, chroma_, fragment_path_))
 	{
 		LOGE("Failed to initialize.\n");
 		return false;
