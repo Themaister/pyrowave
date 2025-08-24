@@ -776,7 +776,21 @@ void Decoder::Impl::clear()
 
 bool Decoder::device_prefers_fragment_path(Vulkan::Device &device)
 {
-	return false;
+	switch (device.get_device_features().driver_id)
+	{
+	// QCOM hardware struggles with compute in general and prefers fragment.
+	case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
+	case VK_DRIVER_ID_MESA_TURNIP:
+		return true;
+
+	// Mali heavily favors texture sampling over LS heavy content.
+	case VK_DRIVER_ID_ARM_PROPRIETARY:
+	case VK_DRIVER_ID_MESA_PANVK:
+		return true;
+
+	default:
+		return false;
+	}
 }
 
 bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma_, bool fragment_path_)
