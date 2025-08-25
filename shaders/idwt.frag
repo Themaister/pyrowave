@@ -47,10 +47,11 @@ layout(constant_id = 0) const bool VERTICAL = false;
 layout(constant_id = 1) const bool FINAL_Y = false;
 layout(constant_id = 2) const bool FINAL_CBCR = false;
 layout(constant_id = 3) const int EDGE_CONDITION = 0;
-const ivec2 OFFSET_M2 = VERTICAL ? ivec2(0, -2) : ivec2(-2, 0);
-const ivec2 OFFSET_M1 = VERTICAL ? ivec2(0, -1) : ivec2(-1, 0);
-const ivec2 OFFSET_P1 = VERTICAL ? ivec2(0, +1) : ivec2(+1, 0);
-const ivec2 OFFSET_P2 = VERTICAL ? ivec2(0, +2) : ivec2(+2, 0);
+const ivec2 OFFSET_M2 = VERTICAL ? ivec2(0, 0) : ivec2(0, 0);
+const ivec2 OFFSET_M1 = VERTICAL ? ivec2(0, 1) : ivec2(1, 0);
+const ivec2 OFFSET_C  = VERTICAL ? ivec2(0, 2) : ivec2(2, 0);
+const ivec2 OFFSET_P1 = VERTICAL ? ivec2(0, 3) : ivec2(3, 0);
+const ivec2 OFFSET_P2 = VERTICAL ? ivec2(0, 4) : ivec2(4, 0);
 
 const float SYNTHESIS_LP_0 = 1.11508705;
 const float SYNTHESIS_LP_1 = 0.591271763114;
@@ -65,6 +66,7 @@ const float SYNTHESIS_HP_4 = 0.026748757411;
 
 layout(push_constant) uniform Registers
 {
+	vec2 uv_offset;
 	int aligned_transform_size;
 };
 
@@ -82,8 +84,8 @@ void main()
 	T comp##1 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_M2).swiz); \
 	T comp##2 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_M1).swiz); \
 	T comp##3 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_M1).swiz); \
-	T comp##4 = T(textureLod(sampler2D(u##comp##Even, uSampler), vUV, 0.0).swiz); \
-	T comp##5 = T(textureLod(sampler2D(u##comp##Odd, uSampler), vUV, 0.0).swiz); \
+	T comp##4 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_C).swiz); \
+	T comp##5 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_C).swiz); \
 	T comp##6 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_P1).swiz); \
 	T comp##7 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_P1).swiz); \
 	T comp##8 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_P2).swiz); \

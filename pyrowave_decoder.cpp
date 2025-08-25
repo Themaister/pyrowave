@@ -378,6 +378,13 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 
 	auto start_idwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 
+	struct Push
+	{
+		float u_offset;
+		float v_offset;
+		uint32_t pivot_size;
+	} push = {};
+
 	for (int input_level = DecompositionLevels - 1; input_level >= 0; input_level--)
 	{
 		int output_level = input_level - 1;
@@ -440,7 +447,12 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 			uint32_t render_height = rp_info.color_attachments[0]->get_view_height();
 
 			// Set mirror point.
-			cmd.push_constants(&render_height, 0, sizeof(render_height));
+			// Work around broken Mali r38.1 compiler.
+			// If it sees negative texture offsets it breaks the output for whatever reason (!?!?!?!).
+			push.u_offset = 0.0f;
+			push.v_offset = -2.0f / float(fragment.levels[input_level].decoded[0][0]->get_view_height());
+			push.pivot_size = render_height;
+			cmd.push_constants(&push, 0, sizeof(push));
 
 			// Render top edge condition.
 			cmd.set_specialization_constant(3, -1);
@@ -517,7 +529,10 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 		cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
 
 		// Set mirror point.
-		cmd.push_constants(&aligned_render_width, 0, sizeof(aligned_render_width));
+		push.u_offset = -2.0f / float(fragment.levels[input_level].vert[0][0]->get_width());
+		push.v_offset = 0.0f;
+		push.pivot_size = aligned_render_width;
+		cmd.push_constants(&push, 0, sizeof(push));
 
 		// Render left edge condition.
 		cmd.set_specialization_constant(3, -1);
@@ -580,7 +595,7 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 				cmd.set_sampler(0, 2, *mirror_repeat_sampler);
 				cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
 				cmd.set_specialization_constant_mask(0x8);
-				cmd.push_constants(&aligned_render_height, 0, sizeof(aligned_render_height));
+				cmd.push_constants(&push, 0, sizeof(push));
 				cmd.set_specialization_constant(3, 1); // Always consider edge handling.
 				cmd.draw(3);
 				cmd.end_render_pass();
@@ -606,7 +621,7 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 				cmd.set_sampler(0, 2, *mirror_repeat_sampler);
 				cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
 				cmd.set_specialization_constant_mask(0x8);
-				cmd.push_constants(&aligned_render_width, 0, sizeof(aligned_render_width));
+				cmd.push_constants(&push, 0, sizeof(push));
 				cmd.set_specialization_constant(3, 1); // Always consider edge handling.
 				cmd.draw(3);
 				cmd.end_render_pass();
