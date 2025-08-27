@@ -8,6 +8,7 @@ layout(location = 0, component = 2) out float vIntCoord;
 layout(push_constant) uniform Registers
 {
 	vec2 uv_offset;
+	vec2 half_texel_offset;
 	float res_scale;
 };
 

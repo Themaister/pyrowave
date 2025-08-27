@@ -382,6 +382,8 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 	{
 		float u_offset;
 		float v_offset;
+		float half_texel_offset_u;
+		float half_texel_offset_v;
 		float vp_scale;
 		uint32_t pivot_size;
 	} push = {};
@@ -450,8 +452,11 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 			// Set mirror point.
 			// Work around broken Mali r38.1 compiler.
 			// If it sees negative texture offsets it breaks the output for whatever reason (!?!?!?!).
+			auto *input_view = fragment.levels[input_level].decoded[0][0].get();
 			push.u_offset = 0.0f;
-			push.v_offset = -2.0f / float(fragment.levels[input_level].decoded[0][0]->get_view_height());
+			push.v_offset = -2.0f / float(input_view->get_view_height());
+			push.half_texel_offset_u = 0.5f / float(input_view->get_view_width());
+			push.half_texel_offset_v = 0.5f / float(input_view->get_view_height());
 			push.vp_scale = cmd.get_viewport().height;
 			push.pivot_size = render_height;
 			cmd.push_constants(&push, 0, sizeof(push));
@@ -531,8 +536,11 @@ bool Decoder::Impl::idwt_fragment(CommandBuffer &cmd, const ViewBuffers &views)
 		cmd.set_viewport({ 0, 0, float(aligned_render_width), float(aligned_render_height), 0, 1 });
 
 		// Set mirror point.
-		push.u_offset = -2.0f / float(fragment.levels[input_level].vert[0][0]->get_width());
+		auto *input_view = &fragment.levels[input_level].vert[0][0]->get_view();
+		push.u_offset = -2.0f / float(input_view->get_view_width());
 		push.v_offset = 0.0f;
+		push.half_texel_offset_u = 0.5f / float(input_view->get_view_width());
+		push.half_texel_offset_v = 0.5f / float(input_view->get_view_height());
 		push.vp_scale = cmd.get_viewport().width;
 		push.pivot_size = aligned_render_width;
 		cmd.push_constants(&push, 0, sizeof(push));

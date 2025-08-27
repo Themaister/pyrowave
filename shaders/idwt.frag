@@ -2,6 +2,8 @@
 // Copyright (c) 2025 Hans-Kristian Arntzen
 // SPDX-License-Identifier: MIT
 
+#extension GL_EXT_control_flow_attributes : require
+
 layout(location = 0) in vec2 vUV;
 layout(location = 0, component = 2) in float vIntCoord;
 
@@ -68,40 +70,79 @@ const float SYNTHESIS_HP_4 = 0.026748757411;
 layout(push_constant) uniform Registers
 {
 	vec2 uv_offset;
+	vec2 half_texel_offset;
 	float res_scale;
 	int aligned_transform_size;
 };
+
+float[10] sample_component_gather(mediump texture2D tex_even, mediump texture2D tex_odd)
+{
+	float components[10];
+	vec2 gather_uv = vUV + half_texel_offset;
+	vec2 even0, even1, odd0, odd1;
+
+	if (VERTICAL)
+	{
+		even0 = textureGatherOffset(sampler2D(tex_even, uSampler), gather_uv, OFFSET_M1).wx;
+		even1 = textureGatherOffset(sampler2D(tex_even, uSampler), gather_uv, OFFSET_P1).wx;
+		odd0 = textureGatherOffset(sampler2D(tex_odd, uSampler), gather_uv, OFFSET_M2).wx;
+		odd1 = textureGatherOffset(sampler2D(tex_odd, uSampler), gather_uv, OFFSET_C).wx;
+	}
+	else
+	{
+		even0 = textureGatherOffset(sampler2D(tex_even, uSampler), gather_uv, OFFSET_M1).wz;
+		even1 = textureGatherOffset(sampler2D(tex_even, uSampler), gather_uv, OFFSET_P1).wz;
+		odd0 = textureGatherOffset(sampler2D(tex_odd, uSampler), gather_uv, OFFSET_M2).wz;
+		odd1 = textureGatherOffset(sampler2D(tex_odd, uSampler), gather_uv, OFFSET_C).wz;
+	}
+
+	components[0] = 0.0;
+	components[1] = odd0.x;
+	components[2] = even0.x;
+	components[3] = odd0.y;
+	components[4] = even0.y;
+	components[5] = odd1.x;
+	components[6] = even1.x;
+	components[7] = odd1.y;
+	components[8] = even1.y;
+	components[9] = textureLodOffset(sampler2D(tex_odd, uSampler), vUV, 0.0, OFFSET_P2).x;
+
+	return components;
+}
+
+vec2[10] sample_component_gather2(mediump texture2D tex_even, mediump texture2D tex_odd)
+{
+	vec2 components[10];
+
+	// Little point in using gather here, at least for now.
+	components[0] = vec2(0.0);
+	components[1] = textureLodOffset(sampler2D(tex_odd, uSampler), vUV, 0.0, OFFSET_M2).xy;
+	components[2] = textureLodOffset(sampler2D(tex_even, uSampler), vUV, 0.0, OFFSET_M1).xy;
+	components[3] = textureLodOffset(sampler2D(tex_odd, uSampler), vUV, 0.0, OFFSET_M1).xy;
+	components[4] = textureLodOffset(sampler2D(tex_even, uSampler), vUV, 0.0, OFFSET_C).xy;
+	components[5] = textureLodOffset(sampler2D(tex_odd, uSampler), vUV, 0.0, OFFSET_C).xy;
+	components[6] = textureLodOffset(sampler2D(tex_even, uSampler), vUV, 0.0, OFFSET_P1).xy;
+	components[7] = textureLodOffset(sampler2D(tex_odd, uSampler), vUV, 0.0, OFFSET_P1).xy;
+	components[8] = textureLodOffset(sampler2D(tex_even, uSampler), vUV, 0.0, OFFSET_P2).xy;
+	components[9] = textureLodOffset(sampler2D(tex_odd, uSampler), vUV, 0.0, OFFSET_P2).xy;
+
+	return components;
+}
 
 void main()
 {
 	bool is_odd = (int(vIntCoord) & 1) != 0;
 
-#define SAMPLE_COMPONENT(comp, swiz, T) \
-	T comp##1 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_M2).swiz); \
-	T comp##2 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_M1).swiz); \
-	T comp##3 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_M1).swiz); \
-	T comp##4 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_C).swiz); \
-	T comp##5 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_C).swiz); \
-	T comp##6 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_P1).swiz); \
-	T comp##7 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_P1).swiz); \
-	T comp##8 = T(textureLodOffset(sampler2D(u##comp##Even, uSampler), vUV, 0.0, OFFSET_P2).swiz); \
-	T comp##9 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_P2).swiz)
-
-	SAMPLE_COMPONENT(Y, x, float);
+	float Y[10] = sample_component_gather(uYEven, uYOdd);
 #if INPUT_PLANES == 2
-	SAMPLE_COMPONENT(CbCr, xy, vec2);
+	vec2 CbCr[10] = sample_component_gather2(uCbCrEven, uCbCrOdd);
 #elif INPUT_PLANES == 3
-	SAMPLE_COMPONENT(Cb, x, float);
-	SAMPLE_COMPONENT(Cr, x, float);
-	vec2 CbCr1 = vec2(Cb1, Cr1);
-	vec2 CbCr2 = vec2(Cb2, Cr2);
-	vec2 CbCr3 = vec2(Cb3, Cr3);
-	vec2 CbCr4 = vec2(Cb4, Cr4);
-	vec2 CbCr5 = vec2(Cb5, Cr5);
-	vec2 CbCr6 = vec2(Cb6, Cr6);
-	vec2 CbCr7 = vec2(Cb7, Cr7);
-	vec2 CbCr8 = vec2(Cb8, Cr8);
-	vec2 CbCr9 = vec2(Cb9, Cr9);
+	float Cb[10] = sample_component_gather(uCbEven, uCbOdd);
+	float Cr[10] = sample_component_gather(uCrEven, uCrOdd);
+	vec2 CbCr[10];
+	[[unroll]]
+	for (int i = 0; i < 10; i++)
+		CbCr[i] = vec2(Cb[i], Cr[i]);
 #endif
 
 	if (EDGE_CONDITION < 0)
@@ -111,9 +152,9 @@ void main()
 		if (vIntCoord < 1.0)
 		{
 			// Y4 is the pivot.
-			Y2 = Y6;
+			Y[2] = Y[6];
 #if INPUT_SAMPLES > 1
-			CbCr2 = CbCr6;
+			CbCr[2] = CbCr[6];
 #endif
 		}
 	}
@@ -123,29 +164,29 @@ void main()
 		{
 			// We're on the last two pixels.
 			// Y5 is the pivot. LP inputs behave as expected when using mirroring.
-			Y7 = Y3;
-			Y9 = Y1;
+			Y[7] = Y[3];
+			Y[9] = Y[1];
 #if INPUT_SAMPLES > 1
-			CbCr7 = CbCr3;
-			CbCr9 = CbCr1;
+			CbCr[7] = CbCr[3];
+			CbCr[9] = CbCr[1];
 #endif
 		}
 		else if (vIntCoord + 4.0 >= aligned_transform_size)
 		{
 			// Y7 is the pivot.
-			Y9 = Y5;
+			Y[9] = Y[5];
 #if INPUT_SAMPLES > 1
-			CbCr9 = CbCr5;
+			CbCr[9] = CbCr[5];
 #endif
 		}
 	}
 
 #if INPUT_PLANES > 1
 #define AccumT vec3
-#define GenInput(comp) vec3(Y##comp, CbCr##comp)
+#define GenInput(comp) vec3(Y[comp], CbCr[comp])
 #else
 #define AccumT float
-#define GenInput(comp) Y##comp
+#define GenInput(comp) Y[comp]
 #endif
 
 	AccumT C0, C1, C2, C3, C4;
