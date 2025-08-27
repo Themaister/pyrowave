@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 layout(location = 0) in vec2 vUV;
+layout(location = 0, component = 2) in float vIntCoord;
 
 #if CHROMA_CONFIG == 0
 #define OUTPUT_PLANES 1
@@ -67,18 +68,13 @@ const float SYNTHESIS_HP_4 = 0.026748757411;
 layout(push_constant) uniform Registers
 {
 	vec2 uv_offset;
+	float res_scale;
 	int aligned_transform_size;
 };
 
 void main()
 {
-	int integer_coord;
-	if (VERTICAL)
-		integer_coord = int(gl_FragCoord.y);
-	else
-		integer_coord = int(gl_FragCoord.x);
-
-	bool is_odd = (integer_coord & 1) != 0;
+	bool is_odd = (int(vIntCoord) & 1) != 0;
 
 #define SAMPLE_COMPONENT(comp, swiz, T) \
 	T comp##1 = T(textureLodOffset(sampler2D(u##comp##Odd, uSampler), vUV, 0.0, OFFSET_M2).swiz); \
@@ -112,7 +108,7 @@ void main()
 	{
 		// The mirroring rules are particular.
 		// For odd inputs we can rely on the mirrored sampling to get intended behavior.
-		if (integer_coord == 0)
+		if (vIntCoord < 1.0)
 		{
 			// Y4 is the pivot.
 			Y2 = Y6;
@@ -123,7 +119,7 @@ void main()
 	}
 	else if (EDGE_CONDITION > 0)
 	{
-		if (integer_coord + 2 >= aligned_transform_size)
+		if (vIntCoord + 2.0 > aligned_transform_size)
 		{
 			// We're on the last two pixels.
 			// Y5 is the pivot. LP inputs behave as expected when using mirroring.
@@ -134,7 +130,7 @@ void main()
 			CbCr9 = CbCr1;
 #endif
 		}
-		else if (integer_coord + 4 >= aligned_transform_size)
+		else if (vIntCoord + 4.0 >= aligned_transform_size)
 		{
 			// Y7 is the pivot.
 			Y9 = Y5;
