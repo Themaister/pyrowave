@@ -64,7 +64,7 @@
 			"compute": true,
 			"path": "wavelet_dequant.comp",
 			"variants": [
-				{ "define": "STORAGE_8BIT", "count": 2, "resolve": true }
+				{ "define": "STORAGE_MODE", "count" : 3 }
 			]
 		}
 	]

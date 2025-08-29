@@ -26,6 +26,11 @@ struct Decoder::Impl final : public WaveletBuffers
 	BufferHandle dequant_offset_buffer, payload_data;
 	BufferViewHandle payload_u32_view, payload_u16_view, payload_u8_view;
 
+	// Turbo-hacky path.
+	DeviceAllocationOwnerHandle linear_memory;
+	ImageHandle payload_r8_image, payload_r16_image, payload_r32_image;
+	bool need_image_transition = true;
+
 	std::vector<uint32_t> dequant_offset_buffer_cpu;
 	std::vector<uint32_t> payload_data_cpu;
 	int decoded_blocks = 0;
@@ -46,6 +51,8 @@ struct Decoder::Impl final : public WaveletBuffers
 	void clear();
 
 	void upload_payload(CommandBuffer &cmd);
+
+	void check_linear_texture_support();
 };
 
 Decoder::Decoder()
@@ -89,6 +96,27 @@ void Decoder::Impl::upload_payload(CommandBuffer &cmd)
 			view_info.format = VK_FORMAT_R32_UINT;
 			payload_u32_view = device->create_buffer_view(view_info);
 		}
+
+		// This shouldn't happen to demote to texel buffers if we need to deal with massive gigantic payloads.
+		payload_r8_image.reset();
+		payload_r16_image.reset();
+		payload_r32_image.reset();
+	}
+
+	if (need_image_transition)
+	{
+		cmd.begin_barrier_batch();
+		const Image *imgs[] = { payload_r8_image.get(), payload_r16_image.get(), payload_r32_image.get() };
+		for (auto *img : imgs)
+		{
+			if (img)
+			{
+				cmd.image_barrier(*img, VK_IMAGE_LAYOUT_PREINITIALIZED, VK_IMAGE_LAYOUT_GENERAL,
+				                  0, 0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+			}
+		}
+		cmd.end_barrier_batch();
+		need_image_transition = false;
 	}
 
 	if (!payload_data_cpu.empty())
@@ -275,7 +303,13 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 		return false;
 	}
 
-	cmd.set_program(shaders.wavelet_dequant);
+	if (payload_r8_image && payload_r16_image && payload_r32_image)
+		cmd.set_program(shaders.wavelet_dequant[2]);
+	else if (use_readonly_texel_buffer)
+		cmd.set_program(shaders.wavelet_dequant[1]);
+	else
+		cmd.set_program(shaders.wavelet_dequant[0]);
+
 	cmd.begin_region("DWT dequant");
 	auto start_dequant = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -317,7 +351,13 @@ bool Decoder::Impl::dequant(CommandBuffer &cmd)
 				cmd.set_storage_texture(0, 0, *component_layer_views[component][level]);
 				cmd.set_storage_buffer(0, 1, *dequant_offset_buffer);
 
-				if (use_readonly_texel_buffer)
+				if (payload_r8_image && payload_r16_image && payload_r32_image)
+				{
+					cmd.set_texture(0, 2, payload_r32_image->get_view());
+					cmd.set_texture(0, 3, payload_r16_image->get_view());
+					cmd.set_texture(0, 4, payload_r8_image->get_view());
+				}
+				else if (use_readonly_texel_buffer)
 				{
 					cmd.set_buffer_view(0, 2, *payload_u32_view);
 					cmd.set_buffer_view(0, 3, *payload_u16_view);
@@ -819,6 +859,66 @@ bool Decoder::device_prefers_fragment_path(Vulkan::Device &device)
 	}
 }
 
+void Decoder::Impl::check_linear_texture_support()
+{
+	if (!use_readonly_texel_buffer)
+		return;
+
+	// Texel buffers hit LS path on at least Mali, and most likely they hit slow paths on most mobile IHVs.
+	// Try to promote to linear 2D images instead if we can get away with it.
+	// Texture sampling performance is what mobile IHVs tend to optimize for.
+	const struct
+	{
+		VkFormat fmt;
+		uint32_t width;
+		ImageHandle *out_handle;
+	} reqs[] = {
+		{ VK_FORMAT_R8_UINT, 4096, &payload_r8_image },
+		{ VK_FORMAT_R16_UINT, 2048, &payload_r16_image },
+		{ VK_FORMAT_R32_UINT, 1024, &payload_r32_image }
+	};
+
+	// Just assume this works. Can't imagine any GPU where this wouldn't work tightly packed.
+
+	BufferCreateInfo bufinfo;
+	bufinfo.size = 4 * 1024 * 1024;
+	bufinfo.usage =
+			VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+			VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+	bufinfo.domain = BufferDomain::Device;
+	payload_data = device->create_buffer(bufinfo);
+	device->set_name(*payload_data, "payload-data");
+
+	const auto *alias = &payload_data->get_allocation();
+
+	// Try to force all linear images to alias each other.
+	for (auto &req : reqs)
+	{
+		VkImageFormatProperties2 props2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+		if (device->get_image_format_properties(req.fmt, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_LINEAR,
+		                                        VK_IMAGE_USAGE_SAMPLED_BIT, 0,
+		                                        nullptr, &props2))
+		{
+			if (props2.imageFormatProperties.maxExtent.width >= req.width &&
+			    props2.imageFormatProperties.maxExtent.height >= 1024)
+			{
+				auto info = ImageCreateInfo::immutable_2d_image(req.width, 1024, req.fmt);
+				info.domain = ImageDomain::LinearHost;
+				info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+				info.num_memory_aliases = 1;
+				info.memory_aliases = &alias;
+				*req.out_handle = device->create_image(info);
+				if (*req.out_handle)
+					(*req.out_handle)->set_layout(Layout::General);
+			}
+		}
+	}
+
+	if (payload_r8_image && payload_r16_image && payload_r32_image)
+		LOGI("Using linear textures instead of texel buffers.\n");
+}
+
 bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma_, bool fragment_path_)
 {
 	auto ops = device->get_device_features().vk11_props.subgroupSupportedOperations;
@@ -856,6 +956,8 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 		LOGE("Device doesn't support 8-bit storage or large texel buffers.\n");
 		return false;
 	}
+
+	impl->check_linear_texture_support();
 
 	clear();
 	return true;

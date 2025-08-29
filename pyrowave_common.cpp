@@ -280,8 +280,6 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsam
 	shaders = Shaders<>(*device, layout, [this](const char *, const char *env) {
 		if (strcmp(env, "FP16") == 0)
 			return device->get_device_features().vk12_features.shaderFloat16 ? 1 : 0;
-		if (strcmp(env, "STORAGE_8BIT") == 0)
-			return use_readonly_texel_buffer ? 0 : 1;
 		return 0;
 	});
 
