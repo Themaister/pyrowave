@@ -75,19 +75,25 @@ uint read_payload_u32(int coord)
 	return texelFetch(PayloadU32, coord).x;
 }
 #elif STORAGE_MODE == 2
-uint read_payload_u8(int coord)
+uint read_payload_u8(uint coord)
 {
-	return texelFetch(PayloadU8, ivec2(coord & 0xfff, coord >> 12), 0).x;
+	uint x = bitfieldExtract(coord, 0, 12);
+	uint y = bitfieldExtract(coord, 12, 20);
+	return texelFetch(PayloadU8, ivec2(x, y), 0).x;
 }
 
-uint read_payload_u16(int coord)
+uint read_payload_u16(uint coord)
 {
-	return texelFetch(PayloadU16, ivec2(coord & 0x7ff, coord >> 11), 0).x;
+	uint x = bitfieldExtract(coord, 0, 11);
+	uint y = bitfieldExtract(coord, 11, 21);
+	return texelFetch(PayloadU16, ivec2(x, y), 0).x;
 }
 
-uint read_payload_u32(int coord)
+uint read_payload_u32(uint coord)
 {
-	return texelFetch(PayloadU32, ivec2(coord & 0x3ff, coord >> 10), 0).x;
+	uint x = bitfieldExtract(coord, 0, 10);
+	uint y = bitfieldExtract(coord, 10, 22);
+	return texelFetch(PayloadU32, ivec2(x, y), 0).x;
 }
 #endif
 
