@@ -268,7 +268,8 @@ bool WaveletBuffers::init(Device *device_, int width_, int height_, ChromaSubsam
 	{
 		auto vendor_id = device->get_gpu_properties().vendorID;
 		if (!device->get_device_features().vk12_features.storageBuffer8BitAccess ||
-		    (vendor_id != VENDOR_ID_AMD && vendor_id != VENDOR_ID_INTEL && vendor_id != VENDOR_ID_NVIDIA))
+		    (vendor_id != VENDOR_ID_AMD && vendor_id != VENDOR_ID_INTEL && vendor_id != VENDOR_ID_NVIDIA &&
+		     device->get_device_features().driver_id != VK_DRIVER_ID_SAMSUNG_PROPRIETARY))
 		{
 			use_readonly_texel_buffer = true;
 		}
