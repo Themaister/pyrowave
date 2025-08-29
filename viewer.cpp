@@ -24,13 +24,23 @@ struct YCbCrImages
 	PyroWave::ViewBuffers views;
 };
 
+static bool device_should_use_fragment_path(Device &device)
+{
+	return PyroWave::Decoder::device_prefers_fragment_path(device);
+}
+
 static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt, PyroWave::ChromaSubsampling chroma)
 {
 	YCbCrImages images;
 	auto info = ImageCreateInfo::immutable_2d_image(width, height, fmt);
 	info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-	             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	             VK_IMAGE_USAGE_SAMPLED_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	if (device_should_use_fragment_path(device))
+		info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	else
+		info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
 
 	images.images[0] = device.create_image(info);
 	device.set_name(*images.images[0], "Y");
@@ -142,7 +152,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			              PyroWave::ChromaSubsampling::Chroma444;
 
 			out_images = create_ycbcr_images(e.get_device(), rawparam.width, rawparam.height, format, chroma);
-			dec.init(&e.get_device(), rawparam.width, rawparam.height, chroma);
+			dec.init(&e.get_device(), rawparam.width, rawparam.height, chroma, device_should_use_fragment_path(e.get_device()));
 		}
 		else
 		{
@@ -153,7 +163,7 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 			in_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
 			out_images = create_ycbcr_images(e.get_device(), file.get_width(), file.get_height(), format, chroma);
 			enc.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
-			dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma);
+			dec.init(&e.get_device(), file.get_width(), file.get_height(), chroma, device_should_use_fragment_path(e.get_device()));
 		}
 	}
 
@@ -240,10 +250,20 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 				for (int i = 0; i < 3; i++)
 				{
-					cmd->image_barrier(*in_images.images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-					                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+					if (device_should_use_fragment_path(device))
+					{
+						cmd->image_barrier(*in_images.images[i],
+										   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+						                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+					}
+					else
+					{
+						cmd->image_barrier(*in_images.images[i],
+						                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+						                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+						                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+					}
 				}
 			}
 		}
@@ -323,18 +343,40 @@ struct ViewerApplication : Granite::Application, Granite::EventHandler
 
 		for (int i = 0; i < 3; i++)
 		{
-			cmd->image_barrier(*out_images.images[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-			                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+			if (device_should_use_fragment_path(device))
+			{
+				cmd->image_barrier(*out_images.images[i],
+				                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+				                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+				                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+			}
+			else
+			{
+				cmd->image_barrier(*out_images.images[i],
+				                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+				                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+				                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+			}
 		}
 
 		dec.decode(*cmd, out_images.views);
 
 		for (int i = 0; i < 3; i++)
 		{
-			cmd->image_barrier(*out_images.images[i], VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+			if (device_should_use_fragment_path(device))
+			{
+				cmd->image_barrier(*out_images.images[i],
+				                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+				                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+			}
+			else
+			{
+				cmd->image_barrier(*out_images.images[i],
+				                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+				                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+			}
 		}
 
 		cmd->begin_render_pass(device.get_swapchain_render_pass(SwapchainRenderPass::ColorOnly));

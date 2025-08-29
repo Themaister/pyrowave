@@ -24,6 +24,17 @@
 			]
 		},
 		{
+			"name": "idwt_vs",
+			"path": "idwt.vert"
+		},
+		{
+			"name": "idwt_fs",
+			"path": "idwt.frag",
+			"variants": [
+				{ "define": "CHROMA_CONFIG", "count": 3 }
+			]
+		},
+		{
 			"name": "power_to_db",
 			"compute": true,
 			"path": "power_to_db.comp"
@@ -53,7 +64,7 @@
 			"compute": true,
 			"path": "wavelet_dequant.comp",
 			"variants": [
-				{ "define": "STORAGE_8BIT", "count": 2, "resolve": true }
+				{ "define": "STORAGE_MODE", "count" : 3 }
 			]
 		}
 	]

@@ -156,7 +156,7 @@ private:
 
 struct WaveletBuffers
 {
-	bool init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma);
+	bool init(Vulkan::Device *device, int width, int height, ChromaSubsampling chroma, bool fragment_path);
 
 	Vulkan::Device *device = nullptr;
 	Vulkan::ImageHandle wavelet_img_low_res;
@@ -165,6 +165,17 @@ struct WaveletBuffers
 	Vulkan::SamplerHandle border_sampler;
 	Vulkan::ImageViewHandle component_layer_views[NumComponents][DecompositionLevels];
 	Vulkan::ImageViewHandle component_ll_views[NumComponents][DecompositionLevels];
+
+	// For fragment based iDWT.
+	struct
+	{
+		struct
+		{
+			Vulkan::ImageHandle vert[2][2];
+			Vulkan::ImageHandle horiz[NumComponents];
+			Vulkan::ImageViewHandle decoded[NumComponents][NumFrequencyBandsPerLevel];
+		} levels[DecompositionLevels];
+	} fragment;
 
 	struct BlockInfo
 	{
@@ -193,10 +204,12 @@ struct WaveletBuffers
 	int aligned_height = 0;
 
 	bool use_readonly_texel_buffer = false;
+	bool fragment_path = false;
 
 protected:
 	void init_samplers();
 	void allocate_images();
+	void allocate_images_fragment();
 	virtual void init_block_meta();
 	ChromaSubsampling chroma = {};
 

@@ -1195,7 +1195,6 @@ bool Encoder::init(Device *device, int width_, int height_, ChromaSubsampling ch
 			VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
 			VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
 			VK_SUBGROUP_FEATURE_VOTE_BIT |
-			VK_SUBGROUP_FEATURE_QUAD_BIT |
 			VK_SUBGROUP_FEATURE_BALLOT_BIT |
 			VK_SUBGROUP_FEATURE_CLUSTERED_BIT |
 			VK_SUBGROUP_FEATURE_BASIC_BIT;
@@ -1218,7 +1217,7 @@ bool Encoder::init(Device *device, int width_, int height_, ChromaSubsampling ch
 	    !device->supports_subgroup_size_log2(true, 6, 6))
 		return false;
 
-	return impl->init(device, width_, height_, chroma_);
+	return impl->init(device, width_, height_, chroma_, false);
 }
 
 bool Encoder::encode(CommandBuffer &cmd, const ViewBuffers &views, const BitstreamBuffers &buffers)
