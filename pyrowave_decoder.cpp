@@ -887,6 +887,9 @@ void Decoder::Impl::check_linear_texture_support()
 			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
 			VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
 	bufinfo.domain = BufferDomain::Device;
+	bufinfo.allocation_requirements.alignment = 64 * 1024;
+	bufinfo.allocation_requirements.size = 4 * 1024 * 1024;
+	bufinfo.allocation_requirements.memoryTypeBits = UINT32_MAX;
 	payload_data = device->create_buffer(bufinfo);
 	device->set_name(*payload_data, "payload-data");
 
