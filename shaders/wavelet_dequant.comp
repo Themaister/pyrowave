@@ -251,8 +251,8 @@ void main()
     uint ballot = payload_data_u32.data[offset_u32] & 0xffff;
     uint q_code = payload_data_u32.data[offset_u32 + 1] & 0xff;
 #else
-    uint ballot = read_payload_u32(int(offset_u32)) & 0xffff;
-    uint q_code = read_payload_u32(int(offset_u32) + 1) & 0xff;
+    uint ballot = read_payload_u16(2 * int(offset_u32));
+    uint q_code = read_payload_u8(4 * int(offset_u32) + 4);
 #endif
 
     if (local_index < 16)
@@ -328,8 +328,18 @@ void main()
     if (gl_NumSubgroups <= 8)
     {
         barrier();
-        if (local_index < gl_NumSubgroups)
-            shared_sign_scan[local_index] = scan_subgroups(shared_sign_scan[local_index]);
+		if (gl_SubgroupSize <= 32)
+		{
+			// Should be more robust since not all compilers properly understand the shuffle up pattern.
+			// AMD is known to understand it well.
+			if (local_index < gl_NumSubgroups)
+				shared_sign_scan[local_index] = subgroupInclusiveAdd(shared_sign_scan[local_index]);
+		}
+		else
+		{
+			if (local_index < gl_NumSubgroups)
+				shared_sign_scan[local_index] = scan_subgroups(shared_sign_scan[local_index]);
+		}
         barrier();
     }
     else

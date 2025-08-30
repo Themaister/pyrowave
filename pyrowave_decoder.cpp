@@ -960,10 +960,7 @@ bool Decoder::init(Vulkan::Device *device, int width, int height, ChromaSubsampl
 		return false;
 	}
 
-	// Optional hack path. Broken on Mali, and probably not worthwhile to pursue.
-#if 0
 	impl->check_linear_texture_support();
-#endif
 
 	clear();
 	return true;
