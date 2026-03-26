@@ -139,10 +139,10 @@ void WaveletBuffers::allocate_images()
 	             VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 	info.layers = NumFrequencyBandsPerLevel * NumComponents;
+	info.layout = ImageLayout::General;
 	info.levels = Configuration::get().get_precision() != 1 ? DecompositionLevels : WaveletFP16Levels;
 
 	wavelet_img_high_res = device->create_image(info);
-	wavelet_img_high_res->set_layout(Layout::General);
 	device->set_name(*wavelet_img_high_res, "wavelet-buffer-high-res");
 
 	if (Configuration::get().get_precision() == 1)
@@ -153,7 +153,6 @@ void WaveletBuffers::allocate_images()
 		info.width >>= WaveletFP16Levels;
 		info.height >>= WaveletFP16Levels;
 		wavelet_img_low_res = device->create_image(info);
-		wavelet_img_low_res->set_layout(Layout::General);
 		device->set_name(*wavelet_img_low_res, "wavelet-buffer-low-res");
 	}
 

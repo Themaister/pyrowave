@@ -910,10 +910,9 @@ void Decoder::Impl::check_linear_texture_support()
 				info.domain = ImageDomain::LinearHost;
 				info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
 				info.num_memory_aliases = 1;
+				info.layout = ImageLayout::General;
 				info.memory_aliases = &alias;
 				*req.out_handle = device->create_image(info);
-				if (*req.out_handle)
-					(*req.out_handle)->set_layout(Layout::General);
 			}
 		}
 	}
