@@ -125,3 +125,10 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/pkg-config/pyrowave-shared.pc.in
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
+
+if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
+	target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)
+	target_link_options(pyrowave-shared PRIVATE -Wl,--exclude-all-symbols)
+    target_link_libraries(pyrowave-c-test PRIVATE -static gcc stdc++ winpthread)
+endif()
+

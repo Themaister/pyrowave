@@ -17,7 +17,7 @@ extern "C" {
 #include <stdbool.h>
 #endif
 
-#define PYROWAVE_API_VERSION 1
+#define PYROWAVE_API_VERSION 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
 #if defined(PYROWAVE_EXPORT_SYMBOLS)
