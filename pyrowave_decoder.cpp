@@ -833,6 +833,7 @@ void Decoder::Impl::clear()
 {
 	std::fill(dequant_offset_buffer_cpu.begin(), dequant_offset_buffer_cpu.end(), UINT32_MAX);
 	decoded_blocks = 0;
+	last_seq = UINT32_MAX;
 	decoded_frame_for_current_sequence = false;
 	total_blocks_in_sequence = block_count_32x32;
 	payload_data_cpu.clear();
