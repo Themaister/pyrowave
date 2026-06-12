@@ -787,6 +787,9 @@ bool Decoder::Impl::decode_is_ready(bool allow_partial_frame) const
 	if (decoded_frame_for_current_sequence)
 		return false;
 
+	if (last_seq == UINT32_MAX)
+		return false;
+
 	// Need at least half of the frame decoded to accept, otherwise we assume the frame is complete garbage.
 	if (decoded_blocks < total_blocks_in_sequence)
 		if (!allow_partial_frame || decoded_blocks <= total_blocks_in_sequence / 2)
