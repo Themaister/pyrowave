@@ -28,6 +28,7 @@ add_library(pyrowave STATIC
 
 target_include_directories(pyrowave PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(pyrowave PRIVATE ${PYROWAVE_CXX_FLAGS})
+set_target_properties(pyrowave PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 option(PYROWAVE_STANDALONE "Build PyroWave as a standalone sandbox." ON)
 
@@ -55,6 +56,8 @@ if (PYROWAVE_STANDALONE)
     set(GRANITE_VULKAN_FOSSILIZE OFF CACHE BOOL "" FORCE)
     set(GRANITE_SHIPPING OFF CACHE BOOL "" FORCE)
     set(GRANITE_PLATFORM "SDL" CACHE STRING "" FORCE)
+    set(GRANITE_HIDDEN ON CACHE BOOL "" FORCE)
+    set(GRANITE_POSITION_INDEPENDENT ON CACHE BOOL "" FORCE)
     add_subdirectory(Granite EXCLUDE_FROM_ALL)
 
     add_granite_offline_tool(pyrowave-sandbox sandbox.cpp)
@@ -82,6 +85,34 @@ if (PYROWAVE_STANDALONE)
     if (NOT ANDROID)
         target_compile_definitions(pyrowave-viewer PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
     endif()
+
+    add_library(pyrowave-shared SHARED pyrowave_c.cpp pyrowave.h)
+    target_link_libraries(pyrowave-shared PRIVATE pyrowave granite-vulkan)
+    target_compile_definitions(pyrowave-shared PRIVATE PYROWAVE_EXPORT_SYMBOLS)
+    target_compile_options(pyrowave-shared PRIVATE ${PYROWAVE_CXX_FLAGS})
+
+    add_executable(pyrowave-c-test pyrowave_c_test.cpp)
+    target_link_libraries(pyrowave-c-test PRIVATE pyrowave-shared)
+    target_compile_options(pyrowave-c-test PRIVATE ${PYROWAVE_CXX_FLAGS})
+
+    set(PYROWAVE_API_VERSION_MAJOR 0)
+    set(PYROWAVE_API_VERSION_MINOR 0)
+    set(PYROWAVE_API_VERSION_PATCH 0)
+    set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
+    set_target_properties(pyrowave-shared PROPERTIES VERSION ${PYROWAVE_API_VERSION} SOVERSION ${PYROWAVE_API_VERSION})
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/pyrowave.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
+    install(TARGETS pyrowave-shared EXPORT pyrowave-sharedConfig
+            RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
+    install(EXPORT pyrowave-sharedConfig DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/pyrowave-shared/cmake)
+
+    set(PYROWAVE_INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
+    set(PYROWAVE_INSTALL_INC_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/pkg-config/pyrowave-shared.pc.in
+            ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
 endif()
 
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
