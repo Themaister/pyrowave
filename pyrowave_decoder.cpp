@@ -133,7 +133,6 @@ bool Decoder::Impl::decode_packet(const BitstreamHeader *header)
 	}
 	else
 	{
-		LOGW("block_index %u is already decoded, skipping.\n", header->block_index);
 		return true;
 	}
 
@@ -178,8 +177,6 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 			uint8_t diff = (header->sequence - last_seq) & SequenceCountMask;
 			if (last_seq != UINT32_MAX && diff > (SequenceCountMask / 2))
 			{
-				// All sequences in a packet must be the same.
-				LOGW("Backwards sequence detected, discarding.\n");
 				return true;
 			}
 
@@ -231,8 +228,6 @@ bool Decoder::Impl::push_packet(const void *data_, size_t size)
 			uint8_t diff = (header->sequence - last_seq) & SequenceCountMask;
 			if (diff > (SequenceCountMask / 2))
 			{
-				// All sequences in a packet must be the same.
-				LOGW("Backwards sequence detected, discarding.\n");
 				return true;
 			}
 			restart = diff != 0;
