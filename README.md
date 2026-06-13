@@ -61,7 +61,28 @@ A small portion of Granite needs to be checked out.
 bash checkout_granite.sh
 ```
 
-Build normally with CMake and a C API is installed. The build is tested on Linux, MinGW, msys2 and MSVC.
+Build normally with CMake and a C API is installed.
+
+```
+$ mkdir build
+$ cd build
+$ cmake .. -DCMAKE_INSTALL_PREFIX=output -DCMAKE_BUILD_TYPE=Release -G Ninja
+$ ninja install
+
+[0/1] Install the project...
+-- Install configuration: "Release"
+-- Installing: ...../build/output/include/pyrowave/pyrowave.h
+-- Installing: ...../build/output/lib/libpyrowave-shared.so.0.0.0
+-- Installing: ...../build/output/lib/libpyrowave-shared.so.0
+-- Installing: ...../build/output/lib/libpyrowave-shared.so
+-- Installing: ...../build/output/share/pyrowave-shared/cmake/pyrowave-sharedConfig.cmake
+-- Installing: ...../build/output/share/pyrowave-shared/cmake/pyrowave-sharedConfig-release.cmake
+-- Installing: ...../build/output/share/pkgconfig/pyrowave-shared.pc
+```
+
+The build is tested on Linux, MinGW, msys2 and MSVC.
+See `pyrowave-c-test` which unit tests the shared C API.
+That test also serves as a basic user guide for the API.
 
 `build-steamrt.sh` builds against the Sniper SDK and is also supported.
 
