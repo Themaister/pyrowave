@@ -208,10 +208,6 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	if (encoder->chroma == ChromaSubsampling::Chroma444 && buffers->format != PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	bool rdoc_capture = Device::init_renderdoc_capture();
-	if (rdoc_capture)
-		device->begin_renderdoc_capture();
-
 	for (int plane = 0; plane < num_planes; plane++)
 	{
 		int plane_width = encoder->width;
@@ -272,8 +268,6 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	}
 
 	auto ret = pyrowave_encoder_encode_gpu_synchronous(encoder, &gpu_buffers, rate_control);
-	if (rdoc_capture)
-		device->end_renderdoc_capture();
 	return ret;
 }
 
@@ -416,10 +410,6 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	if (decoder->chroma == ChromaSubsampling::Chroma444 && buffers->format != PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	bool rdoc_capture = Device::init_renderdoc_capture();
-	if (rdoc_capture)
-		device->begin_renderdoc_capture();
-
 	for (int plane = 0; plane < 3; plane++)
 	{
 		int plane_width = decoder->width;
@@ -549,9 +539,6 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 		void *mapped = device->map_host_buffer(*readback_buffers[plane], MEMORY_ACCESS_READ_BIT);
 		memcpy(buffers->data[plane], mapped, buffers->plane_size_in_bytes[plane]);
 	}
-
-	if (rdoc_capture)
-		device->end_renderdoc_capture();
 
 	return PYROWAVE_SUCCESS;
 }
