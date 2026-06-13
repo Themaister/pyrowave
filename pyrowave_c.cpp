@@ -8,10 +8,21 @@
 #include "pyrowave.h"
 #include "pyrowave_decoder.hpp"
 #include "pyrowave_encoder.hpp"
+#include "logging.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
 using namespace PyroWave;
+
+struct NullLogger : Util::LoggingInterface
+{
+	bool log(const char *, const char *, va_list) override
+	{
+		return true;
+	}
+};
+
+static NullLogger null_logger;
 
 extern "C" {
 void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch)
@@ -29,6 +40,9 @@ struct pyrowave_device_opaque
 
 pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 {
+	// TODO: Find a better way to do this.
+	Util::set_thread_logging_interface(&null_logger);
+
 	if (!Context::init_loader(nullptr))
 		return PYROWAVE_ERROR_NO_VULKAN;
 
@@ -43,8 +57,25 @@ pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 	return PYROWAVE_SUCCESS;
 }
 
+void pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset)
+{
+	Util::set_thread_logging_interface(&null_logger);
+
+	device->device.timestamp_log([=](const std::string &tag, const TimestampIntervalReport &report)
+	{
+		char msg[256];
+		snprintf(msg, sizeof(msg), "%s: %.3f ms per frame\n", tag.c_str(), report.time_per_frame_context * 1e3);
+		cb(userdata, msg);
+	});
+
+	if (reset)
+		device->device.timestamp_log_reset();
+}
+
 void pyrowave_device_destroy(pyrowave_device device)
 {
+	Util::set_thread_logging_interface(&null_logger);
+
 	delete device;
 }
 
@@ -63,6 +94,8 @@ struct pyrowave_encoder_opaque
 pyrowave_result
 pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encoder *encoder)
 {
+	Util::set_thread_logging_interface(&null_logger);
+
 	if (!info->device)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
@@ -83,6 +116,7 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 		delete enc;
 		return PYROWAVE_ERROR_GENERIC;
 	}
+
 	*encoder = enc;
 	return PYROWAVE_SUCCESS;
 }
@@ -106,8 +140,11 @@ bool WrappedViewBuffers::wrap(Device *device, const pyrowave_gpu_buffers *buffer
 		image_info.width = buffers->planes[i].width;
 		image_info.height = buffers->planes[i].height;
 		image_info.format = buffers->planes[i].image_format;
+
+		// The exact numbers aren't important.
 		image_info.layers = buffers->planes[i].layer + 1;
 		image_info.levels = buffers->planes[i].mip_level + 1;
+
 		image_info.layout =
 			buffers->planes[i].layout == VK_IMAGE_LAYOUT_GENERAL ? ImageLayout::General : ImageLayout::Optimal;
 		wrapped_images[i] = device->wrap_image(image_info, buffers->planes[i].image);
@@ -141,6 +178,7 @@ pyrowave_result
 pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave_gpu_buffers *buffers,
 										const pyrowave_rate_control *rate_control)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	auto *device = encoder->device;
 
 	device->next_frame_context();
@@ -175,15 +213,22 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	bitstream_buffers.bitstream.size = queued_bitstream_gpu->get_create_info().size;
 	bitstream_buffers.target_size = target_bitstream_size;
 
-	auto cmd = device->request_command_buffer(CommandBuffer::Type::AsyncCompute);
+	auto cmd = device->request_command_buffer();
+
 	auto ret = encoder->encoder.encode(*cmd, views, bitstream_buffers);
 	if (!ret)
 	{
 		device->submit_discard(cmd);
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	}
+
+	// NVIDIA really doesn't like it if we write bitstream to cached host.
+	// Performance issue since these memory types are mapped coherent on the GPU.
+	// A staging copy is just better. Could avoid it on iGPU, but iGPU isn't really supposed to be
+	// used as the encoder when streaming.
 	cmd->copy_buffer(*encoder->queued_meta, *queued_meta_gpu);
 	cmd->copy_buffer(*encoder->queued_bitstream, *queued_bitstream_gpu);
+
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
 
@@ -196,10 +241,12 @@ pyrowave_result
 pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
 										const pyrowave_rate_control *rate_control)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	int num_planes = buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_NV12 ? 2 : 3;
 	auto *device = encoder->device;
 	ImageHandle images[3];
 
+	// Validate some assumptions.
 	if (buffers->width != encoder->width || buffers->height != encoder->height)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
@@ -274,6 +321,7 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 pyrowave_result
 pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary, size_t *num_packets)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	if (!encoder->queued_fence)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	encoder->queued_fence->wait();
@@ -287,6 +335,7 @@ pyrowave_result
 pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, size_t packet_boundary,
                            size_t *out_packets, void *bitstream, size_t size)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	if (!encoder->queued_fence)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	encoder->queued_fence->wait();
@@ -303,6 +352,7 @@ pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, s
 
 void pyrowave_encoder_destroy(pyrowave_encoder encoder)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	delete encoder;
 }
 
@@ -319,12 +369,14 @@ struct pyrowave_decoder_opaque
 
 bool pyrowave_decoder_device_prefers_fragment_path(pyrowave_device device)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	return Decoder::device_prefers_fragment_path(device->device);
 }
 
 pyrowave_result
 pyrowave_decoder_create(const pyrowave_decoder_create_info *info, pyrowave_decoder *decoder)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	if (!info->device)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
@@ -353,6 +405,7 @@ pyrowave_decoder_create(const pyrowave_decoder_create_info *info, pyrowave_decod
 
 void pyrowave_decoder_clear(pyrowave_decoder decoder)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	decoder->decoder.clear();
 }
 
@@ -360,6 +413,7 @@ void pyrowave_decoder_clear(pyrowave_decoder decoder)
 pyrowave_result
 pyrowave_decoder_push_packet(pyrowave_decoder decoder, const void *data, size_t size)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	bool ret = decoder->decoder.push_packet(data, size);
 	return ret ? PYROWAVE_SUCCESS : PYROWAVE_ERROR_INVALID_ARGUMENT;
 }
@@ -367,12 +421,14 @@ pyrowave_decoder_push_packet(pyrowave_decoder decoder, const void *data, size_t 
 // For error correction purposes, it may be okay to decode a frame which dropped some packets.
 bool pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_frame)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	return decoder->decoder.decode_is_ready(allow_partial_frame);
 }
 
 pyrowave_result
 pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_buffers *buffers)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
 	device->next_frame_context();
 
@@ -390,6 +446,7 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	}
 
+	// This just queues up a command buffer, flush only happens when sync objects are signaled.
 	device->submit(cmd);
 	return PYROWAVE_SUCCESS;
 }
@@ -397,6 +454,7 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_
 pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
 
 	if (buffers->width != decoder->width || buffers->height != decoder->height)
@@ -471,6 +529,8 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 				VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 		}
 		cmd->end_barrier_batch();
+
+		// This just queues up a command buffer, flush only happens when sync objects are signaled.
 		device->submit(cmd);
 	}
 
@@ -545,6 +605,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 
 void pyrowave_decoder_destroy(pyrowave_decoder decoder)
 {
+	Util::set_thread_logging_interface(&null_logger);
 	delete decoder;
 }
 }

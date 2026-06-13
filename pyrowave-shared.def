@@ -3,6 +3,7 @@ LIBRARY libpyrowave-shared-0.dll
 EXPORTS
 	pyrowave_get_api_version
 	pyrowave_create_default_device
+	pyrowave_device_report_performance_stats
 	pyrowave_device_destroy
 	pyrowave_encoder_create
 	pyrowave_encoder_encode_gpu_synchronous

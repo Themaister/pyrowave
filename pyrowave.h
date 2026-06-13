@@ -38,6 +38,8 @@ extern "C" {
 #define PYROWAVE_PUBLIC_API
 #endif
 
+typedef void (*pyrowave_message_cb)(void *userdata, const char *msg);
+
 typedef enum pyrowave_result
 {
 	PYROWAVE_SUCCESS = 0,
@@ -68,6 +70,10 @@ PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_devi
 // TODO: Add interop where device can be created from existing VkInstance/VkPhysicalDevice/VkDevice.
 // TODO: Add interop where device can be created from LUID (Windows).
 // TODO: Add interop where device can be created from some other compatibility information (general).
+
+// For performance debugging, reports GPU timestamps.
+PYROWAVE_PUBLIC_API void
+pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset);
 
 // All encoders and decoders must have been destroyed before destroying the device.
 PYROWAVE_PUBLIC_API void pyrowave_device_destroy(pyrowave_device device);
@@ -163,6 +169,7 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 // Synchronous encode API. For low-latency use cases, overlapping frames in encode is meaningless
 // due to latency and the encoder is so fast anyway. This function will not block, but subsequent functions will.
 // Calling an encode operation with synchronous API clobbers any previous encoded frame.
+// The encoded stream will contain a small sequence counter that tracks frame ordering.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave_gpu_buffers *buffers,
                                         const pyrowave_rate_control *rate_control);
@@ -170,6 +177,8 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
                                         const pyrowave_rate_control *rate_control);
+
+// TODO: Add API to let user provide a VkCommandBuffer to record into.
 
 // Can only be called after a successful encoding operation and result is only valid for that particular frame.
 // Computes the number of network packets required if each packet can consume a provided number of bytes.
@@ -210,6 +219,9 @@ pyrowave_decoder_create(const pyrowave_decoder_create_info *info, pyrowave_decod
 PYROWAVE_PUBLIC_API void pyrowave_decoder_clear(pyrowave_decoder decoder);
 
 // A frame is potentially split into multiple packets.
+// If a packet is pushed for a frame that is deemed to arrive earlier, it is dropped.
+// A packet that is pushed for a frame with a higher frame sequence will clear out the old queued frame and start a new frame.
+// Packets are pushed into the decoder until decode_is_ready says it's ready.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_push_packet(pyrowave_decoder decoder, const void *data, size_t size);
 
@@ -217,11 +229,16 @@ pyrowave_decoder_push_packet(pyrowave_decoder decoder, const void *data, size_t 
 PYROWAVE_PUBLIC_API bool
 pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_frame);
 
+// Decoding can be done at any time, leading to potentially corrupt/incomplete results if packets are missing.
+// Missing wavelet weights are assumed to be 0 which can lead to extra blurring.
+// See pyrowave_decoder_decode_is_ready() to determine if the final result is known to be complete.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_buffers *buffers);
 
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers);
+
+// TODO: Add API to let user provide a VkCommandBuffer to record into.
 
 // Implementation ensures GPU is idle before destroying objects.
 PYROWAVE_PUBLIC_API void pyrowave_decoder_destroy(pyrowave_decoder decoder);
