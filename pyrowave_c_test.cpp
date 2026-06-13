@@ -398,4 +398,5 @@ int main()
 	test_encode_cpu_buffer_validation(true);
 	test_encoder_create_validation();
 	test_decoder_create_validation();
+	printf("Passed all tests :)\n");
 }

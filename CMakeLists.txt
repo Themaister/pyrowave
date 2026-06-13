@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.27)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_C_STANDARD 99)
 project(pyrowave LANGUAGES CXX C)
@@ -109,7 +109,12 @@ set(PYROWAVE_API_VERSION_MAJOR 0)
 set(PYROWAVE_API_VERSION_MINOR 0)
 set(PYROWAVE_API_VERSION_PATCH 0)
 set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
-set_target_properties(pyrowave-shared PROPERTIES VERSION ${PYROWAVE_API_VERSION} SOVERSION ${PYROWAVE_API_VERSION})
+
+set_target_properties(pyrowave-shared
+        PROPERTIES VERSION ${PYROWAVE_API_VERSION}
+        SOVERSION ${PYROWAVE_API_VERSION_MAJOR}
+        DLL_NAME_WITH_SOVERSION ON)
+
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/pyrowave.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
 install(TARGETS pyrowave-shared EXPORT pyrowave-sharedConfig
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -127,8 +132,11 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
 
 if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
-	target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)
-	target_link_options(pyrowave-shared PRIVATE -Wl,--exclude-all-symbols)
+    target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)
     target_link_libraries(pyrowave-c-test PRIVATE -static gcc stdc++ winpthread)
+endif()
+
+if (WIN32)
+    target_sources(pyrowave-shared PRIVATE pyrowave-shared.def)
 endif()
 

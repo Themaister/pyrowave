@@ -1,0 +1,21 @@
+LIBRARY libpyrowave-shared-0.dll
+
+EXPORTS
+	pyrowave_get_api_version
+	pyrowave_create_default_device
+	pyrowave_device_destroy
+	pyrowave_encoder_create
+	pyrowave_encoder_encode_gpu_synchronous
+	pyrowave_encoder_encode_cpu_synchronous
+	pyrowave_encoder_compute_num_packets
+	pyrowave_encoder_packetize
+	pyrowave_encoder_destroy
+	pyrowave_decoder_device_prefers_fragment_path
+	pyrowave_decoder_create
+	pyrowave_decoder_clear
+	pyrowave_decoder_push_packet
+	pyrowave_decoder_decode_is_ready
+	pyrowave_decoder_decode_gpu_buffer
+	pyrowave_decoder_decode_cpu_buffer_synchronous
+	pyrowave_decoder_destroy
+

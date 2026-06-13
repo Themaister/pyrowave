@@ -14,6 +14,13 @@ using namespace Vulkan;
 using namespace PyroWave;
 
 extern "C" {
+void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch)
+{
+	*major = PYROWAVE_API_VERSION_MAJOR;
+	*minor = PYROWAVE_API_VERSION_MINOR;
+	*patch = PYROWAVE_API_VERSION_PATCH;
+}
+
 struct pyrowave_device_opaque
 {
 	Context context;

@@ -1,9 +1,8 @@
 // Copyright (c) 2026 Hans-Kristian Arntzen
 // SPDX-License-Identifier: MIT
 
-#pragma once
-
-// C99 header
+#ifndef PYROWAVE_H_
+#define PYROWAVE_H_
 
 #if !defined(VULKAN_CORE_H_)
 #error "Must include vulkan headers before including pyrowave.h"
@@ -17,7 +16,11 @@ extern "C" {
 #include <stdbool.h>
 #endif
 
-#define PYROWAVE_API_VERSION 0
+// API and ABI is not considered stable until MAJOR version hits 1!
+
+#define PYROWAVE_API_VERSION_MAJOR 0
+#define PYROWAVE_API_VERSION_MINOR 0
+#define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
 #if defined(PYROWAVE_EXPORT_SYMBOLS)
@@ -56,6 +59,8 @@ typedef enum pyrowave_chroma_subsampling
 typedef struct pyrowave_encoder_opaque *pyrowave_encoder;
 typedef struct pyrowave_decoder_opaque *pyrowave_decoder;
 typedef struct pyrowave_device_opaque *pyrowave_device;
+
+PYROWAVE_PUBLIC_API void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch);
 
 // Device API.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
@@ -224,4 +229,6 @@ PYROWAVE_PUBLIC_API void pyrowave_decoder_destroy(pyrowave_decoder decoder);
 
 #ifdef __cplusplus
 }
+#endif
+
 #endif
