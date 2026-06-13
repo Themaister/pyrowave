@@ -102,7 +102,7 @@ target_compile_definitions(pyrowave-shared PRIVATE PYROWAVE_EXPORT_SYMBOLS)
 target_compile_options(pyrowave-shared PRIVATE ${PYROWAVE_CXX_FLAGS})
 
 add_executable(pyrowave-c-test pyrowave_c_test.cpp)
-target_link_libraries(pyrowave-c-test PRIVATE pyrowave-shared)
+target_link_libraries(pyrowave-c-test PRIVATE pyrowave-shared granite-volk-headers)
 target_compile_options(pyrowave-c-test PRIVATE ${PYROWAVE_CXX_FLAGS})
 
 set(PYROWAVE_API_VERSION_MAJOR 0)
@@ -138,5 +138,6 @@ endif()
 
 if (WIN32)
     target_sources(pyrowave-shared PRIVATE pyrowave-shared.def)
+    set_target_properties(pyrowave-shared PROPERTIES PREFIX "lib")
 endif()
 
