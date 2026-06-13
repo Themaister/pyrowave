@@ -2,3 +2,5 @@
 *.iml
 /.idea
 /Granite
+/build-steamrt
+/steamrt-output
