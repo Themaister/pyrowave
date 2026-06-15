@@ -191,15 +191,34 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	bufinfo.size = encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
 	encoder->queued_meta = device->create_buffer(bufinfo);
+
+	if (!encoder->queued_meta)
+		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+
 	bufinfo.domain = BufferDomain::Device;
 	auto queued_meta_gpu = device->create_buffer(bufinfo);
 
+	if (!queued_meta_gpu)
+		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
+
 	auto target_bitstream_size = rate_control->maximum_bitstream_size & ~VkDeviceSize(3u);
+
+	// Check for bogus sizes.
+	if (target_bitstream_size > UINT32_MAX)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
 	bufinfo.size = target_bitstream_size + encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
 	encoder->queued_bitstream = device->create_buffer(bufinfo);
+
+	if (!encoder->queued_bitstream)
+		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+
 	bufinfo.domain = BufferDomain::Device;
 	auto queued_bitstream_gpu = device->create_buffer(bufinfo);
+
+	if (!queued_bitstream_gpu)
+		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	Encoder::BitstreamBuffers bitstream_buffers = {};
 
