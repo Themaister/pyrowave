@@ -59,6 +59,22 @@ static pyrowave_sync_object create_sync_object_from_timeline(pyrowave_device dev
 	return imported_timeline;
 }
 
+static pyrowave_sync_object create_sync_object_from_binary(pyrowave_device device, SemaphoreHolder &sem)
+{
+	auto exported_timeline = sem.export_to_handle();
+	ASSERT_THAT(exported_timeline);
+
+	pyrowave_sync_object_create_info sync_info = {};
+	sync_info.device = device;
+	sync_info.handle_type = exported_timeline.semaphore_handle_type;
+	sync_info.semaphore_type = VK_SEMAPHORE_TYPE_BINARY;
+	sync_info.external_handle = (pyrowave_os_handle)exported_timeline.handle;
+	sync_info.import_flags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT;
+	pyrowave_sync_object imported_timeline;
+	CHECKED(pyrowave_sync_object_create(&sync_info, &imported_timeline));
+	return imported_timeline;
+}
+
 static pyrowave_image create_imported_image(pyrowave_device device, Image &img)
 {
 	auto exported = img.export_handle();
@@ -92,7 +108,8 @@ static ImageHandle create_exportable_test_image(Device &device, VkExternalMemory
                                                 VkFormat format)
 {
 	auto info = ImageCreateInfo::immutable_2d_image(1280, 720, format);
-	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+	             VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 	info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
 	info.misc = IMAGE_MISC_NO_DEFAULT_VIEWS_BIT | IMAGE_MISC_EXTERNAL_MEMORY_BIT;
 	info.layout = ImageLayout::General;
@@ -120,16 +137,20 @@ static ImageHandle create_exportable_test_image(Device &device, VkExternalMemory
 }
 
 static void send_granite_image_to_encoder(Device &device, Image &granite_image, pyrowave_image pyro_image,
-                                          SemaphoreHolder &granite_sync, uint64_t acquire_value,
-                                          pyrowave_sync_object pyro_sync, uint64_t release_value,
+                                          SemaphoreHolder &granite_sync, pyrowave_sync_object pyro_sync_acquire, uint64_t acquire_value,
+                                          pyrowave_sync_object pyro_sync_release, uint64_t release_value,
                                           pyrowave_encoder encoder)
 {
 	auto cmd = device.request_command_buffer();
 	cmd->release_image_barrier(granite_image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
 		VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_EXTERNAL);
 	device.submit(cmd);
-	auto signal = device.request_timeline_semaphore_as_binary(granite_sync, acquire_value);
-	device.submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
+
+	if (acquire_value)
+	{
+		auto signal = device.request_timeline_semaphore_as_binary(granite_sync, acquire_value);
+		device.submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
+	}
 
 	pyrowave_gpu_external_reference ref = { pyro_image, VK_QUEUE_FAMILY_EXTERNAL };
 
@@ -147,12 +168,12 @@ static void send_granite_image_to_encoder(Device &device, Image &granite_image, 
 
 	acquire.num_images = 1;
 	acquire.images = &ref;
-	acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync);
+	acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync_acquire);
 	acquire.sync.value = acquire_value;
 
 	release.num_images = 1;
 	release.images = &ref;
-	release.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync);
+	release.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync_release);
 	release.sync.value = release_value;
 
 	CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
@@ -209,7 +230,58 @@ static void send_payload_to_decoder(pyrowave_encoder encoder, pyrowave_decoder d
 	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
 }
 
-// Most basic interop.
+static void validate_buffer(Device &device, Buffer &buf, uint8_t reference)
+{
+	auto *ptr = static_cast<const uint8_t *>(device.map_host_buffer(buf, MEMORY_ACCESS_READ_BIT));
+	for (size_t i = 0, n = buf.get_create_info().size; i < n; i++)
+	{
+		int d = std::abs(int(reference) - int(ptr[i]));
+		ASSERT_THAT(d <= 1);
+	}
+}
+
+static void validate_granite_image(Device &device, Image &img, SemaphoreHolder &sem, uint64_t acquire_value)
+{
+	auto wait_sem = device.request_timeline_semaphore_as_binary(sem, acquire_value);
+	wait_sem->signal_external();
+	device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(wait_sem), VK_PIPELINE_STAGE_2_COPY_BIT, true);
+
+	auto cmd = device.request_command_buffer();
+
+	BufferCreateInfo bufinfo = {};
+	bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	bufinfo.size = img.get_width() * img.get_height();
+	bufinfo.domain = BufferDomain::CachedHost;
+
+	auto y = device.create_buffer(bufinfo);
+
+	bufinfo.size /= 4;
+	auto cb = device.create_buffer(bufinfo);
+	auto cr = device.create_buffer(bufinfo);
+
+	cmd->acquire_image_barrier(img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+	                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_QUEUE_FAMILY_EXTERNAL);
+
+	cmd->copy_image_to_buffer(*y, img, 0, {}, { img.get_width(), img.get_height(), 1 }, 1280, 720,
+		{ VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1 });
+	cmd->copy_image_to_buffer(*cb, img, 0, {}, { img.get_width() / 2, img.get_height() / 2, 1 }, 640, 360,
+		{ VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 });
+	cmd->copy_image_to_buffer(*cr, img, 0, {}, { img.get_width() / 2, img.get_height() / 2, 1 }, 640, 360,
+		{ VK_IMAGE_ASPECT_PLANE_2_BIT, 0, 0, 1 });
+
+	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+	             VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_WRITE_BIT);
+
+	Fence fence;
+	device.submit(cmd, &fence);
+	fence->wait();
+
+	validate_buffer(device, *y, 0x70);
+	validate_buffer(device, *cb, 0x90);
+	validate_buffer(device, *cr, 0x80);
+}
+
+// Most basic interop scenario, OPAQUE_FD for everything.
 static void test_opaque_interop()
 {
 	ASSERT_THAT(Context::init_loader(nullptr));
@@ -239,6 +311,12 @@ static void test_opaque_interop()
 	pyrowave_image imported_nv12_image = create_imported_image(pyro_device, *exportable_nv12_image);
 	pyrowave_image imported_yuv420p_image = create_imported_image(pyro_device, *exportable_yuv420p_image);
 
+	auto binary_sem = device.request_semaphore_external(
+		VK_SEMAPHORE_TYPE_BINARY, ExternalHandle::get_opaque_semaphore_handle_type());
+	ASSERT_THAT(binary_sem);
+	device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary_sem.get());
+	pyrowave_sync_object imported_binary = create_sync_object_from_binary(pyro_device, *binary_sem);
+
 	pyrowave_encoder_create_info encoder_info = {};
 	encoder_info.device = pyro_device;
 	encoder_info.width = 1280;
@@ -247,10 +325,20 @@ static void test_opaque_interop()
 	pyrowave_encoder encoder;
 	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
 
+	// Test the two ways we can send a sync payload, binary + temporary or persistent timeline.
+	// Verify it doesn't explode.
 	send_granite_image_to_encoder(device, *exportable_nv12_image, imported_nv12_image,
-	                              *timeline_sem, 1,
+	                              *timeline_sem, imported_timeline, 1,
 	                              imported_timeline, 2,
 	                              encoder);
+
+	send_granite_image_to_encoder(device, *exportable_nv12_image, imported_nv12_image,
+	                              *timeline_sem, imported_binary, 0,
+	                              imported_timeline, 3,
+	                              encoder);
+
+	// Pyrowave (or rather, Granite) API destroys objects in a deferred way.
+	pyrowave_sync_object_destroy(imported_binary);
 
 	pyrowave_decoder_create_info decoder_info = {};
 	decoder_info.device = pyro_device;
@@ -261,7 +349,8 @@ static void test_opaque_interop()
 	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
 
 	send_payload_to_decoder(encoder, decoder);
-	decode_image(imported_yuv420p_image, imported_timeline, 3, decoder);
+	decode_image(imported_yuv420p_image, imported_timeline, 4, decoder);
+	validate_granite_image(device, *exportable_yuv420p_image, *timeline_sem, 4);
 
 	pyrowave_sync_object_destroy(imported_timeline);
 	pyrowave_image_destroy(imported_nv12_image);
