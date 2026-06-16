@@ -75,8 +75,25 @@ PYROWAVE_PUBLIC_API void pyrowave_get_api_version(uint32_t *major, uint32_t *min
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
 
 // TODO: Add interop where device can be created from existing VkInstance/VkPhysicalDevice/VkDevice.
-// TODO: Add interop where device can be created from LUID (Windows).
-// TODO: Add interop where device can be created from some other compatibility information (general).
+
+typedef struct pyrowave_uuid
+{
+	uint8_t uuid[VK_UUID_SIZE];
+} pyrowave_uuid;
+
+typedef struct pyrowave_luid
+{
+	uint8_t luid[VK_LUID_SIZE];
+} pyrowave_luid;
+
+PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat(
+	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
+	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
+	uint32_t vid, uint32_t pid,
+	const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
+	const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
+	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
+	pyrowave_device *device);
 
 // For performance debugging, reports GPU timestamps.
 PYROWAVE_PUBLIC_API void

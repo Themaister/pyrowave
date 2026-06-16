@@ -38,7 +38,14 @@ struct pyrowave_device_opaque
 	Device device;
 };
 
-pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
+pyrowave_result pyrowave_create_device_by_compat(
+	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
+	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
+	uint32_t vid, uint32_t pid,
+	const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
+	const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
+	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
+	pyrowave_device *device)
 {
 	// TODO: Find a better way to do this.
 	Util::set_thread_logging_interface(&null_logger);
@@ -50,16 +57,83 @@ pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 	dev->context.set_num_thread_indices(1);
 	dev->context.set_system_handles({});
 
+	VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+	app_info.apiVersion = VK_API_VERSION_1_2;
+	app_info.pApplicationName = "pyrowave-c";
+	app_info.pEngineName = "Granite";
+	dev->context.set_application_info(&app_info);
+
 	// Just enable video extensions so that we can use video image usage, but don't bother creating queues for it, etc.
-	if (!dev->context.init_instance_and_device(nullptr, 0, nullptr, 0,
-	                                           CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
+	if (!dev->context.init_instance(nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
 	{
+		delete dev;
+		return PYROWAVE_ERROR_NO_VULKAN;
+	}
+
+	uint32_t count;
+	if (vkEnumeratePhysicalDevices(dev->context.get_instance(), &count, nullptr) != VK_SUCCESS)
+	{
+		delete dev;
+		return PYROWAVE_ERROR_NO_VULKAN;
+	}
+
+	std::vector<VkPhysicalDevice> gpus(count);
+
+	if (vkEnumeratePhysicalDevices(dev->context.get_instance(), &count, gpus.data()) < 0)
+	{
+		delete dev;
+		return PYROWAVE_ERROR_NO_VULKAN;
+	}
+
+	VkPhysicalDevice selected_gpu = VK_NULL_HANDLE;
+
+	for (auto &gpu : gpus)
+	{
+		VkPhysicalDeviceProperties props = {};
+		vkGetPhysicalDeviceProperties(gpu, &props);
+		// Is this even possible these days?
+		if (props.apiVersion < VK_API_VERSION_1_2)
+			continue;
+
+		VkPhysicalDeviceIDProperties ids = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
+		VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ids };
+		vkGetPhysicalDeviceProperties2(gpu, &props2);
+
+		if (vid && props2.properties.vendorID != vid)
+			continue;
+		if (pid && props2.properties.deviceID != pid)
+			continue;
+
+		if (device_uuid && memcmp(device_uuid, ids.deviceUUID, VK_UUID_SIZE) != 0)
+			continue;
+		if (driver_uuid && memcmp(driver_uuid, ids.driverUUID, VK_UUID_SIZE) != 0)
+			continue;
+		if (device_luid && !ids.deviceLUIDValid)
+			continue;
+		if (device_luid && memcmp(device_luid, ids.deviceLUID, VK_LUID_SIZE) != 0)
+			continue;
+
+		if (dev->context.init_device(gpu, nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
+		{
+			selected_gpu = gpu;
+			break;
+		}
+	}
+
+	if (!selected_gpu)
+	{
+		delete dev;
 		return PYROWAVE_ERROR_NO_VULKAN;
 	}
 
 	dev->device.set_context(dev->context);
 	*device = dev;
 	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
+{
+	return pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr, device);
 }
 
 void pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset)
