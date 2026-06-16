@@ -49,8 +49,13 @@ pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 	auto *dev = new pyrowave_device_opaque();
 	dev->context.set_num_thread_indices(1);
 	dev->context.set_system_handles({});
-	if (!dev->context.init_instance_and_device(nullptr, 0, nullptr, 0))
+
+	// Just enable video extensions so that we can use video image usage, but don't bother creating queues for it, etc.
+	if (!dev->context.init_instance_and_device(nullptr, 0, nullptr, 0,
+	                                           CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
+	{
 		return PYROWAVE_ERROR_NO_VULKAN;
+	}
 
 	dev->device.set_context(dev->context);
 	*device = dev;
@@ -72,11 +77,420 @@ void pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_m
 		device->device.timestamp_log_reset();
 }
 
+void pyrowave_device_get_vk_device_handles(
+	pyrowave_device device,
+	VkInstance *vk_instance, VkPhysicalDevice *vk_physical_device,
+	VkDevice *vk_device)
+{
+	Util::set_thread_logging_interface(&null_logger);
+
+	if (vk_instance)
+		*vk_instance = device->device.get_instance();
+	if (vk_physical_device)
+		*vk_physical_device = device->device.get_physical_device();
+	if (vk_device)
+		*vk_device = device->device.get_device();
+}
+
 void pyrowave_device_destroy(pyrowave_device device)
 {
 	Util::set_thread_logging_interface(&null_logger);
 
 	delete device;
+}
+
+struct pyrowave_sync_object_opaque
+{
+	Device *device = nullptr;
+	Semaphore semaphore;
+};
+
+pyrowave_result
+pyrowave_sync_object_create(const pyrowave_sync_object_create_info *info, pyrowave_sync_object *out_sync)
+{
+	Util::set_thread_logging_interface(&null_logger);
+
+	if (!info->device)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if ((info->handle_type & (
+		VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT |
+		VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT |
+		VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT |
+		VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT |
+		VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT)) == 0)
+	{
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	}
+
+	auto &device = info->device->device;
+
+	if (!device.get_device_features().supports_external)
+		return PYROWAVE_ERROR_NOT_IMPLEMENTED;
+
+	auto sem = device.request_semaphore_external(info->semaphore_type, info->handle_type);
+	if (!sem)
+		return PYROWAVE_ERROR_UNSUPPORTED_EXTERNAL_HANDLE;
+
+	ExternalHandle ext = {};
+	ext.handle = (decltype(ext.handle))info->external_handle;
+	ext.semaphore_handle_type = info->handle_type;
+	if (ext && !sem->import_from_handle(ext))
+		return PYROWAVE_ERROR_FAILED_EXTERNAL_HANDLE;
+
+	if (!ext && !(info->import_flags & VK_SEMAPHORE_IMPORT_TEMPORARY_BIT))
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto *sync = new pyrowave_sync_object_opaque();
+	sync->device = &device;
+	sync->semaphore = std::move(sem);
+
+	*out_sync = sync;
+	return PYROWAVE_SUCCESS;
+}
+
+VkSemaphore
+pyrowave_sync_object_get_semaphore(pyrowave_sync_object sync)
+{
+	if (!sync)
+		return VK_NULL_HANDLE;
+
+	Util::set_thread_logging_interface(&null_logger);
+	return sync->semaphore->get_semaphore();
+}
+
+pyrowave_result
+pyrowave_sync_object_export_handle(pyrowave_sync_object sync, pyrowave_os_handle *handle)
+{
+	if (!sync)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	Util::set_thread_logging_interface(&null_logger);
+	if (auto native_handle = sync->semaphore->export_to_handle())
+	{
+		*handle = (pyrowave_os_handle)native_handle.handle;
+		return PYROWAVE_SUCCESS;
+	}
+	else
+	{
+		return PYROWAVE_ERROR_FAILED_EXTERNAL_HANDLE;
+	}
+}
+
+void pyrowave_sync_object_destroy(pyrowave_sync_object sync)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	delete sync;
+}
+
+struct pyrowave_image_opaque
+{
+	Device *device = nullptr;
+	ImageHandle img;
+};
+
+pyrowave_result pyrowave_image_create(const pyrowave_image_create_info *info, pyrowave_image *out_image)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	if (!info->device || !info->image_create_info)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto &device = info->device->device;
+
+	if (info->image_create_info->sharingMode != VK_SHARING_MODE_EXCLUSIVE)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (info->handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT &&
+		info->image_create_info->tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (info->handle_type != VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT &&
+		info->image_create_info->tiling != VK_IMAGE_TILING_OPTIMAL)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (info->image_create_info->imageType != VK_IMAGE_TYPE_2D)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	ImageCreateInfo image_create_info = {};
+	image_create_info.domain = ImageDomain::Physical;
+	image_create_info.misc = IMAGE_MISC_EXTERNAL_MEMORY_BIT | IMAGE_MISC_NO_DEFAULT_VIEWS_BIT;
+	image_create_info.external.handle = (decltype(image_create_info.external.handle))info->external_handle;
+	image_create_info.external.memory_handle_type = info->handle_type;
+	image_create_info.pnext = const_cast<void *>(info->image_create_info->pNext);
+	image_create_info.layout = ImageLayout::General;
+
+	image_create_info.type = info->image_create_info->imageType;
+	image_create_info.format = info->image_create_info->format;
+	image_create_info.flags = info->image_create_info->flags;
+	image_create_info.width = info->image_create_info->extent.width;
+	image_create_info.height = info->image_create_info->extent.height;
+	image_create_info.depth = info->image_create_info->extent.depth;
+	image_create_info.layers = info->image_create_info->arrayLayers;
+	image_create_info.levels = info->image_create_info->mipLevels;
+	image_create_info.samples = info->image_create_info->samples;
+	image_create_info.usage = info->image_create_info->usage;
+
+	if (device.get_device_features().driver_id == VK_DRIVER_ID_NVIDIA_PROPRIETARY &&
+	    (info->handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT ||
+	     info->handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT))
+	{
+		VkFormatProperties3 format_properties = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
+		device.get_format_properties(image_create_info.format, &format_properties);
+
+		if (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_VIDEO_ENCODE_INPUT_BIT_KHR)
+		{
+			// NVIDIA workaround. For planar formats, the D3D side assumes video compatible layouts.
+			image_create_info.usage |= VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
+
+			// If we're on an older driver, just pass it through as-is.
+			// Normally we have to pass down a codec profile, but this is mostly noise.
+			if (device.get_device_features().video_maintenance1_features.videoMaintenance1)
+				image_create_info.flags |= VK_IMAGE_CREATE_VIDEO_PROFILE_INDEPENDENT_BIT_KHR;
+		}
+	}
+
+	auto img = device.create_image(image_create_info);
+	if (!img)
+		return PYROWAVE_ERROR_FAILED_EXTERNAL_HANDLE;
+
+	auto *image = new pyrowave_image_opaque();
+	image->device = &device;
+	image->img = std::move(img);
+
+	*out_image = image;
+	return PYROWAVE_SUCCESS;
+}
+
+VkImage pyrowave_image_get_handle(pyrowave_image image)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	return image->img->get_image();
+}
+
+pyrowave_result
+pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect,
+							  VkImageUsageFlagBits usage, pyrowave_image_view *view)
+{
+	Util::set_thread_logging_interface(&null_logger);
+
+	if ((aspect & (VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT)) == 0)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (usage != VK_IMAGE_USAGE_SAMPLED_BIT && usage != VK_IMAGE_USAGE_STORAGE_BIT)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto &img = *image->img;
+
+	*view = {};
+	view->image = img.get_image();
+	view->image_format = img.get_format();
+	view->width = img.get_width();
+	view->height = img.get_height();
+	view->layout = VK_IMAGE_LAYOUT_GENERAL;
+
+	// Handle the usual suspects.
+	switch (img.get_format())
+	{
+	// Normal explicit planar formats.
+	case VK_FORMAT_R8_UNORM:
+	case VK_FORMAT_R16_UNORM:
+		view->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+		view->swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
+		view->view_format = img.get_format();
+		break;
+
+	case VK_FORMAT_R8G8_UNORM:
+	case VK_FORMAT_R16G16_UNORM:
+		if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		if (aspect == VK_IMAGE_ASPECT_PLANE_0_BIT)
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		view->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+		view->swizzle = aspect == VK_IMAGE_ASPECT_PLANE_2_BIT ? VK_COMPONENT_SWIZZLE_G : VK_COMPONENT_SWIZZLE_R;
+		view->view_format = img.get_format();
+		break;
+
+	// Special 4:4:4 HDR10 format
+	case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+		if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		view->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+		view->view_format = img.get_format();
+
+		switch (aspect)
+		{
+		case VK_IMAGE_ASPECT_PLANE_0_BIT: view->swizzle = VK_COMPONENT_SWIZZLE_R; break;
+		case VK_IMAGE_ASPECT_PLANE_1_BIT: view->swizzle = VK_COMPONENT_SWIZZLE_G; break;
+		case VK_IMAGE_ASPECT_PLANE_2_BIT: view->swizzle = VK_COMPONENT_SWIZZLE_B; break;
+		default: return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+		break;
+
+	// 3-plane YCbCr
+	case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
+	case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
+		view->view_format = VK_FORMAT_R8_UNORM;
+		view->aspect = aspect;
+		if (aspect != VK_IMAGE_ASPECT_PLANE_0_BIT && img.get_format() == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM)
+		{
+			view->width /= 2;
+			view->height /= 2;
+		}
+		break;
+
+	case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
+	case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
+		view->view_format = VK_FORMAT_R10X6_UNORM_PACK16;
+		view->aspect = aspect;
+		if (aspect != VK_IMAGE_ASPECT_PLANE_0_BIT && img.get_format() == VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16)
+		{
+			view->width /= 2;
+			view->height /= 2;
+		}
+		break;
+
+	case VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM:
+	case VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM:
+		view->view_format = VK_FORMAT_R16_UNORM;
+		view->aspect = aspect;
+		if (aspect != VK_IMAGE_ASPECT_PLANE_0_BIT && img.get_format() == VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM)
+		{
+			view->width /= 2;
+			view->height /= 2;
+		}
+		break;
+
+	// 2-plane YCbCr
+	case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
+	case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
+		switch (aspect)
+		{
+		case VK_IMAGE_ASPECT_PLANE_0_BIT:
+			view->view_format = VK_FORMAT_R8_UNORM;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+			break;
+
+		case VK_IMAGE_ASPECT_PLANE_1_BIT:
+			if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			view->swizzle = VK_COMPONENT_SWIZZLE_R;
+			view->view_format = VK_FORMAT_R8G8_UNORM;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+			if (img.get_format() == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+			{
+				view->width /= 2;
+				view->height /= 2;
+			}
+			break;
+
+		case VK_IMAGE_ASPECT_PLANE_2_BIT:
+			if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			view->swizzle = VK_COMPONENT_SWIZZLE_G;
+			view->view_format = VK_FORMAT_R8G8_UNORM;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+			if (img.get_format() == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+			{
+				view->width /= 2;
+				view->height /= 2;
+			}
+			break;
+
+		default:
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+		break;
+
+	case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
+	case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16:
+		switch (aspect)
+		{
+		case VK_IMAGE_ASPECT_PLANE_0_BIT:
+			view->view_format = VK_FORMAT_R10X6_UNORM_PACK16;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+			break;
+
+		case VK_IMAGE_ASPECT_PLANE_1_BIT:
+			if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			view->swizzle = VK_COMPONENT_SWIZZLE_R;
+			view->view_format = VK_FORMAT_R10X6G10X6_UNORM_2PACK16;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+			if (img.get_format() == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16)
+			{
+				view->width /= 2;
+				view->height /= 2;
+			}
+			break;
+
+		case VK_IMAGE_ASPECT_PLANE_2_BIT:
+			if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			view->swizzle = VK_COMPONENT_SWIZZLE_G;
+			view->view_format = VK_FORMAT_R10X6G10X6_UNORM_2PACK16;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+			if (img.get_format() == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16)
+			{
+				view->width /= 2;
+				view->height /= 2;
+			}
+			break;
+
+		default:
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+		break;
+
+	case VK_FORMAT_G16_B16R16_2PLANE_420_UNORM:
+	case VK_FORMAT_G16_B16R16_2PLANE_444_UNORM:
+		switch (aspect)
+		{
+		case VK_IMAGE_ASPECT_PLANE_0_BIT:
+			view->view_format = VK_FORMAT_R16_UNORM;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+			break;
+
+		case VK_IMAGE_ASPECT_PLANE_1_BIT:
+			if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			view->swizzle = VK_COMPONENT_SWIZZLE_R;
+			view->view_format = VK_FORMAT_R16G16_UNORM;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+			if (img.get_format() == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM)
+			{
+				view->width /= 2;
+				view->height /= 2;
+			}
+			break;
+
+		case VK_IMAGE_ASPECT_PLANE_2_BIT:
+			if (usage == VK_IMAGE_USAGE_STORAGE_BIT)
+				return PYROWAVE_ERROR_INVALID_ARGUMENT;
+			view->swizzle = VK_COMPONENT_SWIZZLE_G;
+			view->view_format = VK_FORMAT_R16G16_UNORM;
+			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+			if (img.get_format() == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM)
+			{
+				view->width /= 2;
+				view->height /= 2;
+			}
+			break;
+
+		default:
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+		break;
+
+	default:
+		return PYROWAVE_ERROR_NOT_IMPLEMENTED;
+	}
+
+	return PYROWAVE_SUCCESS;
+}
+
+void pyrowave_image_destroy(pyrowave_image image)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	delete image;
 }
 
 struct pyrowave_encoder_opaque
@@ -174,9 +588,45 @@ bool WrappedViewBuffers::wrap(Device *device, const pyrowave_gpu_buffers *buffer
 	return true;
 }
 
+static void pyrowave_device_wait_semaphore(Device *device, const pyrowave_gpu_sync_operation *acquire, VkPipelineStageFlags2 stages)
+{
+	if (acquire && acquire->sync.semaphore != VK_NULL_HANDLE)
+	{
+		auto sem = device->request_semaphore(
+			acquire->sync.value != 0 ? VK_SEMAPHORE_TYPE_TIMELINE : VK_SEMAPHORE_TYPE_BINARY, acquire->sync.semaphore);
+		sem->signal_external();
+
+		if (acquire->sync.value)
+		{
+			sem = device->request_timeline_semaphore_as_binary(*sem, acquire->sync.value);
+			sem->signal_external();
+		}
+
+		device->add_wait_semaphore(CommandBuffer::Type::Generic, std::move(sem), stages, false);
+	}
+}
+
+static void pyrowave_device_signal_semaphore(Device *device, const pyrowave_gpu_sync_operation *release)
+{
+	if (release && release->sync.semaphore != VK_NULL_HANDLE)
+	{
+		auto signal = device->request_semaphore(
+			release->sync.value != 0 ? VK_SEMAPHORE_TYPE_TIMELINE : VK_SEMAPHORE_TYPE_BINARY, release->sync.semaphore);
+
+		if (release->sync.value)
+			signal = device->request_timeline_semaphore_as_binary(*signal, release->sync.value);
+
+		if (signal)
+			device->submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
+	}
+}
+
 pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave_gpu_buffers *buffers,
-										const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
+                                        const pyrowave_gpu_sync_operation *acquire,
+                                        const pyrowave_gpu_sync_operation *release,
+                                        const pyrowave_gpu_buffers *buffers,
+                                        const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = encoder->device;
@@ -204,7 +654,7 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	auto target_bitstream_size = rate_control->maximum_bitstream_size & ~VkDeviceSize(3u);
 
 	// Check for bogus sizes.
-	if (target_bitstream_size > UINT32_MAX)
+	if (target_bitstream_size > UINT32_MAX || target_bitstream_size == 0)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	bufinfo.size = target_bitstream_size + encoder->encoder.get_meta_required_size();
@@ -234,11 +684,35 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave
 
 	auto cmd = device->request_command_buffer();
 
+	if (acquire)
+	{
+		for (size_t i = 0; i < acquire->num_images; i++)
+		{
+			cmd->acquire_image_barrier(*acquire->images[i].image->img,
+			                           VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+			                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			                           VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+			                           acquire->images[i].queue_family_index);
+		}
+	}
+
 	auto ret = encoder->encoder.encode(*cmd, views, bitstream_buffers);
 	if (!ret)
 	{
 		device->submit_discard(cmd);
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	}
+
+	if (release)
+	{
+		for (size_t i = 0; i < release->num_images; i++)
+		{
+			cmd->release_image_barrier(*release->images[i].image->img,
+									   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+									   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+									   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+									   release->images[i].queue_family_index);
+		}
 	}
 
 	// NVIDIA really doesn't like it if we write bitstream to cached host.
@@ -251,8 +725,11 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
 
+	pyrowave_device_wait_semaphore(device, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	encoder->queued_fence.reset();
 	device->submit(cmd, &encoder->queued_fence);
+	pyrowave_device_signal_semaphore(device, acquire);
+
 	return PYROWAVE_SUCCESS;
 }
 
@@ -333,7 +810,7 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 		p.image = images[plane] ? images[plane]->get_image() : images[1]->get_image();
 	}
 
-	auto ret = pyrowave_encoder_encode_gpu_synchronous(encoder, &gpu_buffers, rate_control);
+	auto ret = pyrowave_encoder_encode_gpu_synchronous(encoder, nullptr, nullptr, &gpu_buffers, rate_control);
 	return ret;
 }
 
@@ -445,7 +922,10 @@ bool pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_parti
 }
 
 pyrowave_result
-pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_buffers *buffers)
+pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
+                                   const pyrowave_gpu_sync_operation *acquire,
+                                   const pyrowave_gpu_sync_operation *release,
+                                   const pyrowave_gpu_buffers *buffers)
 {
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
@@ -458,6 +938,33 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_
 	// Just use normal graphics queue here since the result will likely be consumed there.
 	auto cmd = device->request_command_buffer();
 
+	VkPipelineStageFlags2 stages = decoder->fragment_path
+		                               ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+		                               : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+	VkAccessFlags2 access = decoder->fragment_path
+		                        ? VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+		                        : VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+
+	if (acquire)
+	{
+		for (size_t i = 0; i < acquire->num_images; i++)
+		{
+			if (acquire->images[i].queue_family_index != VK_QUEUE_FAMILY_IGNORED)
+			{
+				cmd->acquire_image_barrier(*acquire->images[i].image->img,
+										   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+										   stages, access, acquire->images[i].queue_family_index);
+			}
+			else
+			{
+				cmd->image_barrier(*acquire->images[i].image->img,
+								   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+								   stages, 0, stages, access);
+			}
+		}
+	}
+
 	auto ret = decoder->decoder.decode(*cmd, views);
 	if (!ret)
 	{
@@ -465,8 +972,21 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	}
 
+	if (release)
+	{
+		for (size_t i = 0; i < release->num_images; i++)
+		{
+			cmd->release_image_barrier(*release->images[i].image->img,
+									   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+									   stages, access, release->images[i].queue_family_index);
+		}
+	}
+
+	pyrowave_device_wait_semaphore(device, acquire, stages);
 	// This just queues up a command buffer, flush only happens when sync objects are signaled.
 	device->submit(cmd);
+	pyrowave_device_signal_semaphore(device, release);
+
 	return PYROWAVE_SUCCESS;
 }
 
@@ -570,7 +1090,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	BufferCreateInfo bufinfo = {};
 	BufferHandle readback_buffers[3];
 
-	auto res = pyrowave_decoder_decode_gpu_buffer(decoder, &gpu_buffers);
+	auto res = pyrowave_decoder_decode_gpu_buffer(decoder, nullptr, nullptr, &gpu_buffers);
 	if (res != PYROWAVE_SUCCESS)
 		return res;
 

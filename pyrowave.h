@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 0
+#define PYROWAVE_API_VERSION_MINOR 1
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -48,6 +48,9 @@ typedef enum pyrowave_result
 	PYROWAVE_ERROR_OUT_OF_HOST_MEMORY = -3,
 	PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY = -4,
 	PYROWAVE_ERROR_NO_VULKAN = -5,
+	PYROWAVE_ERROR_NOT_IMPLEMENTED = -6,
+	PYROWAVE_ERROR_UNSUPPORTED_EXTERNAL_HANDLE = -7,
+	PYROWAVE_ERROR_FAILED_EXTERNAL_HANDLE = -8,
 	PYROWAVE_ERROR_INT_MAX = 0x7fffffff
 } pyrowave_result;
 
@@ -61,7 +64,11 @@ typedef enum pyrowave_chroma_subsampling
 typedef struct pyrowave_encoder_opaque *pyrowave_encoder;
 typedef struct pyrowave_decoder_opaque *pyrowave_decoder;
 typedef struct pyrowave_device_opaque *pyrowave_device;
+typedef struct pyrowave_sync_object_opaque *pyrowave_sync_object;
+typedef struct pyrowave_image_opaque *pyrowave_image;
 
+// Used to dynamically detect any API/ABI incompatibility.
+// This entry point is stable.
 PYROWAVE_PUBLIC_API void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch);
 
 // Device API.
@@ -75,26 +82,68 @@ PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_devi
 PYROWAVE_PUBLIC_API void
 pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset);
 
+// Out pointers can be NULL, in which case nothing is written to them.
+PYROWAVE_PUBLIC_API void pyrowave_device_get_vk_device_handles(
+	pyrowave_device device,
+	VkInstance *vk_instance, VkPhysicalDevice *vk_physical_device,
+	VkDevice *vk_device);
+
 // All encoders and decoders must have been destroyed before destroying the device.
 PYROWAVE_PUBLIC_API void pyrowave_device_destroy(pyrowave_device device);
 ////
 
-// Encoder API
-typedef struct pyrowave_encoder_create_info
+// External sync API
+// On Windows, this is a HANDLE reinterpreted as uintptr_t.
+// On POSIX, it's a file descriptor int casted to uintptr_t.
+typedef uintptr_t pyrowave_os_handle;
+
+typedef struct pyrowave_sync_object_create_info
 {
 	pyrowave_device device;
-	// For 420 subsampling, must be even.
-	int width;
-	int height;
-	pyrowave_chroma_subsampling chroma;
-} pyrowave_encoder_create_info;
 
-typedef struct pyrowave_packet
-{
-	size_t offset;
-	size_t size;
-} pyrowave_packet;
+	// If this is an invalid handle according to the OS (NULL HANDLE, negative fd),
+	// the sync object is created as an exportable handle.
+	// If a handle is imported successfully, pyrowave_sync_object takes ownership of the OS handle.
+	pyrowave_os_handle external_handle;
 
+	// Must be one of the supported handle types by the device.
+	// The implementation will fail the call with an appropriate error if not supported.
+	// Recognized types:
+	// - OPAQUE_FD
+	// - SYNC_FD_BIT
+	// - OPAQUE_WIN32_BIT
+	// - OPAQUE_WIN32_KMT_BIT
+	// - D3D12_FENCE_BIT (D3D11_FENCE_BIT is alias of D3D12_FENCE_BIT)
+	VkExternalSemaphoreHandleTypeFlagBits handle_type;
+
+	// Binary or Timeline. For D3D11/D3D12 fence import, this must be TIMELINE.
+	VkSemaphoreType semaphore_type;
+
+	// Only relevant for importing.
+	// For binary semaphores, this must be TEMPORARY for now.
+	// This makes the sync object fire and forget and can only be used once.
+	// TEMPORARY must not be used for timeline semaphores.
+	VkSemaphoreImportFlags import_flags;
+} pyrowave_sync_object_create_info;
+
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_sync_object_create(const pyrowave_sync_object_create_info *info, pyrowave_sync_object *sync);
+
+PYROWAVE_PUBLIC_API VkSemaphore
+pyrowave_sync_object_get_semaphore(pyrowave_sync_object sync);
+
+// Called after signaling a semaphore, the sync payload can be exported to a handle.
+// For timeline semaphores this can be called at any time if was created exportable.
+// The common use case on Windows is to import a D3D12 fence timeline, never export, since
+// not all implementations support exporting a timeline semaphore on that platform,
+// but all support importing.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_sync_object_export_handle(pyrowave_sync_object sync, pyrowave_os_handle *handle);
+
+PYROWAVE_PUBLIC_API void pyrowave_sync_object_destroy(pyrowave_sync_object sync);
+////
+
+// External resource API
 typedef struct pyrowave_image_view
 {
 	VkImage image;
@@ -120,15 +169,111 @@ typedef struct pyrowave_image_view
 	VkImageLayout layout;
 } pyrowave_image_view;
 
+typedef struct pyrowave_image_create_info
+{
+	pyrowave_device device;
+
+	// Must be a valid external handle.
+	pyrowave_os_handle external_handle;
+	VkExternalMemoryHandleTypeFlagBits handle_type;
+
+	// For OPAQUE handles, the create info must be conformant to spec requirements where the create infos
+	// have to match between creator and consumer.
+	// (In practice, this can be awkward especially when sharing between e.g. GL and Vulkan,
+	// spec calls for enabling "all" flags).
+	// For other types, image_create_info has to be compatible enough to make the sharing work.
+	//
+	// - Tiling must be OPTIMAL or DRM_FORMAT_MODIFIER_EXT.
+	// - Sharing mode must be EXCLUSIVE.
+	// - If a planar format like NV12 is used, the image must have MUTABLE_BIT image creation set.
+	const VkImageCreateInfo *image_create_info;
+
+	// DRM format modifier usage:
+	// - Set image_create_info->tiling to VK_IMAGE_TILING_DRM_FORMAT_MODIFIER.
+	// - handle_type must be VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT.
+	// - VkImageDrmFormatModifierExplicitCreateInfoEXT must be chained into the pNext of image_create_info.
+
+	// External images are always assumed to be in GENERAL layout.
+} pyrowave_image_create_info;
+
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_image_create(const pyrowave_image_create_info *info, pyrowave_image *image);
+
+PYROWAVE_PUBLIC_API VkImage
+pyrowave_image_get_handle(pyrowave_image image);
+
+// Generates an image view from an (imported) image automatically for convenience.
+// - Aspect must be VK_IMAGE_ASPECT_PLANE_0_BIT, PLANE_1_BIT or PLANE_2_BIT.
+// - For 2-plane YCbCr image formats or two component image formats, image view swizzles are used to synthesize 3 planes.
+// - For single component image formats, the aspect is ignored (the image is the plane itself).
+// - For 3-component image formats, the aspect selects the component index through image swizzle.
+//
+// Some validation rules:
+// - For 2-plane YCbCr image formats, usage must not be STORAGE_BIT.
+// - For non-YCbCr image formats with more than 1 component, usage must not be STORAGE_BIT.
+// - Usage must be VK_IMAGE_USAGE_STORAGE_BIT (for decode) or VK_IMAGE_USAGE_SAMPLED_BIT (for encode).
+// - The format of the image must be recognized. Highly unusual formats may be rejected.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect,
+                              VkImageUsageFlagBits usage, pyrowave_image_view *view);
+
+PYROWAVE_PUBLIC_API void pyrowave_image_destroy(pyrowave_image image);
+////
+
+// Encoder API
+typedef struct pyrowave_encoder_create_info
+{
+	pyrowave_device device;
+	// For 420 subsampling, must be even.
+	int width;
+	int height;
+	pyrowave_chroma_subsampling chroma;
+} pyrowave_encoder_create_info;
+
+typedef struct pyrowave_packet
+{
+	size_t offset;
+	size_t size;
+} pyrowave_packet;
+
+typedef struct pyrowave_sync_point
+{
+	// Can be VK_NULL_HANDLE, in which case it means "no sync".
+	VkSemaphore semaphore;
+
+	// If semaphore is a binary semaphore, value must be 0.
+	// NOTE: While waiting for a timeline semaphore value of 0 is valid Vulkan,
+	// it's a noop and can be replaced with that.
+	uint64_t value;
+} pyrowave_sync_point;
+
+typedef struct pyrowave_gpu_external_reference
+{
+	pyrowave_image image;
+	// VK_QUEUE_FAMILY_EXTERNAL, _FOREIGN, _IGNORED or a normal queue family index.
+	uint32_t queue_family_index;
+} pyrowave_gpu_external_reference;
+
 typedef struct pyrowave_gpu_buffers
 {
 	// All 3 planes must be provided. For NV12 images, pass in the same plane for Cb and Cr, but use swizzle
 	// to select R and G planes to fake a YUV420P image.
 	// Very slightly less efficient, but should barely be measurable.
+	// pyrowave_image_get_image_view() can be used as a helper to fill these in.
 	pyrowave_image_view planes[3];
-
-	// TODO: Add synchronization information.
 } pyrowave_gpu_buffers;
+
+typedef struct pyrowave_gpu_sync_operation
+{
+	// If interacting with external images, it's expected that implementation needs to acquire and release the image.
+	// Decode only:
+	// If acquiring from QUEUE_FAMILY_IGNORED,
+	// the image will be transitioned away from VK_IMAGE_LAYOUT_UNDEFINED instead rather than taking ownership.
+	// In Vulkan, if content does not have to be preserved (i.e. decoding), it can just be discarded with UNDEFINED.
+	const pyrowave_gpu_external_reference *images;
+	size_t num_images;
+	pyrowave_sync_point sync;
+} pyrowave_gpu_sync_operation;
 
 // TODO: Add support for importing external memory as GPU buffers.
 
@@ -170,8 +315,12 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 // due to latency and the encoder is so fast anyway. This function will not block, but subsequent functions will.
 // Calling an encode operation with synchronous API clobbers any previous encoded frame.
 // The encoded stream will contain a small sequence counter that tracks frame ordering.
+// acquire and release can be NULL if no sync is required.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder, const pyrowave_gpu_buffers *buffers,
+pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
+                                        const pyrowave_gpu_sync_operation *acquire,
+                                        const pyrowave_gpu_sync_operation *release,
+                                        const pyrowave_gpu_buffers *buffers,
                                         const pyrowave_rate_control *rate_control);
 
 PYROWAVE_PUBLIC_API pyrowave_result
@@ -232,8 +381,12 @@ pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_fr
 // Decoding can be done at any time, leading to potentially corrupt/incomplete results if packets are missing.
 // Missing wavelet weights are assumed to be 0 which can lead to extra blurring.
 // See pyrowave_decoder_decode_is_ready() to determine if the final result is known to be complete.
+// acquire and release can be NULL if no sync is required.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder, const pyrowave_gpu_buffers *buffers);
+pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
+                                   const pyrowave_gpu_sync_operation *acquire,
+                                   const pyrowave_gpu_sync_operation *release,
+                                   const pyrowave_gpu_buffers *buffers);
 
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers);

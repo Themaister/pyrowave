@@ -107,8 +107,12 @@ add_executable(pyrowave-c-test pyrowave_c_test.cpp)
 target_link_libraries(pyrowave-c-test PRIVATE pyrowave-shared granite-volk-headers)
 target_compile_options(pyrowave-c-test PRIVATE ${PYROWAVE_CXX_FLAGS})
 
+add_executable(pyrowave-c-interop-test pyrowave_c_interop_test.cpp)
+target_link_libraries(pyrowave-c-interop-test PRIVATE pyrowave-shared granite-vulkan)
+target_compile_options(pyrowave-c-interop-test PRIVATE ${PYROWAVE_CXX_FLAGS})
+
 set(PYROWAVE_API_VERSION_MAJOR 0)
-set(PYROWAVE_API_VERSION_MINOR 0)
+set(PYROWAVE_API_VERSION_MINOR 1)
 set(PYROWAVE_API_VERSION_PATCH 0)
 set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 
@@ -146,5 +150,6 @@ endif()
 if (WIN32)
     target_sources(pyrowave-shared PRIVATE pyrowave-shared.def)
     set_target_properties(pyrowave-shared PROPERTIES PREFIX "lib")
+    target_link_libraries(pyrowave-c-interop-test PRIVATE d3d11 d3d12)
 endif()
 
