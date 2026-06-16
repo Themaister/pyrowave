@@ -18,7 +18,11 @@ struct NullLogger : Util::LoggingInterface
 {
 	bool log(const char *, const char *, va_list) override
 	{
+#ifdef VULKAN_DEBUG
+		return false;
+#else
 		return true;
+#endif
 	}
 };
 
@@ -113,7 +117,7 @@ pyrowave_result pyrowave_create_device_by_compat(
 		if (device_luid && memcmp(device_luid, ids.deviceLUID, VK_LUID_SIZE) != 0)
 			continue;
 
-		if (dev->context.init_device(gpu, nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
+		if (dev->context.init_device(gpu, VK_NULL_HANDLE, nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
 		{
 			selected_gpu = gpu;
 			break;
@@ -292,6 +296,7 @@ pyrowave_result pyrowave_image_create(const pyrowave_image_create_info *info, py
 	image_create_info.external.memory_handle_type = info->handle_type;
 	image_create_info.pnext = const_cast<void *>(info->image_create_info->pNext);
 	image_create_info.layout = ImageLayout::General;
+	image_create_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	image_create_info.type = info->image_create_info->imageType;
 	image_create_info.format = info->image_create_info->format;
@@ -802,7 +807,7 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	pyrowave_device_wait_semaphore(device, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	encoder->queued_fence.reset();
 	device->submit(cmd, &encoder->queued_fence);
-	pyrowave_device_signal_semaphore(device, acquire);
+	pyrowave_device_signal_semaphore(device, release);
 
 	return PYROWAVE_SUCCESS;
 }
