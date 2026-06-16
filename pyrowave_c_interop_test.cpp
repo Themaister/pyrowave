@@ -88,29 +88,34 @@ static pyrowave_image create_imported_image(pyrowave_device device, Image &img)
 	return imported_image;
 }
 
-static ImageHandle create_exportable_test_image(Device &device, VkExternalMemoryHandleTypeFlagBits handle_type)
+static ImageHandle create_exportable_test_image(Device &device, VkExternalMemoryHandleTypeFlagBits handle_type,
+                                                VkFormat format)
 {
-	auto nv12 = ImageCreateInfo::immutable_2d_image(1280, 720, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM);
-	nv12.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-	nv12.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-	nv12.misc = IMAGE_MISC_NO_DEFAULT_VIEWS_BIT | IMAGE_MISC_EXTERNAL_MEMORY_BIT;
-	nv12.layout = ImageLayout::General;
-	nv12.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
-	nv12.external.memory_handle_type = handle_type;
+	auto info = ImageCreateInfo::immutable_2d_image(1280, 720, format);
+	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+	info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+	info.misc = IMAGE_MISC_NO_DEFAULT_VIEWS_BIT | IMAGE_MISC_EXTERNAL_MEMORY_BIT;
+	info.layout = ImageLayout::General;
+	info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
+	info.external.memory_handle_type = handle_type;
 
-	auto img = device.create_image(nv12);
+	auto img = device.create_image(info);
 
-	auto cmd = device.request_command_buffer();
+	if (format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+	{
+		auto cmd = device.request_command_buffer();
 
-	auto *luma = static_cast<uint8_t *>(cmd->update_image(*img, {}, { 1280, 720, 1 }, 1280, 720, { VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1 }));
-	auto *chroma = static_cast<uint16_t *>(cmd->update_image(*img, {}, { 640, 360, 1 }, 640, 360, { VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 }));
+		auto *luma = static_cast<uint8_t *>(cmd->update_image(*img, {}, { 1280, 720, 1 }, 1280, 720, { VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1 }));
+		auto *chroma = static_cast<uint16_t *>(cmd->update_image(*img, {}, { 640, 360, 1 }, 640, 360, { VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 }));
 
-	for (uint32_t i = 0; i < 1280 * 720; i++)
-		luma[i] = 0x70;
-	for (uint32_t i = 0; i < 640 * 360; i++)
-		chroma[i] = 0x8090;
+		for (uint32_t i = 0; i < 1280 * 720; i++)
+			luma[i] = 0x70;
+		for (uint32_t i = 0; i < 640 * 360; i++)
+			chroma[i] = 0x8090;
 
-	device.submit(cmd);
+		device.submit(cmd);
+	}
+
 	return img;
 }
 
@@ -161,6 +166,49 @@ static void send_granite_image_to_encoder(Device &device, Image &granite_image, 
 	ASSERT_THAT(vr == VK_SUCCESS);
 }
 
+static void decode_image(pyrowave_image pyro_image,
+                         pyrowave_sync_object pyro_sync, uint64_t release_value,
+                         pyrowave_decoder decoder)
+{
+	// Discard the image.
+	pyrowave_gpu_external_reference acquire_ref = { pyro_image, VK_QUEUE_FAMILY_IGNORED };
+	pyrowave_gpu_external_reference release_ref = { pyro_image, VK_QUEUE_FAMILY_EXTERNAL };
+
+	pyrowave_gpu_sync_operation acquire = {};
+	pyrowave_gpu_sync_operation release = {};
+	pyrowave_gpu_buffers buffers = {};
+
+	acquire.num_images = 1;
+	acquire.images = &acquire_ref;
+
+	release.num_images = 1;
+	release.images = &release_ref;
+	release.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync);
+	release.sync.value = release_value;
+
+	CHECKED(pyrowave_image_get_image_view(pyro_image,
+		VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_USAGE_STORAGE_BIT, &buffers.planes[0]));
+	CHECKED(pyrowave_image_get_image_view(pyro_image,
+		VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_USAGE_STORAGE_BIT, &buffers.planes[1]));
+	CHECKED(pyrowave_image_get_image_view(pyro_image,
+		VK_IMAGE_ASPECT_PLANE_2_BIT, VK_IMAGE_USAGE_STORAGE_BIT, &buffers.planes[2]));
+
+	CHECKED(pyrowave_decoder_decode_gpu_buffer(decoder, &acquire, &release, &buffers));
+}
+
+static void send_payload_to_decoder(pyrowave_encoder encoder, pyrowave_decoder decoder)
+{
+	size_t num_packets;
+	CHECKED(pyrowave_encoder_compute_num_packets(encoder, 100000, &num_packets));
+	ASSERT_THAT(num_packets == 1);
+
+	pyrowave_packet packet;
+	std::unique_ptr<uint8_t[]> bitstream(new uint8_t[100000]);
+	CHECKED(pyrowave_encoder_packetize(encoder, &packet, 100000, &num_packets, bitstream.get(), 100000));
+	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.get() + packet.offset, packet.size));
+	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
+}
+
 // Most basic interop.
 static void test_opaque_interop()
 {
@@ -181,8 +229,15 @@ static void test_opaque_interop()
 	ASSERT_THAT(timeline_sem);
 	pyrowave_sync_object imported_timeline = create_sync_object_from_timeline(pyro_device, *timeline_sem);
 
-	auto exportable_image = create_exportable_test_image(device, ExternalHandle::get_opaque_memory_handle_type());
-	pyrowave_image imported_image = create_imported_image(pyro_device, *exportable_image);
+	auto exportable_nv12_image = create_exportable_test_image(
+		device, ExternalHandle::get_opaque_memory_handle_type(),
+		VK_FORMAT_G8_B8R8_2PLANE_420_UNORM);
+	auto exportable_yuv420p_image = create_exportable_test_image(
+		device, ExternalHandle::get_opaque_memory_handle_type(),
+		VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM);
+
+	pyrowave_image imported_nv12_image = create_imported_image(pyro_device, *exportable_nv12_image);
+	pyrowave_image imported_yuv420p_image = create_imported_image(pyro_device, *exportable_yuv420p_image);
 
 	pyrowave_encoder_create_info encoder_info = {};
 	encoder_info.device = pyro_device;
@@ -192,7 +247,7 @@ static void test_opaque_interop()
 	pyrowave_encoder encoder;
 	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
 
-	send_granite_image_to_encoder(device, *exportable_image, imported_image,
+	send_granite_image_to_encoder(device, *exportable_nv12_image, imported_nv12_image,
 	                              *timeline_sem, 1,
 	                              imported_timeline, 2,
 	                              encoder);
@@ -205,8 +260,12 @@ static void test_opaque_interop()
 	pyrowave_decoder decoder;
 	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
 
+	send_payload_to_decoder(encoder, decoder);
+	decode_image(imported_yuv420p_image, imported_timeline, 3, decoder);
+
 	pyrowave_sync_object_destroy(imported_timeline);
-	pyrowave_image_destroy(imported_image);
+	pyrowave_image_destroy(imported_nv12_image);
+	pyrowave_image_destroy(imported_yuv420p_image);
 	pyrowave_encoder_destroy(encoder);
 	pyrowave_decoder_destroy(decoder);
 	pyrowave_device_destroy(pyro_device);
