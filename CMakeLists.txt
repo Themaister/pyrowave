@@ -107,7 +107,7 @@ add_executable(pyrowave-c-test pyrowave_c_test.cpp)
 target_link_libraries(pyrowave-c-test PRIVATE pyrowave-shared granite-volk-headers)
 target_compile_options(pyrowave-c-test PRIVATE ${PYROWAVE_CXX_FLAGS})
 
-add_executable(pyrowave-c-interop-test pyrowave_c_interop_test.cpp)
+add_executable(pyrowave-c-interop-test pyrowave_c_interop_test.cpp com_ptr.hpp)
 target_link_libraries(pyrowave-c-interop-test PRIVATE pyrowave-shared granite-vulkan)
 target_compile_options(pyrowave-c-interop-test PRIVATE ${PYROWAVE_CXX_FLAGS})
 
@@ -116,7 +116,11 @@ set(PYROWAVE_API_VERSION_MINOR 1)
 set(PYROWAVE_API_VERSION_PATCH 0)
 set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 
-# DLL_NAME_WITH_SOVERSION requires CMake 3.27+.
+# DLL_NAME_WITH_SOVERSION requires CMake 3.27+. SteamRT doesn't have CMake 3.27 yet though.
+if (WIN32 AND (CMAKE_VERSION VERSION_LESS "3.27"))
+    message(FATAL_ERROR "CMake build on Windows expects version 3.27 at minimum.")
+endif()
+
 set_target_properties(pyrowave-shared
         PROPERTIES VERSION ${PYROWAVE_API_VERSION}
         SOVERSION ${PYROWAVE_API_VERSION_MAJOR}
@@ -150,6 +154,6 @@ endif()
 if (WIN32)
     target_sources(pyrowave-shared PRIVATE pyrowave-shared.def)
     set_target_properties(pyrowave-shared PROPERTIES PREFIX "lib")
-    target_link_libraries(pyrowave-c-interop-test PRIVATE d3d11 d3d12)
+    target_link_libraries(pyrowave-c-interop-test PRIVATE d3d11 d3d12 dxgi)
 endif()
 
