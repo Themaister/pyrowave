@@ -316,7 +316,7 @@ pyrowave_result pyrowave_image_create(const pyrowave_image_create_info *info, py
 		VkFormatProperties3 format_properties = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
 		device.get_format_properties(image_create_info.format, &format_properties);
 
-		if (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_VIDEO_ENCODE_INPUT_BIT_KHR)
+		if (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_2_VIDEO_ENCODE_INPUT_BIT_KHR)
 		{
 			// NVIDIA workaround. For planar formats, the D3D side assumes video compatible layouts.
 			image_create_info.usage |= VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;

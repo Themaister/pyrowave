@@ -449,7 +449,7 @@ static VkFormat convert_dxgi_format(DXGI_FORMAT format)
 	return VK_FORMAT_UNDEFINED;
 }
 
-static pyrowave_image create_pyrowave_image_from_d3d12(pyrowave_device pyro_device, ID3D12Device *device, ID3D12Resource *resource)
+static pyrowave_image create_pyrowave_image_from_d3d12(pyrowave_device pyro_device, ID3D12Device *device, ID3D12Resource *resource, bool storage)
 {
 	HANDLE shared_handle;
 	CHECK_HRESULT(device->CreateSharedHandle(resource, nullptr, GENERIC_ALL, nullptr, &shared_handle));
@@ -461,10 +461,13 @@ static pyrowave_image create_pyrowave_image_from_d3d12(pyrowave_device pyro_devi
 	image_create_info.extent = { uint32_t(desc.Width), desc.Height, 1u };
 	image_create_info.mipLevels = desc.MipLevels;
 	// MUTABLE is needed since we will take plane views. Extended usage since the base planar format doesn't support STORAGE.
-	image_create_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+	image_create_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
 	// The usage flags don't matter that much.
-	image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-		VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	if (storage)
+		image_create_info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+
 	image_create_info.format = convert_dxgi_format(desc.Format);
 	image_create_info.samples = static_cast<VkSampleCountFlagBits>(desc.SampleDesc.Count);
 	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -602,14 +605,159 @@ static void validate_d3d12_image(ID3D12Resource *readback, int width, int height
 	readback->Unmap(0, nullptr);
 }
 
-static void test_d3d12_interop()
+static void test_nv12_interop()
 {
+	// NV12 layout on NVIDIA is bizarre and requires us to hack around it when we import it in Vulkan.
+	// Smoke-test for debugging any interop issues.
+	ComPtr<ID3D12Device> device;
+	ComPtr<ID3D12CommandQueue> queue;
+	ComPtr<ID3D12Fence> fence;
+	ComPtr<ID3D12GraphicsCommandList> list;
+	ComPtr<ID3D12CommandAllocator> allocator;
+	uint64_t timeline = 0;
+
+	CHECK_HRESULT(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, device.ppv()));
+	CHECK_HRESULT(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator, allocator.ppv()));
+	CHECK_HRESULT(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), nullptr, IID_ID3D12GraphicsCommandList, list.ppv()));
+	// Base API create command list starts a new command list, which we usually need to close right away ...
+	CHECK_HRESULT(list->Close());
+	D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+	CHECK_HRESULT(device->CreateCommandQueue(&queue_desc, IID_ID3D12CommandQueue, queue.ppv()));
+
+	CHECK_HRESULT(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_ID3D12Fence, fence.ppv()));
+
+	LUID luid = device->GetAdapterLuid();
+	static_assert(sizeof(luid) == sizeof(pyrowave_luid), "LUID struct size does not match.");
+
+	Context context;
+	Device dev;
+
+	ASSERT_THAT(Context::init_loader(nullptr));
+	context.set_num_thread_indices(1);
+	context.set_system_handles({});
+
+	// Just enable video extensions so that we can use video image usage, but don't bother creating queues for it, etc.
+	ASSERT_THAT(context.init_instance(nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT));
+	uint32_t count;
+	ASSERT_THAT(vkEnumeratePhysicalDevices(context.get_instance(), &count, nullptr) == VK_SUCCESS);
+	std::vector<VkPhysicalDevice> gpus(count);
+	ASSERT_THAT(vkEnumeratePhysicalDevices(context.get_instance(), &count, gpus.data()) == VK_SUCCESS);
+
+	VkPhysicalDevice selected_gpu = VK_NULL_HANDLE;
+
+	for (auto &gpu : gpus)
 	{
-		ComPtr<ID3D12Debug> debug;
-		if (SUCCEEDED(D3D12GetDebugInterface(IID_ID3D12Debug, debug.ppv())))
-			debug->EnableDebugLayer();
+		VkPhysicalDeviceProperties props = {};
+		vkGetPhysicalDeviceProperties(gpu, &props);
+		// Is this even possible these days?
+		if (props.apiVersion < VK_API_VERSION_1_2)
+			continue;
+
+		VkPhysicalDeviceIDProperties ids = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
+		VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ids };
+		vkGetPhysicalDeviceProperties2(gpu, &props2);
+
+		if (!ids.deviceLUIDValid)
+			continue;
+		if (memcmp(&luid, ids.deviceLUID, VK_LUID_SIZE) != 0)
+			continue;
+
+		ASSERT_THAT(context.init_device(gpu, VK_NULL_HANDLE, nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT));
+		selected_gpu = gpu;
 	}
 
+	ASSERT_THAT(selected_gpu);
+	dev.set_context(context);
+
+	// NV Windows is quite broken here and no matter what we do,
+	// it will only work for very specific resource sizes it seems, even with the video usage hacks ...
+	constexpr uint32_t Width = 1024;
+	constexpr uint32_t Height = 1024;
+
+	D3D12_RESOURCE_DESC resource_desc = {};
+	resource_desc.Width = Width;
+	resource_desc.Height = Height;
+	resource_desc.DepthOrArraySize = 1;
+	resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	resource_desc.SampleDesc.Count = 1;
+	resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	resource_desc.MipLevels = 1;
+
+	D3D12_HEAP_PROPERTIES heap_props = {};
+	heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+	ComPtr<ID3D12Resource> nv12;
+	resource_desc.Format = DXGI_FORMAT_NV12;
+	CHECK_HRESULT(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_SHARED, &resource_desc,
+		D3D12_RESOURCE_STATE_COMMON, nullptr, IID_ID3D12Resource, nv12.ppv()));
+
+	// Upload frame to NV12 image async.
+	list->Reset(allocator.get(), nullptr);
+	ComPtr<ID3D12Resource> staging_buffers[2]; // Verify that sync works somewhat so defer destroy these.
+	upload_mirror_image(device.get(), list.get(), nv12.get(), 0, staging_buffers[0], 5, 3, 0, 0);
+	upload_mirror_image(device.get(), list.get(), nv12.get(), 1, staging_buffers[1], 3, 1, 5, 7);
+	list->Close();
+
+	ID3D12CommandList *lists[] = { list.get() };
+	queue->ExecuteCommandLists(1, lists);
+	queue->Signal(fence.get(), ++timeline);
+	fence->SetEventOnCompletion(timeline, nullptr);
+
+	allocator->Reset();
+	list->Reset(allocator.get(), nullptr);
+	ComPtr<ID3D12Resource> readback_buffer;
+	UINT64 row_pitch = {};
+	readback_buffer = readback_image(device.get(), list.get(), nv12.get(), 1, &row_pitch);
+	list->Close();
+	queue->ExecuteCommandLists(1, lists);
+	queue->Signal(fence.get(), ++timeline);
+	fence->SetEventOnCompletion(timeline, nullptr);
+
+	auto img_info = ImageCreateInfo::immutable_2d_image(Width, Height, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM);
+	img_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_VIDEO_ENCODE_SRC_BIT_KHR;
+	img_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT | VK_IMAGE_CREATE_VIDEO_PROFILE_INDEPENDENT_BIT_KHR;
+	img_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+	img_info.misc = IMAGE_MISC_EXTERNAL_MEMORY_BIT | IMAGE_MISC_NO_DEFAULT_VIEWS_BIT;
+	CHECK_HRESULT(device->CreateSharedHandle(nv12.get(), nullptr, GENERIC_ALL, nullptr, &img_info.external.handle));
+	img_info.external.memory_handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+	auto img = dev.create_image(img_info);
+	ASSERT_THAT(img);
+
+	BufferCreateInfo bufinfo = {};
+	bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	bufinfo.domain = BufferDomain::CachedHost;
+	bufinfo.size = Width * Height / 2;
+	auto buffer = dev.create_buffer(bufinfo);
+
+	auto cmd = dev.request_command_buffer();
+	cmd->acquire_image_barrier(*img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+	cmd->copy_image_to_buffer(*buffer, *img, 0, {}, { Width / 2, Height / 2, 1 }, Width / 2, Height / 2, { VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 });
+	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+	Fence sync;
+	dev.submit(cmd, &sync);
+	sync->wait();
+
+	uint8_t *d3d12_ptr;
+	CHECK_HRESULT(readback_buffer->Map(0, nullptr, (void **)&d3d12_ptr));
+
+	const auto *ptr = static_cast<uint8_t *>(dev.map_host_buffer(*buffer, MEMORY_ACCESS_READ_BIT));
+
+	for (uint32_t y = 0; y < Height / 2; y++)
+	{
+		for (uint32_t x = 0; x < Width / 2; x++)
+		{
+			uint32_t pix = y * Width / 2 + x;
+			ASSERT_THAT(ptr[2 * pix + 0] == d3d12_ptr[y * row_pitch + 2 * x + 0]);
+			ASSERT_THAT(ptr[2 * pix + 1] == d3d12_ptr[y * row_pitch + 2 * x + 1]);
+		}
+	}
+
+	readback_buffer->Unmap(0, nullptr);
+}
+
+static void test_d3d12_interop()
+{
 	ComPtr<ID3D12Device> device;
 	ComPtr<ID3D12CommandQueue> queue;
 	ComPtr<ID3D12Fence> fence;
@@ -636,9 +784,13 @@ static void test_d3d12_interop()
 	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
 		reinterpret_cast<pyrowave_luid *>(&luid), &pyro_device));
 
+	// NV Windows is quite broken here and no matter what we do, it will only work for very specific resource sizes it seems ...
+	constexpr uint32_t Width = 1024;
+	constexpr uint32_t Height = 1024;
+
 	D3D12_RESOURCE_DESC resource_desc = {};
-	resource_desc.Width = 1280;
-	resource_desc.Height = 720;
+	resource_desc.Width = Width;
+	resource_desc.Height = Height;
 	resource_desc.DepthOrArraySize = 1;
 	resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	resource_desc.SampleDesc.Count = 1;
@@ -666,10 +818,10 @@ static void test_d3d12_interop()
 			D3D12_RESOURCE_STATE_COMMON, nullptr, IID_ID3D12Resource, yuv420p[plane].ppv()));
 	}
 
-	pyrowave_image pyro_nv12 = create_pyrowave_image_from_d3d12(pyro_device, device.get(), nv12.get());
+	pyrowave_image pyro_nv12 = create_pyrowave_image_from_d3d12(pyro_device, device.get(), nv12.get(), false);
 	pyrowave_image pyro_yuv420p[3] = {};
 	for (int plane = 0; plane < 3; plane++)
-		pyro_yuv420p[plane] = create_pyrowave_image_from_d3d12(pyro_device, device.get(), yuv420p[plane].get());
+		pyro_yuv420p[plane] = create_pyrowave_image_from_d3d12(pyro_device, device.get(), yuv420p[plane].get(), true);
 
 	HANDLE fence_handle;
 	CHECK_HRESULT(device->CreateSharedHandle(fence.get(), nullptr, GENERIC_ALL, nullptr, &fence_handle));
@@ -677,15 +829,15 @@ static void test_d3d12_interop()
 
 	pyrowave_encoder_create_info encoder_info = {};
 	encoder_info.device = pyro_device;
-	encoder_info.width = 1280;
-	encoder_info.height = 720;
+	encoder_info.width = Width;
+	encoder_info.height = Height;
 	pyrowave_encoder encoder;
 	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
 
 	pyrowave_decoder_create_info decoder_info = {};
 	decoder_info.device = pyro_device;
-	decoder_info.width = 1280;
-	decoder_info.height = 720;
+	decoder_info.width = Width;
+	decoder_info.height = Height;
 	pyrowave_decoder decoder;
 	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
 
@@ -718,7 +870,6 @@ static void test_d3d12_interop()
 	UINT64 row_pitch[3] = {};
 	for (int plane = 0; plane < 3; plane++)
 		readback_buffers[plane] = readback_image(device.get(), list.get(), yuv420p[plane].get(), 0, &row_pitch[plane]);
-	//readback_buffers[1] = readback_image(device.get(), list.get(), nv12.get(), 1, &row_pitch[1]);
 	CHECK_HRESULT(list->Close());
 	queue->ExecuteCommandLists(1, lists);
 
@@ -727,9 +878,9 @@ static void test_d3d12_interop()
 	// null event handle blocks on CPU directly.
 	fence->SetEventOnCompletion(timeline, nullptr);
 
-	validate_d3d12_image(readback_buffers[0].get(), 1280, 720, row_pitch[0], 5, 3);
-	validate_d3d12_image(readback_buffers[1].get(), 640, 360, row_pitch[1], 3, 1);
-	validate_d3d12_image(readback_buffers[2].get(), 640, 360, row_pitch[2], 5, 7);
+	validate_d3d12_image(readback_buffers[0].get(), Width, Height, row_pitch[0], 5, 3);
+	validate_d3d12_image(readback_buffers[1].get(), Width / 2, Height / 2, row_pitch[1], 3, 1);
+	validate_d3d12_image(readback_buffers[2].get(), Width / 2, Height / 2, row_pitch[2], 5, 7);
 
 	pyrowave_image_destroy(pyro_nv12);
 	for (auto &img : pyro_yuv420p)
@@ -744,6 +895,15 @@ static void test_d3d12_interop()
 int main()
 {
 #ifdef _WIN32
+	{
+		ComPtr<ID3D12Debug> debug;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_ID3D12Debug, debug.ppv())))
+			debug->EnableDebugLayer();
+	}
+
+	printf("Running NV12 interop test ...\n");
+	test_nv12_interop();
+
 	printf("Running D3D12 interop test ...\n");
 	test_d3d12_interop();
 #endif
