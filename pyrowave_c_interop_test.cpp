@@ -104,6 +104,15 @@ static pyrowave_image create_imported_image(pyrowave_device device, Image &img)
 	return imported_image;
 }
 
+static uint8_t mirror(int v)
+{
+	v &= 511;
+	if (v > 255)
+		v = 511 - v;
+	ASSERT_THAT(v >= 0 && v <= 255);
+	return uint8_t(v);
+}
+
 static ImageHandle create_exportable_test_image(Device &device, VkExternalMemoryHandleTypeFlagBits handle_type,
                                                 VkFormat format)
 {
@@ -125,16 +134,21 @@ static ImageHandle create_exportable_test_image(Device &device, VkExternalMemory
 		auto *luma = static_cast<uint8_t *>(cmd->update_image(*img, {}, { 1280, 720, 1 }, 1280, 720, { VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0, 1 }));
 		auto *chroma = static_cast<uint16_t *>(cmd->update_image(*img, {}, { 640, 360, 1 }, 640, 360, { VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0, 1 }));
 
-		for (uint32_t i = 0; i < 1280 * 720; i++)
-			luma[i] = 0x70;
-		for (uint32_t i = 0; i < 640 * 360; i++)
-			chroma[i] = 0x8090;
+		for (int y = 0; y < 720; y++)
+			for (int x = 0; x < 1280; x++)
+				luma[y * 1280 + x] = mirror(y * 3 + 5 * x);
+
+		for (int y = 0; y < 360; y++)
+			for (int x = 0; x < 640; x++)
+				chroma[y * 640 + x] = (uint16_t(mirror(y * 7 + 5 * x)) << 8) | mirror(y + 3 * x);
 
 		device.submit(cmd);
 	}
 
 	return img;
 }
+
+static constexpr size_t BitstreamSize = 1000000;
 
 static void send_granite_image_to_encoder(Device &device, Image &granite_image, pyrowave_image pyro_image,
                                           SemaphoreHolder &granite_sync, pyrowave_sync_object pyro_sync_acquire, uint64_t acquire_value,
@@ -157,7 +171,7 @@ static void send_granite_image_to_encoder(Device &device, Image &granite_image, 
 	pyrowave_gpu_sync_operation acquire = {};
 	pyrowave_gpu_sync_operation release = {};
 	pyrowave_gpu_buffers buffers = {};
-	pyrowave_rate_control rate_control = { 100000 };
+	pyrowave_rate_control rate_control = { BitstreamSize };
 
 	CHECKED(pyrowave_image_get_image_view(pyro_image,
 		VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[0]));
@@ -220,23 +234,29 @@ static void decode_image(pyrowave_image pyro_image,
 static void send_payload_to_decoder(pyrowave_encoder encoder, pyrowave_decoder decoder)
 {
 	size_t num_packets;
-	CHECKED(pyrowave_encoder_compute_num_packets(encoder, 100000, &num_packets));
+	CHECKED(pyrowave_encoder_compute_num_packets(encoder, BitstreamSize, &num_packets));
 	ASSERT_THAT(num_packets == 1);
 
 	pyrowave_packet packet;
-	std::unique_ptr<uint8_t[]> bitstream(new uint8_t[100000]);
-	CHECKED(pyrowave_encoder_packetize(encoder, &packet, 100000, &num_packets, bitstream.get(), 100000));
+	std::unique_ptr<uint8_t[]> bitstream(new uint8_t[BitstreamSize]);
+	CHECKED(pyrowave_encoder_packetize(encoder, &packet, BitstreamSize, &num_packets, bitstream.get(), BitstreamSize));
 	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.get() + packet.offset, packet.size));
 	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
 }
 
-static void validate_buffer(Device &device, Buffer &buf, uint8_t reference)
+static void validate_mirror_buffer(Device &device, Buffer &buf, int width, int height, int dx, int dy)
 {
 	auto *ptr = static_cast<const uint8_t *>(device.map_host_buffer(buf, MEMORY_ACCESS_READ_BIT));
-	for (size_t i = 0, n = buf.get_create_info().size; i < n; i++)
+
+	for (int y = 0; y < height; y++)
 	{
-		int d = std::abs(int(reference) - int(ptr[i]));
-		ASSERT_THAT(d <= 1);
+		for (int x = 0; x < width; x++)
+		{
+			int reference = mirror(x * dx + y * dy);
+			int value = ptr[y * width + x];
+			int d = std::abs(reference - value);
+			ASSERT_THAT(d <= 1);
+		}
 	}
 }
 
@@ -276,9 +296,9 @@ static void validate_granite_image(Device &device, Image &img, SemaphoreHolder &
 	device.submit(cmd, &fence);
 	fence->wait();
 
-	validate_buffer(device, *y, 0x70);
-	validate_buffer(device, *cb, 0x90);
-	validate_buffer(device, *cr, 0x80);
+	validate_mirror_buffer(device, *y, 1280, 720, 5, 3);
+	validate_mirror_buffer(device, *cb, 640, 360, 3, 1);
+	validate_mirror_buffer(device, *cr, 640, 360, 5, 7);
 }
 
 // Most basic interop scenario, OPAQUE_FD for everything.

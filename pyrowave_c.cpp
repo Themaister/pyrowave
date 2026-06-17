@@ -409,33 +409,18 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 	case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
 		view->view_format = VK_FORMAT_R8_UNORM;
 		view->aspect = aspect;
-		if (aspect != VK_IMAGE_ASPECT_PLANE_0_BIT && img.get_format() == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM)
-		{
-			view->width /= 2;
-			view->height /= 2;
-		}
 		break;
 
 	case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
 	case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
 		view->view_format = VK_FORMAT_R10X6_UNORM_PACK16;
 		view->aspect = aspect;
-		if (aspect != VK_IMAGE_ASPECT_PLANE_0_BIT && img.get_format() == VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16)
-		{
-			view->width /= 2;
-			view->height /= 2;
-		}
 		break;
 
 	case VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM:
 	case VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM:
 		view->view_format = VK_FORMAT_R16_UNORM;
 		view->aspect = aspect;
-		if (aspect != VK_IMAGE_ASPECT_PLANE_0_BIT && img.get_format() == VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM)
-		{
-			view->width /= 2;
-			view->height /= 2;
-		}
 		break;
 
 	// 2-plane YCbCr
@@ -454,11 +439,6 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->swizzle = VK_COMPONENT_SWIZZLE_R;
 			view->view_format = VK_FORMAT_R8G8_UNORM;
 			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-			if (img.get_format() == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
-			{
-				view->width /= 2;
-				view->height /= 2;
-			}
 			break;
 
 		case VK_IMAGE_ASPECT_PLANE_2_BIT:
@@ -467,11 +447,6 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->swizzle = VK_COMPONENT_SWIZZLE_G;
 			view->view_format = VK_FORMAT_R8G8_UNORM;
 			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-			if (img.get_format() == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
-			{
-				view->width /= 2;
-				view->height /= 2;
-			}
 			break;
 
 		default:
@@ -494,11 +469,6 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->swizzle = VK_COMPONENT_SWIZZLE_R;
 			view->view_format = VK_FORMAT_R10X6G10X6_UNORM_2PACK16;
 			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-			if (img.get_format() == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16)
-			{
-				view->width /= 2;
-				view->height /= 2;
-			}
 			break;
 
 		case VK_IMAGE_ASPECT_PLANE_2_BIT:
@@ -507,11 +477,6 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->swizzle = VK_COMPONENT_SWIZZLE_G;
 			view->view_format = VK_FORMAT_R10X6G10X6_UNORM_2PACK16;
 			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-			if (img.get_format() == VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16)
-			{
-				view->width /= 2;
-				view->height /= 2;
-			}
 			break;
 
 		default:
@@ -534,11 +499,6 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->swizzle = VK_COMPONENT_SWIZZLE_R;
 			view->view_format = VK_FORMAT_R16G16_UNORM;
 			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-			if (img.get_format() == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM)
-			{
-				view->width /= 2;
-				view->height /= 2;
-			}
 			break;
 
 		case VK_IMAGE_ASPECT_PLANE_2_BIT:
@@ -547,11 +507,6 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->swizzle = VK_COMPONENT_SWIZZLE_G;
 			view->view_format = VK_FORMAT_R16G16_UNORM;
 			view->aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-			if (img.get_format() == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM)
-			{
-				view->width /= 2;
-				view->height /= 2;
-			}
 			break;
 
 		default:

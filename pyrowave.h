@@ -165,6 +165,8 @@ typedef struct pyrowave_image_view
 {
 	VkImage image;
 	// Extent of mip0. Must be consistent with width/height used to create the encoder.
+	// If the view is taking chroma of a planar image,
+	// the width/height is for the luma plane, i.e. the base image.
 	uint32_t width;
 	uint32_t height;
 	// Base format used to create the image.
