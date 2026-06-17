@@ -86,7 +86,7 @@ static pyrowave_sync_object create_sync_object_from_binary(pyrowave_device devic
 	return imported_timeline;
 }
 
-static pyrowave_image create_imported_image(pyrowave_device device, Image &img)
+static pyrowave_image create_imported_image(pyrowave_device pyro_device, Device &device, Image &img)
 {
 	auto exported = img.export_handle();
 	ASSERT_THAT(exported);
@@ -105,10 +105,85 @@ static pyrowave_image create_imported_image(pyrowave_device device, Image &img)
 	image_create_info.extent = { img.get_width(), img.get_height(), img.get_depth() };
 
 	pyrowave_image_create_info image_info = {};
-	image_info.device = device;
+	image_info.device = pyro_device;
 	image_info.handle_type = exported.memory_handle_type;
 	image_info.external_handle = (pyrowave_os_handle)exported.handle;
 	image_info.image_create_info = &image_create_info;
+
+	VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info =
+		{ VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT };
+	VkImageFormatListCreateInfo format_list =
+		{ VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO };
+	std::vector<VkSubresourceLayout> drm_plane_layouts;
+
+	if (exported.memory_handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
+	{
+		image_create_info.pNext = &modifier_info;
+		image_create_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+
+		if (img.get_format() == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+		{
+			static const VkFormat nv12_formats[] = { VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM };
+			format_list.viewFormatCount = 2;
+			format_list.pViewFormats = nv12_formats;
+		}
+		else if (img.get_format() == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM)
+		{
+			static const VkFormat yuv420p_formats[] = { VK_FORMAT_R8_UNORM };
+			format_list.viewFormatCount = 1;
+			format_list.pViewFormats = yuv420p_formats;
+		}
+		else
+		{
+			format_list.viewFormatCount = 1;
+			format_list.pViewFormats = &image_create_info.format;
+		}
+
+		// Query which DRM modifier the implementation picked for us and pass it along.
+		VkImageDrmFormatModifierPropertiesEXT props = { VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT };
+		device.get_device_table().vkGetImageDrmFormatModifierPropertiesEXT(
+			device.get_device(), img.get_image(), &props);
+		modifier_info.drmFormatModifier = props.drmFormatModifier;
+
+		VkDrmFormatModifierPropertiesListEXT modifiers = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+		VkFormatProperties3 props3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3, &modifiers };
+		device.get_format_properties(image_create_info.format, &props3);
+		std::vector<VkDrmFormatModifierPropertiesEXT> modifiers_props(modifiers.drmFormatModifierCount);
+		modifiers.pDrmFormatModifierProperties = modifiers_props.data();
+		device.get_format_properties(image_create_info.format, &props3);
+
+		auto itr = std::find_if(modifiers_props.begin(), modifiers_props.end(), [&](const VkDrmFormatModifierPropertiesEXT &prop)
+		{
+			return prop.drmFormatModifier == props.drmFormatModifier;
+		});
+
+		ASSERT_THAT(itr != modifiers_props.end());
+		uint32_t num_memory_planes = itr->drmFormatModifierPlaneCount;
+		drm_plane_layouts.resize(num_memory_planes);
+
+		// DRM format modifiers have per-plane stride information that needs to be queried ...
+		for (uint32_t i = 0; i < num_memory_planes; i++)
+		{
+			VkImageSubresource subresource = {
+				VkImageAspectFlags(VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT << i),
+				0, 0
+			};
+
+			device.get_device_table().vkGetImageSubresourceLayout(device.get_device(),
+				img.get_image(), &subresource, &drm_plane_layouts[i]);
+
+			// On import, these must be cleared to be valid.
+			drm_plane_layouts[i].size = 0;
+			drm_plane_layouts[i].depthPitch = 0;
+			if (image_create_info.arrayLayers == 1)
+				drm_plane_layouts[i].arrayPitch = 0;
+		}
+
+		// Pass it along to import.
+		modifier_info.drmFormatModifierPlaneCount = num_memory_planes;
+		modifier_info.pPlaneLayouts = drm_plane_layouts.data();
+		modifier_info.pNext = &format_list;
+	}
 
 	pyrowave_image imported_image;
 	CHECKED(pyrowave_image_create(&image_info, &imported_image));
@@ -136,6 +211,72 @@ static ImageHandle create_exportable_test_image(Device &device, VkExternalMemory
 	info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
 	info.external.memory_handle_type = handle_type;
 
+	// DRM format modifiers require explicit cast list when MUTABLE is used.
+	VkImageFormatListCreateInfo format_list = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO };
+
+	VkImageDrmFormatModifierListCreateInfoEXT allowed_modifiers_info =
+		{ VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT };
+	std::vector<uint64_t> allowed_modifiers;
+
+	if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
+	{
+		// Query all modifiers potentially supported by a format.
+		VkDrmFormatModifierPropertiesListEXT modifiers = { VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+		VkFormatProperties3 props3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3, &modifiers };
+		device.get_format_properties(info.format, &props3);
+		std::vector<VkDrmFormatModifierPropertiesEXT> modifiers_props(modifiers.drmFormatModifierCount);
+		modifiers.pDrmFormatModifierProperties = modifiers_props.data();
+		device.get_format_properties(info.format, &props3);
+
+		if (format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+		{
+			static const VkFormat nv12_formats[] = { VK_FORMAT_R8_UNORM, VK_FORMAT_R8G8_UNORM };
+			format_list.viewFormatCount = 2;
+			format_list.pViewFormats = nv12_formats;
+		}
+		else if (format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM)
+		{
+			static const VkFormat yuv420p_formats[] = { VK_FORMAT_R8_UNORM };
+			format_list.viewFormatCount = 1;
+			format_list.pViewFormats = yuv420p_formats;
+		}
+		else
+		{
+			format_list.viewFormatCount = 1;
+			format_list.pViewFormats = &format;
+		}
+
+		for (uint32_t i = 0; i < modifiers.drmFormatModifierCount; i++)
+		{
+			auto &mod = modifiers.pDrmFormatModifierProperties[i];
+			VkPhysicalDeviceImageDrmFormatModifierInfoEXT modinfo =
+				{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT, &format_list };
+
+			modinfo.drmFormatModifier = mod.drmFormatModifier;
+
+			VkImageFormatProperties2 props2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+
+			// For DRM modifiers, it's a bit involved.
+			// Step 1 is to query which modifiers are supported for a given image.
+			if (device.get_image_format_properties(info.format, info.type,
+				VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+				info.usage, info.flags, &modinfo, &props2) &&
+				info.width <= props2.imageFormatProperties.maxExtent.width &&
+				info.height <= props2.imageFormatProperties.maxExtent.height)
+			{
+				allowed_modifiers.push_back(mod.drmFormatModifier);
+			}
+		}
+
+		ASSERT_THAT(!allowed_modifiers.empty());
+
+		// Implementation picks one of the allowed modifiers.
+		allowed_modifiers_info.drmFormatModifierCount = allowed_modifiers.size();
+		allowed_modifiers_info.pDrmFormatModifiers = allowed_modifiers.data();
+		allowed_modifiers_info.pNext = &format_list;
+		info.pnext = &allowed_modifiers_info;
+	}
+
 	auto img = device.create_image(info);
 
 	if (format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
@@ -160,57 +301,6 @@ static ImageHandle create_exportable_test_image(Device &device, VkExternalMemory
 }
 
 static constexpr size_t BitstreamSize = 1000000;
-
-static void send_granite_image_to_encoder(Device &device, Image &granite_image, pyrowave_image pyro_image,
-                                          SemaphoreHolder &granite_sync, pyrowave_sync_object pyro_sync_acquire, uint64_t acquire_value,
-                                          pyrowave_sync_object pyro_sync_release, uint64_t release_value,
-                                          pyrowave_encoder encoder)
-{
-	auto cmd = device.request_command_buffer();
-	cmd->release_image_barrier(granite_image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-		VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_EXTERNAL);
-	device.submit(cmd);
-
-	if (acquire_value)
-	{
-		auto signal = device.request_timeline_semaphore_as_binary(granite_sync, acquire_value);
-		device.submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
-	}
-
-	pyrowave_gpu_external_reference ref = { pyro_image, VK_QUEUE_FAMILY_EXTERNAL };
-
-	pyrowave_gpu_sync_operation acquire = {};
-	pyrowave_gpu_sync_operation release = {};
-	pyrowave_gpu_buffers buffers = {};
-	pyrowave_rate_control rate_control = { BitstreamSize };
-
-	CHECKED(pyrowave_image_get_image_view(pyro_image,
-		VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[0]));
-	CHECKED(pyrowave_image_get_image_view(pyro_image,
-		VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[1]));
-	CHECKED(pyrowave_image_get_image_view(pyro_image,
-		VK_IMAGE_ASPECT_PLANE_2_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[2]));
-
-	acquire.num_images = 1;
-	acquire.images = &ref;
-	acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync_acquire);
-	acquire.sync.value = acquire_value;
-
-	release.num_images = 1;
-	release.images = &ref;
-	release.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync_release);
-	release.sync.value = release_value;
-
-	CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
-
-	// Verify that the release value was signaled properly in finite time.
-	VkSemaphoreWaitInfo wait_info = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
-	wait_info.pSemaphores = &granite_sync.get_semaphore();
-	wait_info.semaphoreCount = 1;
-	wait_info.pValues = &release_value;
-	auto vr = device.get_device_table().vkWaitSemaphores(device.get_device(), &wait_info, 1000000000);
-	ASSERT_THAT(vr == VK_SUCCESS);
-}
 
 static void send_image_to_encoder(pyrowave_image pyro_image,
 		pyrowave_sync_object pyro_sync_acquire, uint64_t acquire_value,
@@ -242,6 +332,34 @@ static void send_image_to_encoder(pyrowave_image pyro_image,
 	release.sync.value = release_value;
 
 	CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
+}
+
+static void send_granite_image_to_encoder(Device &device, Image &granite_image, pyrowave_image pyro_image,
+                                          SemaphoreHolder &granite_sync, pyrowave_sync_object pyro_sync_acquire, uint64_t acquire_value,
+                                          pyrowave_sync_object pyro_sync_release, uint64_t release_value,
+                                          pyrowave_encoder encoder)
+{
+	auto cmd = device.request_command_buffer();
+	cmd->release_image_barrier(granite_image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+		VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_QUEUE_FAMILY_EXTERNAL);
+	device.submit(cmd);
+
+	if (acquire_value)
+	{
+		auto signal = device.request_timeline_semaphore_as_binary(granite_sync, acquire_value);
+		device.submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
+	}
+
+	send_image_to_encoder(pyro_image, pyro_sync_acquire, acquire_value,
+		pyro_sync_release, release_value, encoder);
+
+	// Verify that the release value was signaled properly in finite time.
+	VkSemaphoreWaitInfo wait_info = { VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO };
+	wait_info.pSemaphores = &granite_sync.get_semaphore();
+	wait_info.semaphoreCount = 1;
+	wait_info.pValues = &release_value;
+	auto vr = device.get_device_table().vkWaitSemaphores(device.get_device(), &wait_info, 1000000000);
+	ASSERT_THAT(vr == VK_SUCCESS);
 }
 
 static void decode_image(pyrowave_image *pyro_image, bool multiplane,
@@ -383,8 +501,8 @@ static void test_opaque_interop()
 		device, ExternalHandle::get_opaque_memory_handle_type(),
 		VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM);
 
-	pyrowave_image imported_nv12_image = create_imported_image(pyro_device, *exportable_nv12_image);
-	pyrowave_image imported_yuv420p_image = create_imported_image(pyro_device, *exportable_yuv420p_image);
+	pyrowave_image imported_nv12_image = create_imported_image(pyro_device, device, *exportable_nv12_image);
+	pyrowave_image imported_yuv420p_image = create_imported_image(pyro_device, device, *exportable_yuv420p_image);
 
 	auto binary_sem = device.request_semaphore_external(
 		VK_SEMAPHORE_TYPE_BINARY, ExternalHandle::get_opaque_semaphore_handle_type());
@@ -426,6 +544,76 @@ static void test_opaque_interop()
 	send_payload_to_decoder(encoder, decoder);
 	decode_image(&imported_yuv420p_image, true, imported_timeline, 4, decoder);
 	validate_granite_image(device, *exportable_yuv420p_image, *timeline_sem, 4);
+
+	pyrowave_sync_object_destroy(imported_timeline);
+	pyrowave_image_destroy(imported_nv12_image);
+	pyrowave_image_destroy(imported_yuv420p_image);
+	pyrowave_encoder_destroy(encoder);
+	pyrowave_decoder_destroy(decoder);
+	pyrowave_device_destroy(pyro_device);
+}
+
+static void test_drm_modifier_interop()
+{
+	ASSERT_THAT(Context::init_loader(nullptr));
+
+	Context ctx;
+	ctx.set_num_thread_indices(1);
+	ctx.set_system_handles({});
+	ASSERT_THAT(ctx.init_instance_and_device(nullptr, 0, nullptr, 0));
+
+	Device device;
+	device.set_context(ctx);
+
+	if (!device.get_device_features().supports_drm_modifiers)
+	{
+		printf("Device does not support DRM modifiers, skipping test ...\n");
+		return;
+	}
+
+	pyrowave_device pyro_device = create_device_from_granite(device);
+
+	auto timeline_sem = device.request_semaphore_external(VK_SEMAPHORE_TYPE_TIMELINE,
+		ExternalHandle::get_opaque_semaphore_handle_type());
+	ASSERT_THAT(timeline_sem);
+	pyrowave_sync_object imported_timeline = create_sync_object_from_timeline(pyro_device, *timeline_sem);
+
+	auto exportable_nv12_image = create_exportable_test_image(
+		device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		VK_FORMAT_G8_B8R8_2PLANE_420_UNORM);
+	auto exportable_yuv420p_image = create_exportable_test_image(
+		device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM);
+
+	pyrowave_image imported_nv12_image = create_imported_image(pyro_device, device, *exportable_nv12_image);
+	pyrowave_image imported_yuv420p_image = create_imported_image(pyro_device, device, *exportable_yuv420p_image);
+
+	pyrowave_encoder_create_info encoder_info = {};
+	encoder_info.device = pyro_device;
+	encoder_info.width = 1280;
+	encoder_info.height = 720;
+	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+	pyrowave_encoder encoder;
+	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
+
+	// Test the two ways we can send a sync payload, binary + temporary or persistent timeline.
+	// Verify it doesn't explode.
+	send_granite_image_to_encoder(device, *exportable_nv12_image, imported_nv12_image,
+	                              *timeline_sem, imported_timeline, 1,
+	                              imported_timeline, 2,
+	                              encoder);
+
+	pyrowave_decoder_create_info decoder_info = {};
+	decoder_info.device = pyro_device;
+	decoder_info.width = 1280;
+	decoder_info.height = 720;
+	decoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+	pyrowave_decoder decoder;
+	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
+
+	send_payload_to_decoder(encoder, decoder);
+	decode_image(&imported_yuv420p_image, true, imported_timeline, 3, decoder);
+	validate_granite_image(device, *exportable_yuv420p_image, *timeline_sem, 3);
 
 	pyrowave_sync_object_destroy(imported_timeline);
 	pyrowave_image_destroy(imported_nv12_image);
@@ -910,6 +1098,9 @@ int main()
 
 	printf("Running opaque Vulkan <-> Vulkan interop test ...\n");
 	test_opaque_interop();
+
+	printf("Running drm modifier Vulkan <-> Vulkan interop test ...\n");
+	test_drm_modifier_interop();
 
 	printf("Interop tests passed!\n");
 }
