@@ -2,7 +2,7 @@
 
 # Only checks out what is necessary to build standalone.
 #
-GRANITE_COMMIT=cf524fff52b0f0d090672451cc07f5c5df8d6b05
+GRANITE_COMMIT=51757b73d85bc8b632eb00d7f52645f534eef580
 
 if [ -d Granite ]; then
 	cd Granite
