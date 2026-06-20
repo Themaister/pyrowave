@@ -98,6 +98,8 @@ elseif (${PROJECT_IS_TOP_LEVEL} AND (NOT TARGET granite-vulkan))
     add_subdirectory(Granite EXCLUDE_FROM_ALL)
 endif()
 
+target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
+
 if (${PROJECT_IS_TOP_LEVEL})
     add_library(pyrowave-shared SHARED pyrowave_c.cpp pyrowave.h)
     target_link_libraries(pyrowave-shared PRIVATE pyrowave granite-vulkan)
@@ -140,8 +142,6 @@ if (${PROJECT_IS_TOP_LEVEL})
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/pkg-config/pyrowave-shared.pc.in
             ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc @ONLY)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
-
-    target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
 
     if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
         target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)
