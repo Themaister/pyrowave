@@ -475,7 +475,7 @@ static void validate_granite_image(Device &device, Image &img, SemaphoreHolder &
 }
 
 // Most basic interop scenario, OPAQUE_FD for everything.
-static void test_opaque_interop()
+static void test_opaque_interop(bool win32_kmt)
 {
 	ASSERT_THAT(Context::init_loader(nullptr));
 
@@ -489,23 +489,28 @@ static void test_opaque_interop()
 
 	pyrowave_device pyro_device = create_device_from_granite(device);
 
-	auto timeline_sem = device.request_semaphore_external(VK_SEMAPHORE_TYPE_TIMELINE,
-		ExternalHandle::get_opaque_semaphore_handle_type());
+	auto semaphore_type = win32_kmt ?
+		VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT : ExternalHandle::get_opaque_semaphore_handle_type();
+	auto memory_type = win32_kmt ?
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT : ExternalHandle::get_opaque_memory_handle_type();
+
+	// No impl seems to support OPAQUE_KMT timelines.
+	auto timeline_sem = device.request_semaphore_external(VK_SEMAPHORE_TYPE_TIMELINE, ExternalHandle::get_opaque_semaphore_handle_type());
+
 	ASSERT_THAT(timeline_sem);
 	pyrowave_sync_object imported_timeline = create_sync_object_from_timeline(pyro_device, *timeline_sem);
 
 	auto exportable_nv12_image = create_exportable_test_image(
-		device, ExternalHandle::get_opaque_memory_handle_type(),
+		device, memory_type,
 		VK_FORMAT_G8_B8R8_2PLANE_420_UNORM);
 	auto exportable_yuv420p_image = create_exportable_test_image(
-		device, ExternalHandle::get_opaque_memory_handle_type(),
+		device, memory_type,
 		VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM);
 
 	pyrowave_image imported_nv12_image = create_imported_image(pyro_device, device, *exportable_nv12_image);
 	pyrowave_image imported_yuv420p_image = create_imported_image(pyro_device, device, *exportable_yuv420p_image);
 
-	auto binary_sem = device.request_semaphore_external(
-		VK_SEMAPHORE_TYPE_BINARY, ExternalHandle::get_opaque_semaphore_handle_type());
+	auto binary_sem = device.request_semaphore_external(VK_SEMAPHORE_TYPE_BINARY, semaphore_type);
 	ASSERT_THAT(binary_sem);
 	device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary_sem.get());
 	pyrowave_sync_object imported_binary = create_sync_object_from_binary(pyro_device, *binary_sem);
@@ -1097,7 +1102,12 @@ int main()
 #endif
 
 	printf("Running opaque Vulkan <-> Vulkan interop test ...\n");
-	test_opaque_interop();
+	test_opaque_interop(false);
+
+#ifdef _WIN32
+	printf("Running opaque Vulkan <-> Vulkan interop test (KMT handles) ...\n");
+	test_opaque_interop(true);
+#endif
 
 	printf("Running drm modifier Vulkan <-> Vulkan interop test ...\n");
 	test_drm_modifier_interop();
