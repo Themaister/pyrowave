@@ -156,6 +156,8 @@ if (${PROJECT_IS_TOP_LEVEL})
         target_sources(pyrowave-shared PRIVATE pyrowave-shared.def)
         set_target_properties(pyrowave-shared PROPERTIES PREFIX "lib")
         target_link_libraries(pyrowave-c-interop-test PRIVATE d3d11 d3d12 dxgi)
+    else()
+        target_link_options(pyrowave-shared PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T)
     endif()
 endif()
 
