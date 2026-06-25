@@ -257,8 +257,10 @@ pyrowave_sync_object_export_handle(pyrowave_sync_object sync, pyrowave_os_handle
 
 void pyrowave_sync_object_destroy(pyrowave_sync_object sync)
 {
+	auto *device = sync->device;
 	Util::set_thread_logging_interface(&null_logger);
 	delete sync;
+	device->next_frame_context();
 }
 
 struct pyrowave_image_opaque
@@ -523,8 +525,12 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 
 void pyrowave_image_destroy(pyrowave_image image)
 {
+	auto *device = image->device;
 	Util::set_thread_logging_interface(&null_logger);
 	delete image;
+
+	// Pump frame contexts through to make sure memory gets freed eventually.
+	device->next_frame_context();
 }
 
 struct pyrowave_encoder_opaque
@@ -882,8 +888,10 @@ pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, s
 
 void pyrowave_encoder_destroy(pyrowave_encoder encoder)
 {
+	auto *device = encoder->device;
 	Util::set_thread_logging_interface(&null_logger);
 	delete encoder;
+	device->next_frame_context();
 }
 
 struct pyrowave_decoder_opaque
@@ -1178,7 +1186,9 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 
 void pyrowave_decoder_destroy(pyrowave_decoder decoder)
 {
+	auto *device = decoder->device;
 	Util::set_thread_logging_interface(&null_logger);
 	delete decoder;
+	device->next_frame_context();
 }
 }
