@@ -14,7 +14,7 @@
 #include <vector>
 
 #ifdef _WIN32
-#include <d3d11.h>
+#include <d3d11_4.h>
 #include <d3d12.h>
 #include <dxgi.h>
 #include "com_ptr.hpp"
@@ -350,6 +350,13 @@ static void send_granite_image_to_encoder(Device &device, Image &granite_image, 
 		device.submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
 	}
 
+#ifdef VULKAN_DEBUG
+	// VVL doesn't quite understand it when a different device increments the shared timeline.
+	// It thinks that we're doing a rewind, but that's not the case.
+	// Only observed on Windows for some reason, but avoids a dumb false positive.
+	device.wait_idle();
+#endif
+
 	send_image_to_encoder(pyro_image, pyro_sync_acquire, acquire_value,
 		pyro_sync_release, release_value, encoder);
 
@@ -678,6 +685,51 @@ static pyrowave_image create_pyrowave_image_from_d3d12(pyrowave_device pyro_devi
 	return image;
 }
 
+static pyrowave_image create_pyrowave_image_from_d3d11(pyrowave_device pyro_device, ID3D11Device *device, ID3D11Texture2D *resource, bool kmt)
+{
+	HANDLE shared_handle;
+	ComPtr<IDXGIResource1> res;
+	resource->QueryInterface(IID_IDXGIResource1, res.ppv());
+
+	if (kmt)
+	{
+		CHECK_HRESULT(res->GetSharedHandle(&shared_handle));
+	}
+	else
+	{
+		CHECK_HRESULT(res->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
+	}
+
+	D3D11_TEXTURE2D_DESC desc;
+	resource->GetDesc(&desc);
+
+	VkImageCreateInfo image_create_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	image_create_info.imageType = VK_IMAGE_TYPE_2D;
+	image_create_info.extent = { uint32_t(desc.Width), desc.Height, 1u };
+	image_create_info.mipLevels = desc.MipLevels;
+	// MUTABLE is needed since we will take plane views. Extended usage since the base planar format doesn't support STORAGE.
+	image_create_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+
+	// The usage flags don't matter that much.
+	image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+	image_create_info.format = convert_dxgi_format(desc.Format);
+	image_create_info.samples = static_cast<VkSampleCountFlagBits>(desc.SampleDesc.Count);
+	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	image_create_info.arrayLayers = desc.ArraySize;
+
+	pyrowave_image_create_info info = {};
+	info.device = pyro_device;
+	info.external_handle = (pyrowave_os_handle)shared_handle;
+	info.handle_type = kmt ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT : VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	info.image_create_info = &image_create_info;
+
+	pyrowave_image image;
+	CHECKED(pyrowave_image_create(&info, &image));
+	return image;
+}
+
 static pyrowave_sync_object create_pyrowave_sync_from_d3d12_handle(pyrowave_device device, HANDLE handle)
 {
 	pyrowave_sync_object_create_info info = {};
@@ -949,6 +1001,189 @@ static void test_nv12_interop()
 	readback_buffer->Unmap(0, nullptr);
 }
 
+static void test_d3d12_interop_allocation_stress(ID3D12Device *device, pyrowave_device pyro_device)
+{
+	D3D12_RESOURCE_DESC resource_desc = {};
+	resource_desc.Width = 4096;
+	resource_desc.Height = 4096;
+	resource_desc.DepthOrArraySize = 1;
+	resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	resource_desc.SampleDesc.Count = 1;
+	resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	resource_desc.MipLevels = 1;
+
+	D3D12_HEAP_PROPERTIES heap_props = {};
+	heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+	for (int i = 0; i < 10000; i++)
+	{
+		ComPtr<ID3D12Resource> img;
+		resource_desc.Format = DXGI_FORMAT_R8_UNORM;
+		CHECK_HRESULT(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_SHARED, &resource_desc,
+				D3D12_RESOURCE_STATE_COMMON, nullptr, IID_ID3D12Resource, img.ppv()));
+		pyrowave_image pyro_img = create_pyrowave_image_from_d3d12(pyro_device, device, img.get(), true);
+
+		// Check to see if destruction order matters.
+
+		if (i % 2)
+		{
+			pyrowave_image_destroy(pyro_img);
+			img = {};
+		}
+		else
+		{
+			img = {};
+			pyrowave_image_destroy(pyro_img);
+		}
+	}
+
+	for (int i = 0; i < 10000; i++)
+	{
+		// Sharing D3D12 to Vulkan is well supported. Other way around, not so much.
+		ComPtr<ID3D12Fence> fence;
+		CHECK_HRESULT(device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_ID3D12Fence, fence.ppv()));
+		HANDLE fence_handle;
+		CHECK_HRESULT(device->CreateSharedHandle(fence.get(), nullptr, GENERIC_ALL, nullptr, &fence_handle));
+
+		pyrowave_sync_object pyro_sync = create_pyrowave_sync_from_d3d12_handle(pyro_device, fence_handle);
+
+		// Check to see if destruction order matters.
+		if (i % 2)
+		{
+			pyrowave_sync_object_destroy(pyro_sync);
+			fence = {};
+		}
+		else
+		{
+			fence = {};
+			pyrowave_sync_object_destroy(pyro_sync);
+		}
+	}
+}
+
+static void test_d3d11_interop()
+{
+	uint32_t index = 0;
+	if (const char *env = getenv("ADAPTER"))
+		index = strtoul(env, nullptr, 0);
+
+	bool validate = false;
+	if (const char *env = getenv("VALIDATE"))
+		validate = strtoul(env, nullptr, 0) != 0;
+
+	ComPtr<IDXGIFactory1> factory;
+	ComPtr<IDXGIAdapter> adapter;
+	ComPtr<ID3D11Device> device;
+	ComPtr<ID3D11Device5> device5;
+	ComPtr<ID3D11DeviceContext> context;
+	ComPtr<ID3D11Fence> fence;
+	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
+	CHECK_HRESULT(factory->EnumAdapters(index, (IDXGIAdapter **)adapter.ppv()));
+
+	HRESULT hr = D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, validate ? D3D11_CREATE_DEVICE_DEBUG : 0, nullptr, 0, D3D11_SDK_VERSION,
+		(ID3D11Device **)device.ppv(), nullptr, (ID3D11DeviceContext **)context.ppv());
+	ASSERT_THAT(SUCCEEDED(hr));
+	CHECK_HRESULT(device->QueryInterface(IID_ID3D11Device5, device5.ppv()));
+
+	DXGI_ADAPTER_DESC adapter_desc;
+	CHECK_HRESULT(adapter->GetDesc(&adapter_desc));
+	LUID luid = adapter_desc.AdapterLuid;
+	static_assert(sizeof(luid) == sizeof(pyrowave_luid), "LUID struct size does not match.");
+
+	pyrowave_device pyro_device;
+	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
+		reinterpret_cast<pyrowave_luid *>(&luid), &pyro_device));
+
+	for (int i = 0; i < 10000; i++)
+	{
+		ComPtr<ID3D11Texture2D> tex;
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Format = DXGI_FORMAT_R8_UNORM;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+		desc.SampleDesc.Count = 1;
+		desc.Width = 4096;
+		desc.Height = 4096;
+		desc.ArraySize = 1;
+		desc.MipLevels = 1;
+		CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex.ppv()));
+
+		pyrowave_image pyro_img = create_pyrowave_image_from_d3d11(pyro_device, device.get(), tex.get(), false);
+
+		// Check to see if destruction order matters.
+		if (i % 2)
+		{
+			pyrowave_image_destroy(pyro_img);
+			fence = {};
+		}
+		else
+		{
+			fence = {};
+			pyrowave_image_destroy(pyro_img);
+		}
+
+		context->Flush();
+	}
+
+	for (int i = 0; i < 10000; i++)
+	{
+		ComPtr<ID3D11Texture2D> tex;
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Format = DXGI_FORMAT_R8_UNORM;
+		desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+		desc.SampleDesc.Count = 1;
+		desc.Width = 4096;
+		desc.Height = 4096;
+		desc.ArraySize = 1;
+		desc.MipLevels = 1;
+		CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex.ppv()));
+
+		pyrowave_image pyro_img = create_pyrowave_image_from_d3d11(pyro_device, device.get(), tex.get(), true);
+
+		// Check to see if destruction order matters.
+		if (i % 2)
+		{
+			pyrowave_image_destroy(pyro_img);
+			fence = {};
+		}
+		else
+		{
+			fence = {};
+			pyrowave_image_destroy(pyro_img);
+		}
+
+		context->Flush();
+	}
+
+	for (int i = 0; i < 10000; i++)
+	{
+		// Sharing D3D11 to Vulkan is well supported. Other way around, not so much.
+		ComPtr<ID3D11Fence> fence;
+		CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, fence.ppv()));
+		HANDLE fence_handle;
+		CHECK_HRESULT(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fence_handle));
+
+		pyrowave_sync_object pyro_sync = create_pyrowave_sync_from_d3d12_handle(pyro_device, fence_handle);
+
+		// Check to see if destruction order matters.
+		if (i % 2)
+		{
+			pyrowave_sync_object_destroy(pyro_sync);
+			fence = {};
+		}
+		else
+		{
+			fence = {};
+			pyrowave_sync_object_destroy(pyro_sync);
+		}
+	}
+
+	pyrowave_device_destroy(pyro_device);
+}
+
 static void test_d3d12_interop()
 {
 	ComPtr<ID3D12Device> device;
@@ -958,7 +1193,16 @@ static void test_d3d12_interop()
 	ComPtr<ID3D12CommandAllocator> allocator;
 	uint64_t timeline = 0;
 
-	CHECK_HRESULT(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, device.ppv()));
+	uint32_t index = 0;
+	if (const char *env = getenv("ADAPTER"))
+		index = strtoul(env, nullptr, 0);
+
+	ComPtr<IDXGIFactory1> factory;
+	ComPtr<IDXGIAdapter> adapter;
+	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
+	CHECK_HRESULT(factory->EnumAdapters(index, (IDXGIAdapter **)adapter.ppv()));
+
+	CHECK_HRESULT(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, device.ppv()));
 	CHECK_HRESULT(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator, allocator.ppv()));
 	CHECK_HRESULT(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), nullptr, IID_ID3D12GraphicsCommandList, list.ppv()));
 	// Base API create command list starts a new command list, which we usually need to close right away ...
@@ -976,6 +1220,8 @@ static void test_d3d12_interop()
 	pyrowave_device pyro_device;
 	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
 		reinterpret_cast<pyrowave_luid *>(&luid), &pyro_device));
+
+	test_d3d12_interop_allocation_stress(device.get(), pyro_device);
 
 	// NV Windows is quite broken here and no matter what we do, it will only work for very specific resource sizes it seems ...
 	constexpr uint32_t Width = 1024;
@@ -1088,6 +1334,7 @@ static void test_d3d12_interop()
 int main()
 {
 #ifdef _WIN32
+	if (getenv("VALIDATE"))
 	{
 		ComPtr<ID3D12Debug> debug;
 		if (SUCCEEDED(D3D12GetDebugInterface(IID_ID3D12Debug, debug.ppv())))
@@ -1096,6 +1343,9 @@ int main()
 
 	printf("Running NV12 interop test ...\n");
 	test_nv12_interop();
+
+	printf("Running D3D11 interop test ...\n");
+	test_d3d11_interop();
 
 	printf("Running D3D12 interop test ...\n");
 	test_d3d12_interop();
