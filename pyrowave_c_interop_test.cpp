@@ -1363,10 +1363,15 @@ static void test_d3d11_cross_process_encode()
 	ComPtr<ID3D11DeviceContext> context;
 	ComPtr<ID3D11DeviceContext4> context4;
 	ComPtr<ID3D11Fence> fence;
-	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
-	CHECK_HRESULT(factory->EnumAdapters(0, (IDXGIAdapter **)adapter.ppv()));
 
-	HRESULT hr = D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION,
+	uint32_t index = 0;
+	if (const char *env = getenv("ADAPTER"))
+		index = strtoul(env, nullptr, 0);
+
+	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
+	CHECK_HRESULT(factory->EnumAdapters(index, (IDXGIAdapter **)adapter.ppv()));
+
+	HRESULT hr = D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
 		(ID3D11Device **)device.ppv(), nullptr, (ID3D11DeviceContext **)context.ppv());
 	ASSERT_THAT(SUCCEEDED(hr));
 	CHECK_HRESULT(device->QueryInterface(IID_ID3D11Device5, device5.ppv()));
@@ -1388,24 +1393,6 @@ static void test_d3d11_cross_process_encode()
 	shared->height = 720;
 
 	CHECK_HRESULT(context->QueryInterface(IID_ID3D11DeviceContext4, context4.ppv()));
-
-	ComPtr<ID3D11Texture2D> tex[3];
-	D3D11_TEXTURE2D_DESC desc = {};
-	desc.Format = DXGI_FORMAT_R8_UNORM;
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-	desc.SampleDesc.Count = 1;
-	desc.Width = 1280;
-	desc.Height = 720;
-	desc.ArraySize = 1;
-	desc.MipLevels = 1;
-	desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-	CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[0].ppv()));
-	desc.Width /= 2;
-	desc.Height /= 2;
-	CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[1].ppv()));
-	CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[2].ppv()));
 
 	char self[4096];
 	DWORD ret = GetModuleFileNameA(GetModuleHandle(nullptr), self, sizeof(self));
@@ -1432,22 +1419,6 @@ static void test_d3d11_cross_process_encode()
 	HANDLE semaphore = CreateSemaphoreA(nullptr, 0, 1, "PyroFlingSemDummy");
 	ASSERT_THAT(semaphore);
 
-	for (int i = 0; i < 3; i++)
-	{
-		ComPtr<IDXGIResource1> res;
-		tex[i]->QueryInterface(IID_IDXGIResource1, res.ppv());
-		HANDLE shared_handle;
-		CHECK_HRESULT(res->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
-		ASSERT_THAT(DuplicateHandle(GetCurrentProcess(), shared_handle, pi.hProcess,
-			&shared->texture[i], GENERIC_ALL, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS));
-	}
-
-	CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, fence.ppv()));
-	HANDLE shared_handle;
-	CHECK_HRESULT(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
-	ASSERT_THAT(DuplicateHandle(GetCurrentProcess(), shared_handle, pi.hProcess,
-		&shared->fence, GENERIC_ALL, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS));
-
 	shared->wait_value = 1;
 	shared->signal_value = 2;
 
@@ -1469,9 +1440,47 @@ static void test_d3d11_cross_process_encode()
 	std::unique_ptr<uint8_t[]> decoded_cb_data(new uint8_t[640 * 360]);
 	std::unique_ptr<uint8_t[]> decoded_cr_data(new uint8_t[640 * 360]);
 
+	ComPtr<ID3D11Texture2D> tex[3];
+
 	// Do encoding work.
 	for (int i = 0; i < 1000; i++)
 	{
+		// Create new handles every so often.
+		if (i % 10 == 0)
+		{
+			D3D11_TEXTURE2D_DESC desc = {};
+			desc.Format = DXGI_FORMAT_R8_UNORM;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			desc.Usage = D3D11_USAGE_DEFAULT;
+			desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+			desc.SampleDesc.Count = 1;
+			desc.Width = 1280;
+			desc.Height = 720;
+			desc.ArraySize = 1;
+			desc.MipLevels = 1;
+			CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[0].ppv()));
+			desc.Width /= 2;
+			desc.Height /= 2;
+			CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[1].ppv()));
+			CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[2].ppv()));
+
+			for (int j = 0; j < 3; j++)
+			{
+				ComPtr<IDXGIResource1> res;
+				tex[j]->QueryInterface(IID_IDXGIResource1, res.ppv());
+				HANDLE shared_handle;
+				CHECK_HRESULT(res->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
+				ASSERT_THAT(DuplicateHandle(GetCurrentProcess(), shared_handle, pi.hProcess,
+					&shared->texture[j], GENERIC_ALL, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS));
+			}
+
+			CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, fence.ppv()));
+			HANDLE shared_handle;
+			CHECK_HRESULT(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
+			ASSERT_THAT(DuplicateHandle(GetCurrentProcess(), shared_handle, pi.hProcess,
+				&shared->fence, GENERIC_ALL, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS));
+		}
+
 		D3D11_BOX box = {};
 		box.right = 1280;
 		box.bottom = 720;
@@ -1569,37 +1578,7 @@ static void test_child_interop()
 	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
 	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
 
-	pyrowave_sync_object_create_info sync_info = {};
-	sync_info.device = device;
-	sync_info.external_handle = (pyrowave_os_handle)shared->fence;
-	sync_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
-	sync_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
-	CHECKED(pyrowave_sync_object_create(&sync_info, &sync));
-
 	pyrowave_gpu_external_reference refs[3];
-
-	for (int i = 0; i < 3; i++)
-	{
-		VkImageCreateInfo image_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-		image_info.extent = { shared->width / (i ? 2 : 1), shared->height / (i ? 2 : 1), 1};
-		image_info.format = VK_FORMAT_R8_UNORM;
-		image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-		image_info.samples = VK_SAMPLE_COUNT_1_BIT;
-		image_info.arrayLayers = 1;
-		image_info.mipLevels = 1;
-		image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-		image_info.imageType = VK_IMAGE_TYPE_2D;
-
-		pyrowave_image_create_info info = {};
-		info.device = device;
-		info.handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
-		info.external_handle = (pyrowave_os_handle)shared->texture[i];
-		info.image_create_info = &image_info;
-
-		CHECKED(pyrowave_image_create(&info, &img[i]));
-
-		refs[i] = { img[i], VK_QUEUE_FAMILY_EXTERNAL };
-	}
 
 	// Encode loop
 
@@ -1608,6 +1587,51 @@ static void test_child_interop()
 		WaitForSingleObject(semaphore, INFINITE);
 		if (shared->dead)
 			break;
+
+		for (int i = 0; i < 3; i++)
+		{
+			if (shared->texture[i])
+			{
+				if (img[i])
+					pyrowave_image_destroy(img[i]);
+
+				VkImageCreateInfo image_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+				image_info.extent = { shared->width / (i ? 2 : 1), shared->height / (i ? 2 : 1), 1 };
+				image_info.format = VK_FORMAT_R8_UNORM;
+				image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+				image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+				image_info.arrayLayers = 1;
+				image_info.mipLevels = 1;
+				image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+				image_info.imageType = VK_IMAGE_TYPE_2D;
+
+				pyrowave_image_create_info info = {};
+				info.device = device;
+				info.handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+				info.external_handle = (pyrowave_os_handle)shared->texture[i];
+				info.image_create_info = &image_info;
+
+				CHECKED(pyrowave_image_create(&info, &img[i]));
+
+				refs[i] = { img[i], VK_QUEUE_FAMILY_EXTERNAL };
+				shared->texture[i] = nullptr;
+			}
+		}
+
+		if (shared->fence)
+		{
+			if (sync)
+				pyrowave_sync_object_destroy(sync);
+
+			pyrowave_sync_object_create_info sync_info = {};
+			sync_info.device = device;
+			sync_info.external_handle = (pyrowave_os_handle)shared->fence;
+			sync_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+			sync_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
+			CHECKED(pyrowave_sync_object_create(&sync_info, &sync));
+
+			shared->fence = nullptr;
+		}
 
 		pyrowave_rate_control rate_control = { sizeof(shared->payload) };
 		pyrowave_gpu_buffers buffers = {};
