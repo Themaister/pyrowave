@@ -1076,6 +1076,7 @@ static void test_d3d11_interop()
 	ComPtr<ID3D11Device> device;
 	ComPtr<ID3D11Device5> device5;
 	ComPtr<ID3D11DeviceContext> context;
+	ComPtr<ID3D11DeviceContext4> context4;
 	ComPtr<ID3D11Fence> fence;
 	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
 	CHECK_HRESULT(factory->EnumAdapters(index, (IDXGIAdapter **)adapter.ppv()));
@@ -1089,6 +1090,8 @@ static void test_d3d11_interop()
 	CHECK_HRESULT(adapter->GetDesc(&adapter_desc));
 	LUID luid = adapter_desc.AdapterLuid;
 	static_assert(sizeof(luid) == sizeof(pyrowave_luid), "LUID struct size does not match.");
+
+	CHECK_HRESULT(context->QueryInterface(IID_ID3D11DeviceContext4, context4.ppv()));
 
 	pyrowave_device pyro_device;
 	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
@@ -1123,6 +1126,7 @@ static void test_d3d11_interop()
 			pyrowave_image_destroy(pyro_img);
 		}
 
+		// Flushing seems to be load bearing here or GPU memory usage baloons out of control.
 		context->Flush();
 	}
 
@@ -1155,6 +1159,7 @@ static void test_d3d11_interop()
 			pyrowave_image_destroy(pyro_img);
 		}
 
+		// Flushing seems to be load bearing here or GPU memory usage baloons out of control.
 		context->Flush();
 	}
 
@@ -1165,6 +1170,9 @@ static void test_d3d11_interop()
 		CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, fence.ppv()));
 		HANDLE fence_handle;
 		CHECK_HRESULT(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fence_handle));
+
+		context4->Signal(fence.get(), 1);
+		fence = {};
 
 		pyrowave_sync_object pyro_sync = create_pyrowave_sync_from_d3d12_handle(pyro_device, fence_handle);
 
@@ -1179,6 +1187,8 @@ static void test_d3d11_interop()
 			fence = {};
 			pyrowave_sync_object_destroy(pyro_sync);
 		}
+
+		context->Flush();
 	}
 
 	pyrowave_device_destroy(pyro_device);
