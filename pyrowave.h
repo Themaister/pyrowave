@@ -132,6 +132,10 @@ typedef struct pyrowave_sync_object_create_info
 	// - OPAQUE_WIN32_BIT
 	// - OPAQUE_WIN32_KMT_BIT
 	// - D3D12_FENCE_BIT (D3D11_FENCE_BIT is alias of D3D12_FENCE_BIT)
+	// NOTE: When importing NT handles, the implementation will take ownership and close the HANDLE on import.
+	// The semaphore holds a reference to the underlying object.
+	// It may be a good idea to call DuplicateHandle() and hand that over to the implementation instead.
+	// This has been known to workaround some weird bugs in the wild, but the root cause is unknown.
 	VkExternalSemaphoreHandleTypeFlagBits handle_type;
 
 	// Binary or Timeline. For D3D11/D3D12 fence import, this must be TIMELINE.
@@ -201,6 +205,10 @@ typedef struct pyrowave_image_create_info
 	pyrowave_device device;
 
 	// Must be a valid external handle.
+	// NOTE: When importing NT handles, the implementation will take ownership and close the HANDLE on import.
+	// The image holds a reference to the underlying object.
+	// It may be a good idea to call DuplicateHandle() and hand that over to the implementation instead.
+	// This has been known to workaround some weird bugs in the wild, but the root cause is unknown.
 	pyrowave_os_handle external_handle;
 	VkExternalMemoryHandleTypeFlagBits handle_type;
 
