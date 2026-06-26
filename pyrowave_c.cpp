@@ -255,6 +255,40 @@ pyrowave_sync_object_export_handle(pyrowave_sync_object sync, pyrowave_os_handle
 	}
 }
 
+pyrowave_result
+pyrowave_sync_object_cpu_wait(pyrowave_sync_object sync, uint64_t value, uint64_t timeout)
+{
+	if (!sync || sync->semaphore->get_semaphore_type() != VK_SEMAPHORE_TYPE_TIMELINE)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	Util::set_thread_logging_interface(&null_logger);
+	return sync->semaphore->wait_timeline_timeout(value, timeout) ? PYROWAVE_SUCCESS : PYROWAVE_TIMEOUT;
+}
+
+pyrowave_result
+pyrowave_sync_object_cpu_signal(pyrowave_sync_object sync, uint64_t value)
+{
+	if (!sync || sync->semaphore->get_semaphore_type() != VK_SEMAPHORE_TYPE_TIMELINE)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	Util::set_thread_logging_interface(&null_logger);
+	auto &table = sync->device->get_device_table();
+
+	VkSemaphoreSignalInfo signal_info = { VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO };
+	signal_info.semaphore = sync->semaphore->get_semaphore();
+	signal_info.value = value;
+	VkResult vr;
+
+	if (table.vkSignalSemaphore)
+		vr = table.vkSignalSemaphore(sync->device->get_device(), &signal_info);
+	else if (table.vkSignalSemaphoreKHR)
+		vr = table.vkSignalSemaphoreKHR(sync->device->get_device(), &signal_info);
+	else
+		return PYROWAVE_ERROR_GENERIC;
+
+	return vr == VK_SUCCESS ? PYROWAVE_SUCCESS : PYROWAVE_ERROR_GENERIC;
+}
+
 void pyrowave_sync_object_destroy(pyrowave_sync_object sync)
 {
 	auto *device = sync->device;

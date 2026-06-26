@@ -1339,9 +1339,317 @@ static void test_d3d12_interop()
 	pyrowave_encoder_destroy(encoder);
 	pyrowave_device_destroy(pyro_device);
 }
+
+struct SharedBlock
+{
+	HANDLE texture[3];
+	HANDLE fence;
+	HANDLE sem;
+	LUID luid;
+	uint32_t width, height;
+	uint8_t payload[1024 * 1024];
+	uint32_t payload_size;
+	uint64_t wait_value;
+	uint64_t signal_value;
+	bool dead;
+};
+
+static void test_d3d11_cross_process_encode()
+{
+	ComPtr<IDXGIFactory1> factory;
+	ComPtr<IDXGIAdapter> adapter;
+	ComPtr<ID3D11Device> device;
+	ComPtr<ID3D11Device5> device5;
+	ComPtr<ID3D11DeviceContext> context;
+	ComPtr<ID3D11DeviceContext4> context4;
+	ComPtr<ID3D11Fence> fence;
+	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
+	CHECK_HRESULT(factory->EnumAdapters(0, (IDXGIAdapter **)adapter.ppv()));
+
+	HRESULT hr = D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_DEBUG, nullptr, 0, D3D11_SDK_VERSION,
+		(ID3D11Device **)device.ppv(), nullptr, (ID3D11DeviceContext **)context.ppv());
+	ASSERT_THAT(SUCCEEDED(hr));
+	CHECK_HRESULT(device->QueryInterface(IID_ID3D11Device5, device5.ppv()));
+
+	DXGI_ADAPTER_DESC adapter_desc;
+	CHECK_HRESULT(adapter->GetDesc(&adapter_desc));
+	LUID luid = adapter_desc.AdapterLuid;
+	static_assert(sizeof(luid) == sizeof(pyrowave_luid), "LUID struct size does not match.");
+
+	HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedBlock), "PyroFlingTestDummy");
+	ASSERT_THAT(mapping != INVALID_HANDLE_VALUE && mapping != nullptr);
+	auto *shared = static_cast<SharedBlock *>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedBlock)));
+	ASSERT_THAT(shared);
+
+	memset(shared, 0, sizeof(*shared));
+
+	shared->luid = luid;
+	shared->width = 1280;
+	shared->height = 720;
+
+	CHECK_HRESULT(context->QueryInterface(IID_ID3D11DeviceContext4, context4.ppv()));
+
+	ComPtr<ID3D11Texture2D> tex[3];
+	D3D11_TEXTURE2D_DESC desc = {};
+	desc.Format = DXGI_FORMAT_R8_UNORM;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+	desc.SampleDesc.Count = 1;
+	desc.Width = 1280;
+	desc.Height = 720;
+	desc.ArraySize = 1;
+	desc.MipLevels = 1;
+	desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+	CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[0].ppv()));
+	desc.Width /= 2;
+	desc.Height /= 2;
+	CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[1].ppv()));
+	CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex[2].ppv()));
+
+	char self[4096];
+	DWORD ret = GetModuleFileNameA(GetModuleHandle(nullptr), self, sizeof(self));
+	self[ret] = '\0';
+
+	strcat(self, " --child");
+
+	HANDLE job_handle = CreateJobObjectA(nullptr, nullptr);
+	ASSERT_THAT(job_handle);
+
+	// Kill all child processes if the parent dies.
+	JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
+	jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+	ASSERT_THAT(SetInformationJobObject(job_handle, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli)));
+
+	STARTUPINFOA si = {};
+	si.cb = sizeof(STARTUPINFOA);
+	PROCESS_INFORMATION pi;
+	ASSERT_THAT(CreateProcessA(nullptr, self, nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
+		nullptr, nullptr, &si, &pi));
+
+	ASSERT_THAT(AssignProcessToJobObject(job_handle, pi.hProcess));
+
+	HANDLE semaphore = CreateSemaphoreA(nullptr, 0, 1, "PyroFlingSemDummy");
+	ASSERT_THAT(semaphore);
+
+	for (int i = 0; i < 3; i++)
+	{
+		ComPtr<IDXGIResource1> res;
+		tex[i]->QueryInterface(IID_IDXGIResource1, res.ppv());
+		HANDLE shared_handle;
+		CHECK_HRESULT(res->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
+		ASSERT_THAT(DuplicateHandle(GetCurrentProcess(), shared_handle, pi.hProcess,
+			&shared->texture[i], GENERIC_ALL, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS));
+	}
+
+	CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, fence.ppv()));
+	HANDLE shared_handle;
+	CHECK_HRESULT(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
+	ASSERT_THAT(DuplicateHandle(GetCurrentProcess(), shared_handle, pi.hProcess,
+		&shared->fence, GENERIC_ALL, FALSE, DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS));
+
+	shared->wait_value = 1;
+	shared->signal_value = 2;
+
+	ResumeThread(pi.hThread);
+
+	pyrowave_device pyro_device;
+	CHECKED(pyrowave_create_default_device(&pyro_device));
+	pyrowave_decoder decoder;
+	pyrowave_decoder_create_info decoder_info = {};
+	decoder_info.device = pyro_device;
+	decoder_info.width = 1280;
+	decoder_info.height = 720;
+	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
+
+	std::unique_ptr<uint8_t[]> y_data(new uint8_t[1280 * 720]);
+	std::unique_ptr<uint8_t[]> c_data(new uint8_t[640 * 360]);
+
+	std::unique_ptr<uint8_t[]> decoded_y_data(new uint8_t[1280 * 720]);
+	std::unique_ptr<uint8_t[]> decoded_cb_data(new uint8_t[640 * 360]);
+	std::unique_ptr<uint8_t[]> decoded_cr_data(new uint8_t[640 * 360]);
+
+	// Do encoding work.
+	for (int i = 0; i < 1000; i++)
+	{
+		D3D11_BOX box = {};
+		box.right = 1280;
+		box.bottom = 720;
+		box.back = 1;
+		memset(y_data.get(), i & 0xff, 1280 * 720);
+		context->UpdateSubresource(tex[0].get(), 0, &box, y_data.get(), 1280, 1280 * 720);
+		box.right = 640;
+		box.bottom = 360;
+		memset(c_data.get(), (i + 1) & 0xff, 640 * 360);
+		context->UpdateSubresource(tex[1].get(), 0, &box, c_data.get(), 640, 640 * 360);
+		memset(c_data.get(), (i + 2) & 0xff, 640 * 360);
+		context->UpdateSubresource(tex[2].get(), 0, &box, c_data.get(), 640, 640 * 360);
+
+		context4->Signal(fence.get(), shared->wait_value);
+		ASSERT_THAT(ReleaseSemaphore(semaphore, 1, nullptr));
+
+		// Wait until encoder is done.
+		CHECK_HRESULT(fence->SetEventOnCompletion(shared->signal_value, nullptr));
+
+		ASSERT_THAT(shared->payload_size);
+		pyrowave_decoder_clear(decoder);
+		CHECKED(pyrowave_decoder_push_packet(decoder, shared->payload, shared->payload_size));
+		ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
+
+		pyrowave_cpu_buffer cpu_buffers = {};
+		cpu_buffers.data[0] = decoded_y_data.get();
+		cpu_buffers.data[1] = decoded_cb_data.get();
+		cpu_buffers.data[2] = decoded_cr_data.get();
+		cpu_buffers.width = 1280;
+		cpu_buffers.height = 720;
+		cpu_buffers.format = PYROWAVE_CPU_BUFFER_FORMAT_YUV420P;
+		cpu_buffers.plane_size_in_bytes[0] = 1280 * 720;
+		cpu_buffers.plane_size_in_bytes[1] = 640 * 360;
+		cpu_buffers.plane_size_in_bytes[2] = 640 * 360;
+		cpu_buffers.row_stride_in_bytes[0] = 1280;
+		cpu_buffers.row_stride_in_bytes[1] = 640;
+		cpu_buffers.row_stride_in_bytes[2] = 640;
+
+		CHECKED(pyrowave_decoder_decode_cpu_buffer_synchronous(decoder, &cpu_buffers));
+
+		for (int pix = 0; pix < 1280 * 720; pix++)
+			ASSERT_THAT(decoded_y_data[pix] == (i & 0xff));
+
+		for (int pix = 0; pix < 640 * 360; pix++)
+			ASSERT_THAT(decoded_cb_data[pix] == ((i + 1) & 0xff));
+
+		for (int pix = 0; pix < 640 * 360; pix++)
+			ASSERT_THAT(decoded_cr_data[pix] == ((i + 2) & 0xff));
+
+		shared->wait_value += 2;
+		shared->signal_value += 2;
+
+		LOGI("Running cross-process frame %u / 1000 ...\n", i);
+	}
+
+	CloseHandle(pi.hThread);
+
+	shared->dead = true;
+	ASSERT_THAT(ReleaseSemaphore(semaphore, 1, nullptr));
+
+	ASSERT_THAT(WaitForSingleObject(pi.hProcess, INFINITE) == WAIT_OBJECT_0);
+	ASSERT_THAT(!shared->dead);
+	CloseHandle(pi.hProcess);
+	CloseHandle(semaphore);
+	CloseHandle(job_handle);
+
+	pyrowave_decoder_destroy(decoder);
+	pyrowave_device_destroy(pyro_device);
+}
+
+static void test_child_interop()
+{
+	//__debugbreak();
+
+	// Open shared handles.
+	HANDLE semaphore = CreateSemaphoreA(nullptr, 0, 1, "PyroFlingSemDummy");
+	ASSERT_THAT(semaphore);
+
+	HANDLE mapping = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(SharedBlock), "PyroFlingTestDummy");
+	ASSERT_THAT(mapping != INVALID_HANDLE_VALUE && mapping != nullptr);
+	auto *shared = static_cast<SharedBlock *>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedBlock)));
+	ASSERT_THAT(shared);
+
+	pyrowave_device device;
+	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, reinterpret_cast<const pyrowave_luid *>(&shared->luid), &device));
+
+	pyrowave_image img[3] = {};
+	pyrowave_sync_object sync = {};
+	pyrowave_encoder encoder = {};
+
+	pyrowave_encoder_create_info encoder_info = {};
+	encoder_info.device = device;
+	encoder_info.width = shared->width;
+	encoder_info.height = shared->height;
+	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
+
+	pyrowave_sync_object_create_info sync_info = {};
+	sync_info.device = device;
+	sync_info.external_handle = (pyrowave_os_handle)shared->fence;
+	sync_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+	sync_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
+	CHECKED(pyrowave_sync_object_create(&sync_info, &sync));
+
+	pyrowave_gpu_external_reference refs[3];
+
+	for (int i = 0; i < 3; i++)
+	{
+		VkImageCreateInfo image_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		image_info.extent = { shared->width / (i ? 2 : 1), shared->height / (i ? 2 : 1), 1};
+		image_info.format = VK_FORMAT_R8_UNORM;
+		image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+		image_info.arrayLayers = 1;
+		image_info.mipLevels = 1;
+		image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		image_info.imageType = VK_IMAGE_TYPE_2D;
+
+		pyrowave_image_create_info info = {};
+		info.device = device;
+		info.handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+		info.external_handle = (pyrowave_os_handle)shared->texture[i];
+		info.image_create_info = &image_info;
+
+		CHECKED(pyrowave_image_create(&info, &img[i]));
+
+		refs[i] = { img[i], VK_QUEUE_FAMILY_EXTERNAL };
+	}
+
+	// Encode loop
+
+	for (;;)
+	{
+		WaitForSingleObject(semaphore, INFINITE);
+		if (shared->dead)
+			break;
+
+		pyrowave_rate_control rate_control = { sizeof(shared->payload) };
+		pyrowave_gpu_buffers buffers = {};
+		pyrowave_gpu_sync_operation acquire = {};
+		pyrowave_gpu_sync_operation release = {};
+		acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(sync);
+		acquire.sync.value = shared->wait_value;
+
+		acquire.num_images = 3;
+		acquire.images = refs;
+		release.num_images = 3;
+		release.images = refs;
+
+		for (int i = 0; i < 3; i++)
+			CHECKED(pyrowave_image_get_image_view(img[i], VkImageAspectFlagBits(VK_IMAGE_ASPECT_PLANE_0_BIT << i), VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[i]));
+		CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
+
+		pyrowave_packet packet;
+		size_t out_packets = 1;
+		CHECKED(pyrowave_encoder_packetize(encoder, &packet, sizeof(shared->payload), &out_packets, shared->payload, sizeof(shared->payload)));
+		shared->payload_size = packet.size;
+
+		// API sanity check.
+		CHECKED(pyrowave_sync_object_cpu_wait(sync, shared->wait_value, UINT64_MAX));
+
+		// Signal on CPU.
+		CHECKED(pyrowave_sync_object_cpu_signal(sync, shared->signal_value));
+	}
+
+	//__debugbreak();
+
+	shared->dead = false;
+
+	pyrowave_sync_object_destroy(sync);
+	for (auto &i : img)
+		pyrowave_image_destroy(i);
+	pyrowave_encoder_destroy(encoder);
+	pyrowave_device_destroy(device);
+}
 #endif
 
-int main()
+int main(int argc, char **argv)
 {
 #ifdef _WIN32
 	if (getenv("VALIDATE"))
@@ -1350,6 +1658,14 @@ int main()
 		if (SUCCEEDED(D3D12GetDebugInterface(IID_ID3D12Debug, debug.ppv())))
 			debug->EnableDebugLayer();
 	}
+
+	if (argc == 2 && strcmp(argv[1], "--child") == 0)
+	{
+		test_child_interop();
+		return EXIT_SUCCESS;
+	}
+
+	test_d3d11_cross_process_encode();
 
 	printf("Running NV12 interop test ...\n");
 	test_nv12_interop();

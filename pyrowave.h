@@ -43,6 +43,7 @@ typedef void (*pyrowave_message_cb)(void *userdata, const char *msg);
 typedef enum pyrowave_result
 {
 	PYROWAVE_SUCCESS = 0,
+	PYROWAVE_TIMEOUT = 1,
 	PYROWAVE_ERROR_GENERIC = -1,
 	PYROWAVE_ERROR_INVALID_ARGUMENT = -2,
 	PYROWAVE_ERROR_OUT_OF_HOST_MEMORY = -3,
@@ -156,6 +157,13 @@ pyrowave_sync_object_get_semaphore(pyrowave_sync_object sync);
 // but all support importing.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_sync_object_export_handle(pyrowave_sync_object sync, pyrowave_os_handle *handle);
+
+// Timeout interpreted as Vulkan API.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_sync_object_cpu_wait(pyrowave_sync_object sync, uint64_t value, uint64_t timeout);
+
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_sync_object_cpu_signal(pyrowave_sync_object sync, uint64_t value);
 
 PYROWAVE_PUBLIC_API void pyrowave_sync_object_destroy(pyrowave_sync_object sync);
 ////
