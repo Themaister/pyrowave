@@ -134,6 +134,20 @@ typedef struct pyrowave_luid
 } pyrowave_luid;
 
 // Direct API that shares a VkDevice. Avoids needing to use external memory to encode and decode.
+// Encoder expects features:
+// - Basic subgroup support. ARITHMETIC, SHUFFLE, SHUFFLE_RELATIVE, VOTE, BALLOT, CLUSTERED, BASIC (Vulkan 1.1 core).
+// - Subgroup size control (Vulkan 1.3 core).
+// - Subgroup size control enough to force wave16, wave32 or wave64.
+// - shaderInt16
+// - storageBuffer8BitAccess
+// This covers all desktop GPUs and most mobile GPUs.
+// Optional:
+// - shaderFloat16
+// Decoder expects features:
+// - Basic subgroup support. ARITHMETIC, SHUFFLE, SHUFFLE_RELATIVE, VOTE, BALLOT, BASIC (Vulkan 1.1 core).
+// - Subgroup size control (Vulkan 1.3 core).
+// - Anything from wave4 to wave128 goes as long as it supports subgroup size control.
+// Should cover anything remotely relevant.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_create_device(const pyrowave_device_create_info *info, pyrowave_device *device);
 
