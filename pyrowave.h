@@ -419,6 +419,10 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 // If command buffer is set on pyrowave_device, acquire and release must both be NULL.
 // If command buffer is set on pyrowave_device, applications is responsible for submitting that work to GPU
 // and waiting for it before calling pyrowave_encoder_compute_num_packets or pyrowave_encoder_packetize.
+// If command buffer is set, application must ensure synchronization as:
+// - Before, the layouts in buffers must be correct.
+//   Memory must be visible to COMPUTE_SHADER / SHADER_SAMPLED_READ.
+// - After: Application must add execution barrier on COMPUTE_SHADER stage before writing to images.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
                                         const pyrowave_gpu_sync_operation *acquire,
@@ -430,8 +434,6 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
                                         const pyrowave_rate_control *rate_control);
-
-// TODO: Add API to let user provide a VkCommandBuffer to record into.
 
 // Can only be called after a successful encoding operation and result is only valid for that particular frame.
 // Computes the number of network packets required if each packet can consume a provided number of bytes.
@@ -487,6 +489,11 @@ pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_fr
 // See pyrowave_decoder_decode_is_ready() to determine if the final result is known to be complete.
 // acquire and release can be NULL if no sync is required.
 // If command buffer is set on pyrowave_device, acquire and release must both be NULL.
+// If command buffer is set, application must ensure synchronization as:
+// - Before, the layouts in buffers must be correct.
+//   If fragment path, memory must be visible to COLOR_ATTACHMENT_OUTPUT / COLOR_ATTACHMENT_WRITE.
+//   If compute path, memory must be visible to COMPUTE_SHADER / SHADER_STORAGE_WRITE.
+// - After: Application must synchronize against the stages above before it can read or transition away.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
                                    const pyrowave_gpu_sync_operation *acquire,
