@@ -75,7 +75,53 @@ PYROWAVE_PUBLIC_API void pyrowave_get_api_version(uint32_t *major, uint32_t *min
 // Device API.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
 
-// TODO: Add interop where device can be created from existing VkInstance/VkPhysicalDevice/VkDevice.
+typedef struct pyrowave_device_create_queue_info
+{
+	VkQueue queue;
+	uint32_t familyIndex;
+	uint32_t index;
+} pyrowave_device_create_queue_info;
+
+// Locks and unlocks submissions to all VkQueues on the VkDevice which the pyrowave_device as access to
+// (either via vkGetDeviceQueue or queue_info structs).
+typedef void (*pyrowave_queue_lock_cb)(void *userdata);
+
+typedef struct pyrowave_device_create_info
+{
+	// The vkGetInstanceProcAddr entry point for a valid Vulkan loader.
+	PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+
+	// The Vulkan handles used to create the device.
+	VkInstance instance;
+	VkPhysicalDevice physical_device;
+	VkDevice device;
+
+	// The CreateInfos used to create instance and device.
+	// The pointers and all contents inside them must remain valid for the lifetime of the pyrowave_device.
+	// device_create_info needs to supply valid queue create infos as well as
+	// extensions and pNext needs to contain PDF2 struct.
+	// Instance create infos needs valid extensions as well as a compatible pApplicationInfo w.r.t apiVersion.
+	// apiVersion should be at least Vulkan 1.3.
+	const VkInstanceCreateInfo *instance_create_info;
+	const VkDeviceCreateInfo *device_create_info;
+
+	// Rather than calling vkGetDeviceQueue to get queues,
+	// implementation will look for a valid queue here first.
+	// This allows passing only graphics queue #2 for example.
+	// These queues should only be used for spurious uploads as needed.
+	pyrowave_device_create_queue_info *queue_info;
+	uint32_t queue_info_count;
+
+	// Misc callbacks. Can be NULL. If device was created with VK_KHR_implicitly_synchronized_queued, locking
+	// callbacks are not needed.
+	// pyrowave device will only submit queue commands inside pyrowave device API calls,
+	// so that is another way to ensure synchronization.
+	pyrowave_queue_lock_cb queue_lock_callback;
+	pyrowave_queue_lock_cb queue_unlock_callback;
+
+	// Userdata provided to callbacks.
+	void *userdata;
+} pyrowave_device_create_info;
 
 typedef struct pyrowave_uuid
 {
@@ -87,6 +133,11 @@ typedef struct pyrowave_luid
 	uint8_t luid[VK_LUID_SIZE];
 } pyrowave_luid;
 
+// Direct API that shares a VkDevice. Avoids needing to use external memory to encode and decode.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_create_device(const pyrowave_device_create_info *info, pyrowave_device *device);
+
+// On Windows, LUID is generally used, but other OS-es may need device_uuid/driver_uuid.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat(
 	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
 	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
@@ -105,6 +156,18 @@ PYROWAVE_PUBLIC_API void pyrowave_device_get_vk_device_handles(
 	pyrowave_device device,
 	VkInstance *vk_instance, VkPhysicalDevice *vk_physical_device,
 	VkDevice *vk_device);
+
+// If a command buffer is set on the device, any encoder or decoder commands which record Vulkan commands
+// will record to cmd instead.
+// pyrowave_device will not submit or close the command buffer.
+// Any state on the command buffer is assumed to be clobbered.
+// When recording is complete, set cmd to VK_NULL_HANDLE.
+// pyrowave_device will only record commands directly inside an API entry point.
+// The command buffer must be created for a an appropriate queue family based on how its used.
+// Encoder: VK_QUEUE_COMPUTE_BIT.
+// Decoder: VK_QUEUE_COMPUTE_BIT (if using normal path), VK_QUEUE_GRAPHICS_BIT (if using fragment path).
+PYROWAVE_PUBLIC_API void
+pyrowave_device_set_command_buffer(pyrowave_device device, VkCommandBuffer cmd);
 
 // All encoders and decoders must have been destroyed before destroying the device.
 PYROWAVE_PUBLIC_API void pyrowave_device_destroy(pyrowave_device device);
@@ -231,6 +294,8 @@ typedef struct pyrowave_image_create_info
 	// External images are always assumed to be in GENERAL layout.
 } pyrowave_image_create_info;
 
+// Only intended to be used with external memory. For pyrowave_create_device() path
+// application should create its own images and set the image view struct without going through this API.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_image_create(const pyrowave_image_create_info *info, pyrowave_image *image);
 
@@ -351,6 +416,9 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 // Calling an encode operation with synchronous API clobbers any previous encoded frame.
 // The encoded stream will contain a small sequence counter that tracks frame ordering.
 // acquire and release can be NULL if no sync is required.
+// If command buffer is set on pyrowave_device, acquire and release must both be NULL.
+// If command buffer is set on pyrowave_device, applications is responsible for submitting that work to GPU
+// and waiting for it before calling pyrowave_encoder_compute_num_packets or pyrowave_encoder_packetize.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
                                         const pyrowave_gpu_sync_operation *acquire,
@@ -358,6 +426,7 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
                                         const pyrowave_gpu_buffers *buffers,
                                         const pyrowave_rate_control *rate_control);
 
+// A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
                                         const pyrowave_rate_control *rate_control);
@@ -417,16 +486,16 @@ pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_fr
 // Missing wavelet weights are assumed to be 0 which can lead to extra blurring.
 // See pyrowave_decoder_decode_is_ready() to determine if the final result is known to be complete.
 // acquire and release can be NULL if no sync is required.
+// If command buffer is set on pyrowave_device, acquire and release must both be NULL.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
                                    const pyrowave_gpu_sync_operation *acquire,
                                    const pyrowave_gpu_sync_operation *release,
                                    const pyrowave_gpu_buffers *buffers);
 
+// A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers);
-
-// TODO: Add API to let user provide a VkCommandBuffer to record into.
 
 // Implementation ensures GPU is idle before destroying objects.
 PYROWAVE_PUBLIC_API void pyrowave_decoder_destroy(pyrowave_decoder decoder);

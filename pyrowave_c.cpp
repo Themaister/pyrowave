@@ -40,7 +40,13 @@ struct pyrowave_device_opaque
 {
 	Context context;
 	Device device;
+	VkCommandBuffer cmd = VK_NULL_HANDLE;
 };
+
+void pyrowave_device_set_command_buffer(pyrowave_device device, VkCommandBuffer cmd)
+{
+	device->cmd = cmd;
+}
 
 pyrowave_result pyrowave_create_device_by_compat(
 	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
@@ -138,6 +144,97 @@ pyrowave_result pyrowave_create_device_by_compat(
 pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 {
 	return pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr, device);
+}
+
+static std::mutex global_device_lock;
+
+pyrowave_result pyrowave_create_device(const pyrowave_device_create_info *info, pyrowave_device *out_device)
+{
+	// TODO: Find a better way to do this.
+	Util::set_thread_logging_interface(&null_logger);
+
+	// Safety against concurrent device creations since we're setting global function pointer state here.
+	std::lock_guard<std::mutex> holder{global_device_lock};
+
+	if (!Context::init_loader(info->GetInstanceProcAddr))
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	struct MyInstanceFactory : InstanceFactory
+	{
+		const pyrowave_device_create_info *info = nullptr;
+
+		VkInstance create_instance(const VkInstanceCreateInfo *) override
+		{
+			return info->instance;
+		}
+
+		// Lifetime of any data in create info must remain as long as Context is alive.
+		const VkInstanceCreateInfo *get_existing_create_info() override
+		{
+			return info->instance_create_info;
+		}
+
+		bool factory_owns_created_instance() override
+		{
+			return true;
+		}
+	} instance;
+
+	struct MyDeviceFactory : DeviceFactory
+	{
+		const pyrowave_device_create_info *info = nullptr;
+
+		VkDevice create_device(VkPhysicalDevice, const VkDeviceCreateInfo *) override
+		{
+			return info->device;
+		}
+
+		const VkDeviceCreateInfo *get_existing_create_info() override
+		{
+			return info->device_create_info;
+		}
+
+		bool factory_owns_created_device() override
+		{
+			return true;
+		}
+
+		VkQueue get_queue(uint32_t family_index, uint32_t index) override
+		{
+			for (uint32_t i = 0; i < info->queue_info_count; i++)
+				if (info->queue_info[i].familyIndex == family_index && info->queue_info[i].index == index)
+					return info->queue_info[i].queue;
+			return VK_NULL_HANDLE;
+		}
+	} device;
+
+	instance.info = info;
+	device.info = info;
+
+	auto dev = new pyrowave_device_opaque;
+	dev->context.set_instance_factory(&instance);
+	dev->context.set_device_factory(&device);
+
+	if (!dev->context.init_instance(nullptr, 0))
+		return PYROWAVE_ERROR_NO_VULKAN;
+
+	if (!dev->context.init_device(info->physical_device, VK_NULL_HANDLE, nullptr, 0))
+		return PYROWAVE_ERROR_NO_VULKAN;
+
+	dev->device.set_context(dev->context);
+
+	dev->device.set_queue_lock(
+		[cb = info->queue_lock_callback, userdata = info->userdata]() {
+			if (cb)
+				cb(userdata);
+		},
+		[cb = info->queue_unlock_callback, userdata = info->userdata]() {
+			if (cb)
+				cb(userdata);
+		});
+
+	*out_device = dev;
+	return PYROWAVE_SUCCESS;
 }
 
 void pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset)
@@ -570,6 +667,7 @@ void pyrowave_image_destroy(pyrowave_image image)
 struct pyrowave_encoder_opaque
 {
 	Device *device = nullptr;
+	pyrowave_device pyro_device = nullptr;
 	Encoder encoder;
 	Fence queued_fence;
 	BufferHandle queued_meta;
@@ -594,6 +692,7 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto *enc = new pyrowave_encoder_opaque();
+	enc->pyro_device = info->device;
 	enc->device = &info->device->device;
 	enc->chroma = ChromaSubsampling(info->chroma);
 	enc->width = info->width;
@@ -702,6 +801,9 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
                                         const pyrowave_gpu_buffers *buffers,
                                         const pyrowave_rate_control *rate_control)
 {
+	if (encoder->pyro_device->cmd && (acquire || release))
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = encoder->device;
 
@@ -756,7 +858,10 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	bitstream_buffers.bitstream.size = queued_bitstream_gpu->get_create_info().size;
 	bitstream_buffers.target_size = target_bitstream_size;
 
-	auto cmd = device->request_command_buffer();
+	auto cmd =
+			encoder->pyro_device->cmd
+				? device->request_borrowed_command_buffer(encoder->pyro_device->cmd)
+				: device->request_command_buffer();
 
 	if (acquire)
 	{
@@ -801,7 +906,19 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 
 	pyrowave_device_wait_semaphore(device, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	encoder->queued_fence.reset();
-	device->submit(cmd, &encoder->queued_fence);
+
+	if (encoder->pyro_device->cmd)
+	{
+		device->submit_discard(cmd);
+
+		// Technicality, image views we created have not been submitted yet to Vulkan.
+		// Need to signal the GPU queues before we can move the context along.
+		device->submit_external(CommandBuffer::Type::Generic);
+		device->submit_external(CommandBuffer::Type::AsyncCompute);
+	}
+	else
+		device->submit(cmd, &encoder->queued_fence);
+
 	pyrowave_device_signal_semaphore(device, release);
 
 	return PYROWAVE_SUCCESS;
@@ -892,9 +1009,11 @@ pyrowave_result
 pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary, size_t *num_packets)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (!encoder->queued_fence)
-		return PYROWAVE_ERROR_INVALID_ARGUMENT;
-	encoder->queued_fence->wait();
+	if (encoder->queued_fence)
+		encoder->queued_fence->wait();
+
+	if (!encoder->queued_meta)
+		return PYROWAVE_ERROR_GENERIC;
 
 	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
 	*num_packets = encoder->encoder.compute_num_packets(mapped_meta, packet_boundary);
@@ -906,9 +1025,11 @@ pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, s
                            size_t *out_packets, void *bitstream, size_t size)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (!encoder->queued_fence)
-		return PYROWAVE_ERROR_INVALID_ARGUMENT;
-	encoder->queued_fence->wait();
+	if (encoder->queued_fence)
+		encoder->queued_fence->wait();
+
+	if (!encoder->queued_meta || !encoder->queued_bitstream)
+		return PYROWAVE_ERROR_GENERIC;
 
 	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
 	auto *mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
@@ -931,6 +1052,7 @@ void pyrowave_encoder_destroy(pyrowave_encoder encoder)
 struct pyrowave_decoder_opaque
 {
 	Device *device = nullptr;
+	pyrowave_device pyro_device = nullptr;
 	Decoder decoder;
 	ImageHandle planes[3];
 	bool fragment_path = false;
@@ -959,6 +1081,7 @@ pyrowave_decoder_create(const pyrowave_decoder_create_info *info, pyrowave_decod
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto *dec = new pyrowave_decoder_opaque();
+	dec->pyro_device = info->device;
 	dec->device = &info->device->device;
 	dec->chroma = ChromaSubsampling(info->chroma);
 	dec->fragment_path = info->fragment_path;
@@ -1003,6 +1126,9 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
                                    const pyrowave_gpu_sync_operation *release,
                                    const pyrowave_gpu_buffers *buffers)
 {
+	if (decoder->pyro_device->cmd && (acquire || release))
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
 	device->next_frame_context();
@@ -1012,7 +1138,9 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	// Just use normal graphics queue here since the result will likely be consumed there.
-	auto cmd = device->request_command_buffer();
+	auto cmd = decoder->pyro_device->cmd
+		           ? device->request_borrowed_command_buffer(decoder->pyro_device->cmd)
+		           : device->request_command_buffer();
 
 	VkPipelineStageFlags2 stages = decoder->fragment_path
 		                               ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
@@ -1059,8 +1187,20 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	}
 
 	pyrowave_device_wait_semaphore(device, acquire, stages);
+
 	// This just queues up a command buffer, flush only happens when sync objects are signaled.
-	device->submit(cmd);
+	if (decoder->pyro_device->cmd)
+	{
+		device->submit_discard(cmd);
+
+		// Technicality, image views we created have not been submitted yet to Vulkan.
+		// Need to signal the GPU queues before we can move the context along.
+		device->submit_external(CommandBuffer::Type::Generic);
+		device->submit_external(CommandBuffer::Type::AsyncCompute);
+	}
+	else
+		device->submit(cmd);
+
 	pyrowave_device_signal_semaphore(device, release);
 
 	return PYROWAVE_SUCCESS;
@@ -1069,6 +1209,9 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers)
 {
+	if (decoder->pyro_device->cmd)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
 
