@@ -590,7 +590,7 @@ static void test_direct_interop()
 		gpu_buffers.planes[i].image_format = VK_FORMAT_R8_UNORM;
 		gpu_buffers.planes[i].view_format = VK_FORMAT_R8_UNORM;
 		gpu_buffers.planes[i].layer = i;
-		gpu_buffers.planes[i].layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+		gpu_buffers.planes[i].layout = input_image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 		gpu_buffers.planes[i].mip_level = 0;
 		gpu_buffers.planes[i].aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 	}
