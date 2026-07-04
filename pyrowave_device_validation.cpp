@@ -13,6 +13,11 @@
 #include <vector>
 #include "logging.hpp"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+
 using namespace Util;
 
 enum
@@ -233,7 +238,13 @@ int main(int argc, char **argv)
 	});
 
 	if (timeout > 0 && async_task.wait_for(std::chrono::seconds(timeout)) == std::future_status::timeout)
+	{
+#ifdef _WIN32
+		TerminateProcess(GetCurrentProcess(), EXIT_CODE_TIMEOUT);
+#else
 		std::quick_exit(EXIT_CODE_TIMEOUT);
+#endif
+	}
 
 	return async_task.get();
 }
