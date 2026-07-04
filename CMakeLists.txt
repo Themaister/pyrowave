@@ -151,6 +151,8 @@ if (${PROJECT_IS_TOP_LEVEL})
     if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
         target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)
         target_link_libraries(pyrowave-c-test PRIVATE -static gcc stdc++ winpthread)
+        target_link_libraries(pyrowave-c-interop-test PRIVATE -static gcc stdc++ winpthread)
+        target_link_libraries(pyrowave-device-validation PRIVATE -static gcc stdc++ winpthread)
     endif()
 
     if (NOT WIN32)
