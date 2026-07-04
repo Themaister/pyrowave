@@ -267,6 +267,111 @@ void pyrowave_device_get_vk_device_handles(
 		*vk_device = device->device.get_device();
 }
 
+static bool pyrowave_device_confirm_external_semaphore_support(pyrowave_device device)
+{
+	VkSemaphoreTypeCreateInfo type_info = { VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO };
+	VkPhysicalDeviceExternalSemaphoreInfo sem_info =
+		{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO, &type_info };
+	VkExternalSemaphoreProperties sem_props = { VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES };
+
+#ifdef _WIN32
+	sem_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+#else
+	sem_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+#endif
+
+	type_info.semaphoreType = VK_SEMAPHORE_TYPE_BINARY;
+	vkGetPhysicalDeviceExternalSemaphoreProperties(device->device.get_physical_device(), &sem_info, &sem_props);
+	if (!(sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT))
+		return false;
+
+	type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+	vkGetPhysicalDeviceExternalSemaphoreProperties(device->device.get_physical_device(), &sem_info, &sem_props);
+	if (!(sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT))
+		return false;
+
+	return true;
+}
+
+static bool pyrowave_device_confirm_external_memory_support(pyrowave_device device)
+{
+	VkExternalImageFormatProperties external_props = { VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES };
+	VkImageFormatProperties2 props2 = { VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, &external_props };
+	VkPhysicalDeviceExternalImageFormatInfo external_format_info =
+		{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO };
+
+	// TODO: Android?
+#ifndef _WIN32
+	if (!device->device.get_device_features().supports_drm_modifiers)
+		return false;
+#endif
+
+	static const VkExternalMemoryHandleTypeFlagBits required_external_types[] = {
+#ifdef _WIN32
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT,
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_KMT_BIT,
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT,
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT,
+#else
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT,
+		VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+#endif
+	};
+
+	VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info =
+		{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT };
+
+	for (auto type : required_external_types)
+	{
+		external_format_info.handleType = type;
+		external_format_info.pNext = nullptr;
+
+		if (type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)
+		{
+			VkDrmFormatModifierPropertiesEXT mod;
+			VkDrmFormatModifierPropertiesListEXT modifier_list =
+				{ VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT };
+			modifier_list.drmFormatModifierCount = 1;
+			modifier_list.pDrmFormatModifierProperties = &mod;
+			VkFormatProperties3 props3 = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3, &modifier_list };
+			device->device.get_format_properties(VK_FORMAT_R8_UNORM, &props3);
+
+			if (modifier_list.drmFormatModifierCount != 1)
+				return false;
+
+			modifier_info.drmFormatModifier = mod.drmFormatModifier;
+			modifier_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			external_format_info.pNext = &modifier_info;
+		}
+
+		if (!device->device.get_image_format_properties(
+			VK_FORMAT_R8_UNORM, VK_IMAGE_TYPE_2D, type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ?
+			VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT : VK_IMAGE_TILING_OPTIMAL,
+			VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+			0, &external_format_info, &props2))
+			return false;
+
+		if (!(external_props.externalMemoryProperties.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT))
+			return false;
+	}
+
+	return true;
+}
+
+bool pyrowave_device_confirm_interop_support(pyrowave_device device)
+{
+	Util::set_thread_logging_interface(&null_logger);
+	if (!device->device.get_device_features().supports_external)
+		return false;
+	if (!pyrowave_device_confirm_external_semaphore_support(device))
+		return false;
+	if (!pyrowave_device_confirm_external_memory_support(device))
+		return false;
+
+	return true;
+}
+
 void pyrowave_device_destroy(pyrowave_device device)
 {
 	Util::set_thread_logging_interface(&null_logger);
@@ -997,7 +1102,9 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 		p.swizzle = num_planes == 2 && plane == 2 ? VK_COMPONENT_SWIZZLE_G : VK_COMPONENT_SWIZZLE_R;
 		p.image_format = images[plane] ? images[plane]->get_format() : VK_FORMAT_R8G8_UNORM;
 		p.view_format = p.image_format;
-		p.layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+		p.layout = images[plane]
+			           ? images[plane]->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
+			           : images[1]->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 		p.image = images[plane] ? images[plane]->get_image() : images[1]->get_image();
 	}
 
@@ -1303,7 +1410,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 		p.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 		p.swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
 		p.view_format = p.image_format;
-		p.layout = decoder->fragment_path ? VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+		p.layout = decoder->fragment_path ? VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_GENERAL;
 	}
 
 	BufferCreateInfo bufinfo = {};

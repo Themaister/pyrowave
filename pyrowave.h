@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 2
+#define PYROWAVE_API_VERSION_MINOR 3
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -182,6 +182,9 @@ PYROWAVE_PUBLIC_API void pyrowave_device_get_vk_device_handles(
 // Decoder: VK_QUEUE_COMPUTE_BIT (if using normal path), VK_QUEUE_GRAPHICS_BIT (if using fragment path).
 PYROWAVE_PUBLIC_API void
 pyrowave_device_set_command_buffer(pyrowave_device device, VkCommandBuffer cmd);
+
+PYROWAVE_PUBLIC_API bool
+pyrowave_device_confirm_interop_support(pyrowave_device device);
 
 // All encoders and decoders must have been destroyed before destroying the device.
 PYROWAVE_PUBLIC_API void pyrowave_device_destroy(pyrowave_device device);

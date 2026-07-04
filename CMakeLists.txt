@@ -114,8 +114,12 @@ if (${PROJECT_IS_TOP_LEVEL})
     target_link_libraries(pyrowave-c-interop-test PRIVATE pyrowave-shared granite-vulkan)
     target_compile_options(pyrowave-c-interop-test PRIVATE ${PYROWAVE_CXX_FLAGS})
 
+    add_executable(pyrowave-device-validation pyrowave_device_validation.cpp com_ptr.hpp)
+    target_link_libraries(pyrowave-device-validation PRIVATE pyrowave-shared granite-util granite-volk-headers)
+    target_compile_options(pyrowave-device-validation PRIVATE ${PYROWAVE_CXX_FLAGS})
+
     set(PYROWAVE_API_VERSION_MAJOR 0)
-    set(PYROWAVE_API_VERSION_MINOR 2)
+    set(PYROWAVE_API_VERSION_MINOR 3)
     set(PYROWAVE_API_VERSION_PATCH 0)
     set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 
@@ -136,6 +140,7 @@ if (${PROJECT_IS_TOP_LEVEL})
             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
     install(EXPORT pyrowave-sharedConfig DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/pyrowave-shared/cmake)
+    install(TARGETS pyrowave-device-validation RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
     set(PYROWAVE_INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
     set(PYROWAVE_INSTALL_INC_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
@@ -150,6 +155,9 @@ if (${PROJECT_IS_TOP_LEVEL})
 
     if (NOT WIN32)
         target_link_libraries(pyrowave-shared PRIVATE -pthread)
+        target_link_libraries(pyrowave-c-test PRIVATE -pthread)
+        target_link_libraries(pyrowave-c-interop-test PRIVATE -pthread)
+        target_link_libraries(pyrowave-device-validation PRIVATE -pthread)
     endif()
 
     if (WIN32)
