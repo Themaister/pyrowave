@@ -844,8 +844,8 @@ bool Decoder::device_prefers_fragment_path(Vulkan::Device &device)
 	switch (device.get_device_features().driver_id)
 	{
 	// QCOM hardware struggles with compute in general and prefers fragment.
+	// Turnip seems to like compute path just fine though ...
 	case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
-	case VK_DRIVER_ID_MESA_TURNIP:
 		return true;
 
 	// Mali heavily favors texture sampling over LS heavy content.
