@@ -27,8 +27,8 @@ using namespace Vulkan;
 } while(false)
 
 #define CHECKED(x) do { \
-	pyrowave_result res = x; \
-	if (res != PYROWAVE_SUCCESS) { fprintf(stderr, "Got pyrowave result %d while executing %s at line %d.\n", res, #x, __LINE__); std::terminate(); } \
+	pyrowave_result _res = x; \
+	if (_res != PYROWAVE_SUCCESS) { fprintf(stderr, "Got pyrowave result %d while executing %s at line %d.\n", _res, #x, __LINE__); std::terminate(); } \
 } while(false)
 
 #define CHECK_HRESULT(x) ASSERT_THAT(SUCCEEDED(x))
@@ -874,7 +874,7 @@ static pyrowave_image create_pyrowave_image_from_d3d12(pyrowave_device pyro_devi
 	return image;
 }
 
-static pyrowave_image create_pyrowave_image_from_d3d11(pyrowave_device pyro_device, ID3D11Device *device, ID3D11Texture2D *resource, bool kmt)
+static pyrowave_image create_pyrowave_image_from_d3d11(pyrowave_device pyro_device, ID3D11Texture2D *resource, bool kmt)
 {
 	HANDLE shared_handle;
 	ComPtr<IDXGIResource1> res;
@@ -1301,7 +1301,7 @@ static void test_d3d11_interop()
 		desc.MipLevels = 1;
 		CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex.ppv()));
 
-		pyrowave_image pyro_img = create_pyrowave_image_from_d3d11(pyro_device, device.get(), tex.get(), false);
+		pyrowave_image pyro_img = create_pyrowave_image_from_d3d11(pyro_device, tex.get(), false);
 
 		// Check to see if destruction order matters.
 		if (i % 2)
@@ -1334,7 +1334,7 @@ static void test_d3d11_interop()
 		desc.MipLevels = 1;
 		CHECK_HRESULT(device5->CreateTexture2D(&desc, nullptr, (ID3D11Texture2D **)tex.ppv()));
 
-		pyrowave_image pyro_img = create_pyrowave_image_from_d3d11(pyro_device, device.get(), tex.get(), true);
+		pyrowave_image pyro_img = create_pyrowave_image_from_d3d11(pyro_device, tex.get(), true);
 
 		// Check to see if destruction order matters.
 		if (i % 2)
@@ -1355,13 +1355,13 @@ static void test_d3d11_interop()
 	for (int i = 0; i < 10000; i++)
 	{
 		// Sharing D3D11 to Vulkan is well supported. Other way around, not so much.
-		ComPtr<ID3D11Fence> fence;
-		CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, fence.ppv()));
+		ComPtr<ID3D11Fence> share_fence;
+		CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_ID3D11Fence, share_fence.ppv()));
 		HANDLE fence_handle;
-		CHECK_HRESULT(fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fence_handle));
+		CHECK_HRESULT(share_fence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &fence_handle));
 
-		context4->Signal(fence.get(), 1);
-		fence = {};
+		context4->Signal(share_fence.get(), 1);
+		share_fence = {};
 
 		pyrowave_sync_object pyro_sync = create_pyrowave_sync_from_d3d12_handle(pyro_device, fence_handle);
 
