@@ -290,6 +290,16 @@ static bool pyrowave_device_confirm_external_semaphore_support(pyrowave_device d
 	if (!(sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT))
 		return false;
 
+#ifdef _WIN32
+	// Despite being a timeline, D3D12_FENCE was added before TIMELINE was added, and AMD drivers have
+	// at least gotten confused when trying to use TIMELINE type here in the past.
+	sem_info.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D12_FENCE_BIT;
+	sem_info.pNext = nullptr;
+	vkGetPhysicalDeviceExternalSemaphoreProperties(device->device.get_physical_device(), &sem_info, &sem_props);
+	if (!(sem_props.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_IMPORTABLE_BIT))
+		return false;
+#endif
+
 	return true;
 }
 
