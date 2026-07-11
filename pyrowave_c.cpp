@@ -41,6 +41,7 @@ struct pyrowave_device_opaque
 	Context context;
 	Device device;
 	VkCommandBuffer cmd = VK_NULL_HANDLE;
+	CommandBuffer::Type queue_type = CommandBuffer::Type::Generic;
 };
 
 void pyrowave_device_set_command_buffer(pyrowave_device device, VkCommandBuffer cmd)
@@ -380,6 +381,17 @@ bool pyrowave_device_confirm_interop_support(pyrowave_device device)
 		return false;
 
 	return true;
+}
+
+pyrowave_result
+pyrowave_device_set_queue_type(pyrowave_device device, VkQueueFlagBits queue_flags)
+{
+	if (!device)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (queue_flags != VK_QUEUE_GRAPHICS_BIT && queue_flags != VK_QUEUE_COMPUTE_BIT)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	device->queue_type = queue_flags == VK_QUEUE_GRAPHICS_BIT ? CommandBuffer::Type::Generic : CommandBuffer::Type::AsyncCompute;
+	return PYROWAVE_SUCCESS;
 }
 
 void pyrowave_device_destroy(pyrowave_device device)
@@ -876,7 +888,7 @@ bool WrappedViewBuffers::wrap(Device *device, const pyrowave_gpu_buffers *buffer
 	return true;
 }
 
-static void pyrowave_device_wait_semaphore(Device *device, const pyrowave_gpu_sync_operation *acquire, VkPipelineStageFlags2 stages)
+static void pyrowave_device_wait_semaphore(Device *device, CommandBuffer::Type queue_type, const pyrowave_gpu_sync_operation *acquire, VkPipelineStageFlags2 stages)
 {
 	if (acquire && acquire->sync.semaphore != VK_NULL_HANDLE)
 	{
@@ -890,11 +902,11 @@ static void pyrowave_device_wait_semaphore(Device *device, const pyrowave_gpu_sy
 			sem->signal_external();
 		}
 
-		device->add_wait_semaphore(CommandBuffer::Type::Generic, std::move(sem), stages, false);
+		device->add_wait_semaphore(queue_type, std::move(sem), stages, false);
 	}
 }
 
-static void pyrowave_device_signal_semaphore(Device *device, const pyrowave_gpu_sync_operation *release)
+static void pyrowave_device_signal_semaphore(Device *device, CommandBuffer::Type queue_type, const pyrowave_gpu_sync_operation *release)
 {
 	if (release && release->sync.semaphore != VK_NULL_HANDLE)
 	{
@@ -905,7 +917,7 @@ static void pyrowave_device_signal_semaphore(Device *device, const pyrowave_gpu_
 			signal = device->request_timeline_semaphore_as_binary(*signal, release->sync.value);
 
 		if (signal)
-			device->submit_empty(CommandBuffer::Type::Generic, nullptr, signal.get());
+			device->submit_empty(queue_type, nullptr, signal.get());
 	}
 }
 
@@ -976,7 +988,7 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	auto cmd =
 			encoder->pyro_device->cmd
 				? device->request_borrowed_command_buffer(encoder->pyro_device->cmd)
-				: device->request_command_buffer();
+				: device->request_command_buffer(encoder->pyro_device->queue_type);
 
 	if (acquire)
 	{
@@ -1019,7 +1031,7 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
 
-	pyrowave_device_wait_semaphore(device, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	encoder->queued_fence.reset();
 
 	if (encoder->pyro_device->cmd)
@@ -1028,13 +1040,12 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 
 		// Technicality, image views we created have not been submitted yet to Vulkan.
 		// Need to signal the GPU queues before we can move the context along.
-		device->submit_external(CommandBuffer::Type::Generic);
-		device->submit_external(CommandBuffer::Type::AsyncCompute);
+		device->submit_external(encoder->pyro_device->queue_type);
 	}
 	else
 		device->submit(cmd, &encoder->queued_fence);
 
-	pyrowave_device_signal_semaphore(device, release);
+	pyrowave_device_signal_semaphore(device, encoder->pyro_device->queue_type, release);
 
 	return PYROWAVE_SUCCESS;
 }
@@ -1257,7 +1268,7 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	// Just use normal graphics queue here since the result will likely be consumed there.
 	auto cmd = decoder->pyro_device->cmd
 		           ? device->request_borrowed_command_buffer(decoder->pyro_device->cmd)
-		           : device->request_command_buffer();
+		           : device->request_command_buffer(decoder->pyro_device->queue_type);
 
 	VkPipelineStageFlags2 stages = decoder->fragment_path
 		                               ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
@@ -1303,7 +1314,7 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 		}
 	}
 
-	pyrowave_device_wait_semaphore(device, acquire, stages);
+	pyrowave_device_wait_semaphore(device, decoder->pyro_device->queue_type, acquire, stages);
 
 	// This just queues up a command buffer, flush only happens when sync objects are signaled.
 	if (decoder->pyro_device->cmd)
@@ -1312,13 +1323,12 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 
 		// Technicality, image views we created have not been submitted yet to Vulkan.
 		// Need to signal the GPU queues before we can move the context along.
-		device->submit_external(CommandBuffer::Type::Generic);
-		device->submit_external(CommandBuffer::Type::AsyncCompute);
+		device->submit_external(decoder->pyro_device->queue_type);
 	}
 	else
 		device->submit(cmd);
 
-	pyrowave_device_signal_semaphore(device, release);
+	pyrowave_device_signal_semaphore(device, decoder->pyro_device->queue_type, release);
 
 	return PYROWAVE_SUCCESS;
 }
@@ -1395,7 +1405,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 
 	if (decoder->fragment_path)
 	{
-		auto cmd = device->request_command_buffer();
+		auto cmd = device->request_command_buffer(decoder->pyro_device->queue_type);
 		cmd->begin_barrier_batch();
 		for (auto &img : decoder->planes)
 		{
@@ -1430,7 +1440,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	if (res != PYROWAVE_SUCCESS)
 		return res;
 
-	auto cmd = device->request_command_buffer();
+	auto cmd = device->request_command_buffer(decoder->pyro_device->queue_type);
 
 	if (decoder->fragment_path)
 	{

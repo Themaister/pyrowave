@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 3
+#define PYROWAVE_API_VERSION_MINOR 4
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -102,6 +102,7 @@ typedef struct pyrowave_device_create_info
 	// extensions and pNext needs to contain PDF2 struct.
 	// Instance create infos needs valid extensions as well as a compatible pApplicationInfo w.r.t apiVersion.
 	// apiVersion should be at least Vulkan 1.3.
+	// At least one graphics capable queue must be present.
 	const VkInstanceCreateInfo *instance_create_info;
 	const VkDeviceCreateInfo *device_create_info;
 
@@ -182,6 +183,19 @@ PYROWAVE_PUBLIC_API void pyrowave_device_get_vk_device_handles(
 // Decoder: VK_QUEUE_COMPUTE_BIT (if using normal path), VK_QUEUE_GRAPHICS_BIT (if using fragment path).
 PYROWAVE_PUBLIC_API void
 pyrowave_device_set_command_buffer(pyrowave_device device, VkCommandBuffer cmd);
+
+// When an explicit command buffer is not used, controls which queue family is preferred for encode or decode operations.
+// This is typically used to select between graphics or async compute encoding.
+// These methods have tradeoffs, but for cross-process encoding, it makes more sense to use async compute encode,
+// since the graphics queue may become busy.
+// If encoding in-process on QueuePresent or similar, graphics queue might make more sense, since it guarantees lowest possible encoding latency.
+// For decoding, graphics queue is natural since the result will immediately be consumed there.
+// Valid values for queue_flags are VK_QUEUE_GRAPHICS_BIT or VK_QUEUE_COMPUTE_BIT.
+// For borrowed devices, pyrowave must have been provided an async compute queue, or it will fallback to graphics.
+// If there are no async compute queues on the device, graphics queue will be used instead.
+// When explicit command buffers are used, queue_flags denotes which queue type the command buffer belongs to.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_device_set_queue_type(pyrowave_device device, VkQueueFlagBits queue_flags);
 
 PYROWAVE_PUBLIC_API bool
 pyrowave_device_confirm_interop_support(pyrowave_device device);

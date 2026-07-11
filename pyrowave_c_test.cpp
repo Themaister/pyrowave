@@ -463,6 +463,9 @@ static void test_basic_system_stability()
 		// 240mbit equivalent for 60 fps.
 		const pyrowave_rate_control rate_control = { 500000 };
 
+		// Get some test coverage for async compute path.
+		CHECKED(pyrowave_device_set_queue_type(device, iter % 2 ? VK_QUEUE_COMPUTE_BIT : VK_QUEUE_GRAPHICS_BIT));
+
 		bitstream.reserve(rate_control.maximum_bitstream_size);
 		CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &encode_buffer, &rate_control));
 

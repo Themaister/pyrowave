@@ -9,6 +9,7 @@ EXPORTS
 	pyrowave_device_report_performance_stats
 	pyrowave_device_get_vk_device_handles
 	pyrowave_device_confirm_interop_support
+	pyrowave_device_set_queue_type
 	pyrowave_device_destroy
 	pyrowave_sync_object_create
 	pyrowave_sync_object_get_semaphore
