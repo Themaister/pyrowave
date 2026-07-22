@@ -89,7 +89,7 @@ if (PYROWAVE_DEVEL)
     endif()
 
     add_granite_application(pyrowave-evaluator evaluator.cpp)
-    target_link_libraries(pyrowave-evaluator PRIVATE pyrowave-utils)
+    target_link_libraries(pyrowave-evaluator PRIVATE pyrowave-utils pyrowave)
     if (NOT ANDROID)
         target_compile_definitions(pyrowave-evaluator PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
     endif()

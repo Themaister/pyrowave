@@ -12,6 +12,8 @@
 #include "pyrowave_common.hpp"
 #include "flat_renderer.hpp"
 #include "ui_manager.hpp"
+#include "pyrowave_decoder.hpp"
+#include "pyrowave_encoder.hpp"
 #include <string.h>
 #include <stdexcept>
 #include "rapidjson_wrapper.hpp"
@@ -25,9 +27,17 @@ struct YCbCrImages
 	ImageHandle images[3];
 };
 
+enum class Codec
+{
+	None,
+	PyroWave
+};
+
 struct TestClip
 {
 	std::unique_ptr<YUV4MPEGFile> file;
+	Codec codec = Codec::None;
+	int codec_mbits = 0;
 	std::string name;
 	std::string desc;
 };
@@ -78,12 +88,28 @@ static std::vector<TestClipGroup> parse_test_clips(const std::string &path)
 		{
 			auto &clip = *itr;
 			TestClip parsed_clip;
-			parsed_clip.file = std::make_unique<YUV4MPEGFile>();
-			auto clip_path = Path::relpath(path, clip["path"].GetString());
-			if (!parsed_clip.file->open_read(clip_path))
+
+			if (clip.HasMember("codec"))
 			{
-				LOGE("Failed to open %s for reading.\n", clip_path.c_str());
-				throw std::runtime_error("Failed to parse.");
+				if (itr == clips.Begin())
+					throw std::logic_error("First clip cannot be a codec derived input.");
+
+				if (strcmp(clip["codec"].GetString(), "pyrowave") == 0)
+				{
+					parsed_clip.codec = Codec::PyroWave;
+					parsed_clip.codec_mbits = clip["mbits"].GetInt();
+				}
+			}
+
+			if (parsed_clip.codec == Codec::None)
+			{
+				parsed_clip.file = std::make_unique<YUV4MPEGFile>();
+				auto clip_path = Path::relpath(path, clip["path"].GetString());
+				if (!parsed_clip.file->open_read(clip_path))
+				{
+					LOGE("Failed to open %s for reading.\n", clip_path.c_str());
+					throw std::runtime_error("Failed to parse.");
+				}
 			}
 
 			parsed_clip.name = clip["name"].GetString();
@@ -102,7 +128,7 @@ static YCbCrImages create_ycbcr_images(Device &device, int width, int height, Vk
 	YCbCrImages images;
 	auto info = ImageCreateInfo::immutable_2d_image(width, height, fmt);
 	info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-	             VK_IMAGE_USAGE_SAMPLED_BIT;
+	             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	images.images[0] = device.create_image(info);
@@ -180,6 +206,9 @@ struct EvaluatorApplication : Application, EventHandler
 		{
 			for (auto &clip : clip_group.clips)
 			{
+				if (!clip.file)
+					continue;
+
 				auto divided_fps_num = int64_t(clip.file->get_frame_rate_num()) * representative_file.get_frame_rate_den();
 				auto divided_fps_den = int64_t(clip.file->get_frame_rate_den()) * representative_file.get_frame_rate_num();
 
@@ -204,6 +233,9 @@ struct EvaluatorApplication : Application, EventHandler
 
 		images = create_ycbcr_images(e.get_device(), representative_file.get_width(), representative_file.get_height(), format, chroma);
 		get_wsi().set_enable_timing_feedback(true);
+
+		encoder.init(&e.get_device(), representative_file.get_width(), representative_file.get_height(), chroma);
+		decoder.init(&e.get_device(), representative_file.get_width(), representative_file.get_height(), chroma);
 	}
 
 	void on_device_destroyed(const DeviceCreatedEvent &)
@@ -211,6 +243,8 @@ struct EvaluatorApplication : Application, EventHandler
 		images = {};
 	}
 
+	PyroWave::Encoder encoder;
+	PyroWave::Decoder decoder;
 	int current_iteration = -1;
 	int current_sub_iteration = 0;
 	int current_clip_index = 0;
@@ -221,7 +255,83 @@ struct EvaluatorApplication : Application, EventHandler
 	bool debug_enable = false;
 	std::default_random_engine random_engine;
 
-	void iterate(CommandBuffer &cmd, double elapsed_time)
+	void roundtrip_pyrowave(CommandBufferHandle &cmd, int mbits)
+	{
+		auto &representative_file = *test_clips.front().clips.front().file;
+
+		int bits_per_frame = int(1000000ll * mbits * representative_file.get_frame_rate_den() / representative_file.get_frame_rate_num());
+		int bytes_per_frame = bits_per_frame / 8;
+		bytes_per_frame &= ~3;
+
+		auto &device = cmd->get_device();
+
+		PyroWave::ViewBuffers views = {};
+		for (int i = 0; i < 3; i++)
+			views.planes[i] = &images.images[i]->get_view();
+
+		BufferCreateInfo bufinfo = {};
+		bufinfo.size = bytes_per_frame + encoder.get_meta_required_size();
+		bufinfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		bufinfo.domain = BufferDomain::Device;
+		auto bitstream_gpu = device.create_buffer(bufinfo);
+		bufinfo.domain = BufferDomain::CachedHost;
+		auto bitstream_cpu = device.create_buffer(bufinfo);
+
+		bufinfo.size = encoder.get_meta_required_size();
+		bufinfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		bufinfo.domain = BufferDomain::Device;
+		auto meta_gpu = device.create_buffer(bufinfo);
+		bufinfo.domain = BufferDomain::CachedHost;
+		auto meta_cpu = device.create_buffer(bufinfo);
+
+		PyroWave::Encoder::BitstreamBuffers buffers = {};
+		buffers.target_size = bytes_per_frame;
+		buffers.bitstream.buffer = bitstream_gpu.get();
+		buffers.bitstream.size = bitstream_gpu->get_create_info().size;
+		buffers.meta.buffer = meta_gpu.get();
+		buffers.meta.size = meta_gpu->get_create_info().size;
+
+		encoder.encode(*cmd, views, buffers);
+
+		cmd->barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+		cmd->copy_buffer(*bitstream_cpu, *bitstream_gpu);
+		cmd->copy_buffer(*meta_cpu, *meta_gpu);
+		cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		             VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+		Fence fence;
+		device.submit(cmd, &fence);
+		fence->wait();
+
+		std::unique_ptr<uint8_t[]> bitstream(new uint8_t[bytes_per_frame]);
+		auto *mapped_bitstream = device.map_host_buffer(*bitstream_cpu, MEMORY_ACCESS_READ_BIT);
+		auto *mapped_meta = device.map_host_buffer(*meta_cpu, MEMORY_ACCESS_READ_BIT);
+		PyroWave::Encoder::Packet packet = {};
+		encoder.packetize(&packet, bytes_per_frame, bitstream.get(), bytes_per_frame,
+		                  mapped_meta, mapped_bitstream);
+
+		cmd = device.request_command_buffer();
+
+		for (auto &img : images.images)
+		{
+			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+			                   VK_PIPELINE_STAGE_NONE, VK_ACCESS_NONE,
+			                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+		}
+
+		decoder.clear();
+		decoder.push_packet(bitstream.get() + packet.offset, packet.size);
+		decoder.decode(*cmd, views);
+
+		for (auto &img : images.images)
+		{
+			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+			                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+		}
+	}
+
+	void iterate(CommandBufferHandle &cmd, double elapsed_time)
 	{
 		static constexpr double SubIterationTimes[] = {
 			10.0, 3.0, 10.0, 3.0,
@@ -284,8 +394,16 @@ struct EvaluatorApplication : Application, EventHandler
 
 			case FirstTestSequence:
 			case SecondTestSequence:
-				if (!clip.clips[current_test_index].file->rewind())
-					request_shutdown();
+				if (clip.clips[current_test_index].codec == Codec::None)
+				{
+					if (!clip.clips[current_test_index].file->rewind())
+						request_shutdown();
+				}
+				else
+				{
+					if (!clip.clips.front().file->rewind())
+						request_shutdown();
+				}
 				break;
 
 			default:
@@ -305,7 +423,10 @@ struct EvaluatorApplication : Application, EventHandler
 
 		case FirstTestSequence:
 		case SecondTestSequence:
-			file = clip.clips[current_test_index].file.get();
+			if (clip.clips[current_test_index].codec == Codec::None)
+				file = clip.clips[current_test_index].file.get();
+			else
+				file = clip.clips.front().file.get();
 			break;
 
 		default:
@@ -317,12 +438,12 @@ struct EvaluatorApplication : Application, EventHandler
 
 		for (auto &img : images.images)
 		{
-			cmd.image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-			                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-			auto *ptr = cmd.update_image(*img, {}, { img->get_width(), img->get_height(), 1 }, 0, 0,
-				{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
+			auto *ptr = cmd->update_image(*img, {}, {img->get_width(), img->get_height(), 1}, 0, 0,
+			                              {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
 
 			size_t size = img->get_width() * img->get_height() * (img->get_format() == VK_FORMAT_R8_UNORM ? 1 : 2);
 
@@ -331,9 +452,16 @@ struct EvaluatorApplication : Application, EventHandler
 			if (!file)
 				memset(ptr, 0x80, size);
 
-			cmd.image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
-			                  VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-			                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+			                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+		}
+
+		if (clip.clips[current_test_index].codec == Codec::PyroWave &&
+		    (current_sub_iteration == FirstTestSequence || current_sub_iteration == SecondTestSequence))
+		{
+			roundtrip_pyrowave(cmd, clip.clips[current_test_index].codec_mbits);
 		}
 
 		if (file)
@@ -352,7 +480,7 @@ struct EvaluatorApplication : Application, EventHandler
 		auto &device = get_wsi().get_device();
 		auto cmd = device.request_command_buffer();
 
-		iterate(*cmd, elapsed_time);
+		iterate(cmd, elapsed_time);
 
 		cmd->begin_render_pass(device.get_swapchain_render_pass(SwapchainRenderPass::Depth));
 		cmd->set_sampler(0, 3, StockSampler::LinearClamp);
