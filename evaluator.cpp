@@ -375,7 +375,7 @@ struct EvaluatorApplication : Application, EventHandler
 				next_clip_range = clip_range(random_engine);
 			current_clip_index = next_clip_range;
 
-			std::uniform_int_distribution<int> file_range(1, int(test_clips[current_clip_index].clips.size() - 1));
+			std::uniform_int_distribution<int> file_range(0, int(test_clips[current_clip_index].clips.size() - 1));
 			current_test_index = file_range(random_engine);
 			current_voting = 0;
 		}
