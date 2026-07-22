@@ -50,6 +50,8 @@ endif()
 
 if (PYROWAVE_DEVEL)
     add_library(pyrowave-utils STATIC yuv4mpeg.cpp yuv4mpeg.hpp)
+    target_compile_options(pyrowave-utils PRIVATE ${PYROWAVE_CXX_FLAGS})
+    target_include_directories(pyrowave-utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
     # Standalone build, build the sandbox.
     set(GRANITE_RENDERER ON CACHE BOOL "" FORCE)
@@ -84,6 +86,12 @@ if (PYROWAVE_DEVEL)
     target_link_libraries(pyrowave-viewer PRIVATE pyrowave pyrowave-utils)
     if (NOT ANDROID)
         target_compile_definitions(pyrowave-viewer PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
+    endif()
+
+    add_granite_application(pyrowave-evaluator evaluator.cpp)
+    target_link_libraries(pyrowave-evaluator PRIVATE pyrowave-utils)
+    if (NOT ANDROID)
+        target_compile_definitions(pyrowave-evaluator PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
     endif()
 elseif (${PROJECT_IS_TOP_LEVEL} AND (NOT TARGET granite-vulkan))
     set(GRANITE_RENDERER OFF CACHE BOOL "" FORCE)

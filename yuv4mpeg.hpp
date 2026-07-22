@@ -11,6 +11,7 @@ class YUV4MPEGFile
 {
 public:
 	bool open_read(const std::string &path);
+	bool rewind();
 	bool open_write(const std::string &path, const std::string &params);
 	const std::string &get_params() const;
 
@@ -50,4 +51,5 @@ private:
 	Format format = {};
 	bool full_range = false;
 	float unorm_scale = 1.0f;
+	long initial_position = -1;
 };

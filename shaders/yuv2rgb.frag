@@ -1,5 +1,7 @@
 #version 450
 
+#extension GL_EXT_samplerless_texture_functions : require
+
 #if DELTA
 layout(set = 0, binding = 0) uniform texture2D Y0;
 layout(set = 0, binding = 1) uniform texture2D Y1;
@@ -15,6 +17,7 @@ layout(location = 0) in vec2 vUV;
 
 layout(constant_id = 0) const bool BT2020 = false;
 layout(constant_id = 1) const bool FullRange = false;
+layout(constant_id = 2) const bool ChromaLeft = false;
 
 const mat3 yuv2rgb_bt709 = mat3(
     vec3(1.0, 1.0, 1.0),
@@ -33,12 +36,16 @@ void main()
     float y1 = textureLod(sampler2D(Y1, Samp), vUV, 0.0).x;
     FragColor = vec3(abs(y0 - y1) * 10.0);
 #else
-    float y = textureLod(sampler2D(Y, Samp), vUV, 0.0).x;
-    float cb = textureLod(sampler2D(Cb, Samp), vUV, 0.0).x;
-    float cr = textureLod(sampler2D(Cr, Samp), vUV, 0.0).x;
+    vec2 chroma_uv_offset = vec2(0.0);
+    if (ChromaLeft)
+        chroma_uv_offset.x = 0.5 / float(textureSize(Y, 0).x);
 
-    cb -= 0.5;
-    cr -= 0.5;
+    float y = textureLod(sampler2D(Y, Samp), vUV, 0.0).x;
+    float cb = textureLod(sampler2D(Cb, Samp), vUV + chroma_uv_offset, 0.0).x;
+    float cr = textureLod(sampler2D(Cr, Samp), vUV + chroma_uv_offset, 0.0).x;
+
+    cb -= 128.0 / 255.0;
+    cr -= 128.0 / 255.0;
 
     if (!FullRange)
     {

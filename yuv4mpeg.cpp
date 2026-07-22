@@ -155,7 +155,17 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 	else if (params.find("XCOLORRANGE=FULL") != std::string::npos)
 		full_range = true;
 
+	if (mode == Mode::Read)
+		initial_position = ftell(file.get());
+
 	return width > 0 && height > 0;
+}
+
+bool YUV4MPEGFile::rewind()
+{
+	if (mode != Mode::Read)
+		return false;
+	return fseek(file.get(), initial_position, SEEK_SET) == 0;
 }
 
 bool YUV4MPEGFile::begin_frame()
