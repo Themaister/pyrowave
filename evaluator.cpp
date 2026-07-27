@@ -294,6 +294,8 @@ struct EvaluatorApplication : Application, EventHandler
 	bool debug_enable = false;
 	std::default_random_engine random_engine;
 	VideoFrame decoder_frame = {};
+	bool frame_pace_is_implicit = false;
+	uint64_t target_present_ns = 0;
 
 	void roundtrip_pyrowave(CommandBufferHandle &cmd, int mbits)
 	{
@@ -456,6 +458,8 @@ struct EvaluatorApplication : Application, EventHandler
 			default:
 				break;
 			}
+
+			target_present_ns = Util::get_current_time_nsecs();
 		}
 
 		current_sub_iteration = sub_iteration_index;
@@ -526,15 +530,15 @@ struct EvaluatorApplication : Application, EventHandler
 			roundtrip_pyrowave(cmd, clip.clips[current_test_index].codec_mbits);
 		}
 
-		if (file)
-		{
-			get_wsi().set_target_presentation_time(
-				0, 1000000000ull * file->get_frame_rate_den() / file->get_frame_rate_num(), false);
-		}
-		else
-		{
-			get_wsi().set_target_presentation_time(0, 0, false);
-		}
+
+		auto &representative_file = *test_clips.front().clips.front().file;
+		frame_pace_is_implicit = false;
+		uint64_t target_relative_ns = 1000000000ull * representative_file.get_frame_rate_den() / representative_file.get_frame_rate_num();
+
+		// If monitor refresh locks to content, just rely on that.
+		RefreshRateInfo refresh = {};
+		if (get_wsi().get_refresh_rate_info(refresh) && refresh.refresh_duration)
+			frame_pace_is_implicit = muglm::abs(double(target_relative_ns) / double(refresh.refresh_duration) - 1.0) < 0.005;
 	}
 
 	void render_frame(double, double elapsed_time) override
@@ -644,6 +648,12 @@ struct EvaluatorApplication : Application, EventHandler
 		device.submit(cmd, nullptr, 1, &sem);
 		if (decoder_frame.view)
 			test_clips[current_clip_index].clips[current_test_index].decoder->release_video_frame(decoder_frame.index, std::move(sem));
+
+		// Frame pacing when we cannot rely on FIFO.
+		uint64_t target_relative_ns = 1000000000ull * representative_file.get_frame_rate_den() / representative_file.get_frame_rate_num();
+		target_present_ns += target_relative_ns;
+		if (!frame_pace_is_implicit)
+			Util::sleep_until_nsecs(target_present_ns);
 	}
 
 	YCbCrImages images;
