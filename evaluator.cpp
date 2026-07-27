@@ -18,6 +18,8 @@
 #include <stdexcept>
 #include "rapidjson_wrapper.hpp"
 #include "path_utils.hpp"
+#include "ffmpeg_decode.hpp"
+#include "slangmosh_decode_iface.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -30,14 +32,17 @@ struct YCbCrImages
 enum class Codec
 {
 	None,
-	PyroWave
+	PyroWave,
+	FFmpeg
 };
 
 struct TestClip
 {
 	std::unique_ptr<YUV4MPEGFile> file;
+	std::unique_ptr<VideoDecoder> decoder;
 	Codec codec = Codec::None;
 	int codec_mbits = 0;
+	std::string path;
 	std::string name;
 	std::string desc;
 };
@@ -99,15 +104,31 @@ static std::vector<TestClipGroup> parse_test_clips(const std::string &path)
 					parsed_clip.codec = Codec::PyroWave;
 					parsed_clip.codec_mbits = clip["mbits"].GetInt();
 				}
+				else if (strcmp(clip["codec"].GetString(), "ffmpeg") == 0)
+				{
+					parsed_clip.codec = Codec::FFmpeg;
+				}
 			}
 
 			if (parsed_clip.codec == Codec::None)
 			{
 				parsed_clip.file = std::make_unique<YUV4MPEGFile>();
-				auto clip_path = Path::relpath(path, clip["path"].GetString());
-				if (!parsed_clip.file->open_read(clip_path))
+				parsed_clip.path = Path::relpath(path, clip["path"].GetString());
+				if (!parsed_clip.file->open_read(parsed_clip.path))
 				{
-					LOGE("Failed to open %s for reading.\n", clip_path.c_str());
+					LOGE("Failed to open %s for reading.\n", parsed_clip.path.c_str());
+					throw std::runtime_error("Failed to parse.");
+				}
+			}
+			else if (parsed_clip.codec == Codec::FFmpeg)
+			{
+				parsed_clip.path = Path::relpath(path, clip["path"].GetString());
+				parsed_clip.decoder = std::make_unique<VideoDecoder>();
+				VideoDecoder::DecodeOptions opts = {};
+				opts.blocking = true;
+				if (!parsed_clip.decoder->init(nullptr, parsed_clip.path.c_str(), opts))
+				{
+					LOGE("Failed to open %s for reading.\n", parsed_clip.path.c_str());
 					throw std::runtime_error("Failed to parse.");
 				}
 			}
@@ -154,8 +175,8 @@ struct EvaluatorApplication : Application, EventHandler
 	EvaluatorApplication(const char *path, const char *csv)
 	{
 		test_clips = parse_test_clips(path);
-		if (test_clips.size() < 2)
-			throw std::runtime_error("Need at least two test clips.");
+		if (test_clips.empty())
+			throw std::runtime_error("Need at least one test clip.");
 
 		evaluation_file.reset(fopen(csv, "w"));
 		if (!evaluation_file)
@@ -167,6 +188,12 @@ struct EvaluatorApplication : Application, EventHandler
 		get_wsi().set_backbuffer_format(BackbufferFormat::UNORM);
 		EVENT_MANAGER_REGISTER_LATCH(EvaluatorApplication, on_device_created, on_device_destroyed, DeviceCreatedEvent);
 		EVENT_MANAGER_REGISTER(EvaluatorApplication, on_key_press, KeyboardEvent);
+	}
+
+	ContextCreationFlags get_disable_context_creation_flags() override
+	{
+		return CONTEXT_CREATION_ENABLE_DESCRIPTOR_BUFFER_BIT |
+		       CONTEXT_CREATION_ENABLE_DESCRIPTOR_HEAP_BIT;
 	}
 
 	void register_voting(int score)
@@ -206,6 +233,15 @@ struct EvaluatorApplication : Application, EventHandler
 		{
 			for (auto &clip : clip_group.clips)
 			{
+				if (clip.decoder)
+				{
+					FFmpegDecode::Shaders<> shaders;
+					auto *comp = e.get_device().get_shader_manager().register_compute("builtin://shaders/util/yuv_to_rgb.comp");
+					shaders.yuv_to_rgb = comp->register_variant({})->get_program();
+					if (!clip.decoder->begin_device_context(&e.get_device(), shaders))
+						continue;
+				}
+
 				if (!clip.file)
 					continue;
 
@@ -240,7 +276,10 @@ struct EvaluatorApplication : Application, EventHandler
 
 	void on_device_destroyed(const DeviceCreatedEvent &)
 	{
-		images = {};
+		for (auto &clip_group : test_clips)
+			for (auto &clip : clip_group.clips)
+				if (clip.decoder)
+					clip.decoder->end_device_context();
 	}
 
 	PyroWave::Encoder encoder;
@@ -254,6 +293,7 @@ struct EvaluatorApplication : Application, EventHandler
 	double current_sub_iteration_time = 0.0;
 	bool debug_enable = false;
 	std::default_random_engine random_engine;
+	VideoFrame decoder_frame = {};
 
 	void roundtrip_pyrowave(CommandBufferHandle &cmd, int mbits)
 	{
@@ -371,8 +411,9 @@ struct EvaluatorApplication : Application, EventHandler
 
 			// Ensure that the clip changes every time so it's easier to recalibrate.
 			auto next_clip_range = current_clip_index;
-			while (next_clip_range == current_clip_index)
-				next_clip_range = clip_range(random_engine);
+			if (test_clips.size() > 1)
+				while (next_clip_range == current_clip_index)
+					next_clip_range = clip_range(random_engine);
 			current_clip_index = next_clip_range;
 
 			std::uniform_int_distribution<int> file_range(0, int(test_clips[current_clip_index].clips.size() - 1));
@@ -399,6 +440,12 @@ struct EvaluatorApplication : Application, EventHandler
 					if (!clip.clips[current_test_index].file->rewind())
 						request_shutdown();
 				}
+				else if (clip.clips[current_test_index].codec == Codec::FFmpeg)
+				{
+					auto &dec = *clip.clips[current_test_index].decoder;
+					if (!dec.seek(0))
+						request_shutdown();
+				}
 				else
 				{
 					if (!clip.clips.front().file->rewind())
@@ -414,6 +461,8 @@ struct EvaluatorApplication : Application, EventHandler
 		current_sub_iteration = sub_iteration_index;
 
 		YUV4MPEGFile *file = nullptr;
+		decoder_frame = {};
+
 		switch (current_sub_iteration)
 		{
 		case FirstReferenceSequence:
@@ -424,9 +473,19 @@ struct EvaluatorApplication : Application, EventHandler
 		case FirstTestSequence:
 		case SecondTestSequence:
 			if (clip.clips[current_test_index].codec == Codec::None)
+			{
 				file = clip.clips[current_test_index].file.get();
+			}
+			else if (clip.clips[current_test_index].codec == Codec::FFmpeg)
+			{
+				auto &dec = *clip.clips[current_test_index].decoder;
+				if (!dec.acquire_video_frame(decoder_frame))
+					decoder_frame = {};
+			}
 			else
+			{
 				file = clip.clips.front().file.get();
+			}
 			break;
 
 		default:
@@ -436,26 +495,29 @@ struct EvaluatorApplication : Application, EventHandler
 		if (file && !file->begin_frame())
 			file = nullptr;
 
-		for (auto &img : images.images)
+		if (!decoder_frame.view)
 		{
-			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+			for (auto &img : images.images)
+			{
+				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+								   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+								   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-			auto *ptr = cmd->update_image(*img, {}, {img->get_width(), img->get_height(), 1}, 0, 0,
-			                              {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+				auto *ptr = cmd->update_image(*img, {}, {img->get_width(), img->get_height(), 1}, 0, 0,
+											  {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
 
-			size_t size = img->get_width() * img->get_height() * (img->get_format() == VK_FORMAT_R8_UNORM ? 1 : 2);
+				size_t size = img->get_width() * img->get_height() * (img->get_format() == VK_FORMAT_R8_UNORM ? 1 : 2);
 
-			if (file && !file->read(ptr, size))
-				file = nullptr;
-			if (!file)
-				memset(ptr, 0x80, size);
+				if (file && !file->read(ptr, size))
+					file = nullptr;
+				if (!file)
+					memset(ptr, 0x80, size);
 
-			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
-			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-			                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-			                   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+								   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+								   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+								   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+			}
 		}
 
 		if (clip.clips[current_test_index].codec == Codec::PyroWave &&
@@ -493,15 +555,29 @@ struct EvaluatorApplication : Application, EventHandler
 		// For now, infer from limited vs full range.
 		cmd->set_specialization_constant(2, !representative_file.is_full_range());
 
-		CommandBufferUtil::setup_fullscreen_quad(*cmd, "builtin://shaders/quad.vert", "assets://yuv2rgb.frag",
-		                                         {{ "DELTA", 0 }});
-
 		const float full_color = get_wsi().get_backbuffer_format() == BackbufferFormat::HDR10 ? 0.75f : 1.0f;
 
-		cmd->set_texture(0, 0, images.images[0]->get_view());
-		cmd->set_texture(0, 1, images.images[1]->get_view());
-		cmd->set_texture(0, 2, images.images[2]->get_view());
-		cmd->draw(3);
+		CommandBufferUtil::setup_fullscreen_quad(*cmd, "builtin://shaders/quad.vert", "assets://yuv2rgb.frag",
+		                                         {{"DELTA", 0}});
+
+		if (decoder_frame.view)
+		{
+			cmd->set_specialization_constant_mask(0);
+			cmd->set_texture(0, 0, *decoder_frame.view, StockSampler::LinearClamp);
+			auto *prog = device.get_shader_manager().register_graphics("builtin://shaders/quad.vert", "builtin://shaders/blit.frag");
+			ImmutableSamplerBank sampler_bank = {};
+			sampler_bank.samplers[0][0] = decoder_frame.immutable_sampler;
+			auto *ycbcr_prog = prog->register_variant({}, &sampler_bank);
+			cmd->set_program(ycbcr_prog->get_program());
+			cmd->draw(3);
+		}
+		else
+		{
+			cmd->set_texture(0, 0, images.images[0]->get_view());
+			cmd->set_texture(0, 1, images.images[1]->get_view());
+			cmd->set_texture(0, 2, images.images[2]->get_view());
+			cmd->draw(3);
+		}
 
 		if (debug_enable)
 		{
@@ -564,7 +640,10 @@ struct EvaluatorApplication : Application, EventHandler
 
 		cmd->end_render_pass();
 
-		device.submit(cmd);
+		Semaphore sem;
+		device.submit(cmd, nullptr, 1, &sem);
+		if (decoder_frame.view)
+			test_clips[current_clip_index].clips[current_test_index].decoder->release_video_frame(decoder_frame.index, std::move(sem));
 	}
 
 	YCbCrImages images;
