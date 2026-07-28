@@ -155,6 +155,9 @@ bool YUV4MPEGFile::open(const std::string &path, Mode mode_)
 	else if (params.find("XCOLORRANGE=FULL") != std::string::npos)
 		full_range = true;
 
+	center_chroma = params.find("jpeg") != std::string::npos ||
+	                params.find("JPEG") != std::string::npos;
+
 	if (mode == Mode::Read)
 		initial_position = ftell(file.get());
 
@@ -272,4 +275,9 @@ YUV4MPEGFile::Format YUV4MPEGFile::get_format() const
 bool YUV4MPEGFile::is_full_range() const
 {
 	return full_range;
+}
+
+bool YUV4MPEGFile::is_center_chroma() const
+{
+	return center_chroma;
 }

@@ -557,7 +557,7 @@ struct EvaluatorApplication : Application, EventHandler
 		cmd->set_specialization_constant(0, representative_file.get_format() == YUV4MPEGFile::Format::YUV420P16 || representative_file.get_format() == YUV4MPEGFile::Format::YUV444P16);
 		cmd->set_specialization_constant(1, representative_file.is_full_range());
 		// For now, infer from limited vs full range.
-		cmd->set_specialization_constant(2, !representative_file.is_full_range());
+		cmd->set_specialization_constant(2, !representative_file.is_center_chroma());
 
 		const float full_color = get_wsi().get_backbuffer_format() == BackbufferFormat::HDR10 ? 0.75f : 1.0f;
 
