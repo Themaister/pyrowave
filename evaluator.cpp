@@ -394,8 +394,8 @@ struct EvaluatorApplication : Application, EventHandler
 
 		if  (sub_iteration_index == SubIterationCount)
 		{
-			fprintf(evaluation_file.get(), "%d,%d,%d\n",
-			        current_clip_index, current_test_index, current_voting);
+			fprintf(evaluation_file.get(), "%s,%d,%d\n",
+			        test_clips[current_clip_index].name.c_str(), current_test_index, current_voting);
 		}
 
 		if (sub_iteration_index == SubIterationCount || current_iteration < 0)
