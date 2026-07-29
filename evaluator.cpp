@@ -216,11 +216,13 @@ struct EvaluatorApplication : Application, EventHandler
 	void on_swapchain_destroyed(const SwapchainParameterEvent &)
 	{}
 
+	static constexpr double VotingWidth = 400.0;
+
 	bool on_mouse_click(const MouseButtonEvent &e)
 	{
 		if (current_sub_iteration == MidGrayVote && e.get_pressed() && e.get_button() == MouseButton::Left)
 		{
-			if (e.get_abs_x() < 300.0)
+			if (e.get_abs_x() < VotingWidth)
 			{
 				int vote_index = muglm::max<int>(1, muglm::min<int>(5, int(1.0 + 5.0 * e.get_abs_y() / double(swapchain_height))));
 				register_voting(vote_index);
@@ -687,7 +689,7 @@ struct EvaluatorApplication : Application, EventHandler
 				};
 
 				vec2 offset = vec2(0.0f, (float(i) / 5.0f) * cmd->get_viewport().height);
-				vec2 size = vec2(400.0f, cmd->get_viewport().height / 5.0f);
+				vec2 size = vec2(VotingWidth, cmd->get_viewport().height / 5.0f);
 
 				flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
 					descs[i], vec3(offset, 0.0f), size, vec4(1.0f), Font::Alignment::Center);

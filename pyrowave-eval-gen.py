@@ -43,7 +43,7 @@ def main():
         test_name = input_to_basename(inp)
         scaled_name = f'{test_name}.{args.width}x{args.height}x{444 if args.chroma444 else 420}.y4m'
         out_path = os.path.join(out_dir, scaled_name)
-        subprocess.run(['ffmpeg', '-y', '-i', inp, '-vf', f'scale={args.width}:{args.height}', '-pix_fmt', pix_fmt, '-t', '10', out_path], check = True)
+        subprocess.run(['ffmpeg', '-y', '-i', inp, '-vf', f'scale={args.width}:{args.height}', '-pix_fmt', pix_fmt, '-t', '10', '-ss', '1', out_path], check = True)
         clips = []
         clips.append({ 'path' : scaled_name, 'name' : 'reference', 'desc' : 'reference' })
 
