@@ -649,11 +649,19 @@ struct EvaluatorApplication : Application, EventHandler
 		}
 		else if (current_sub_iteration == MidGrayVote)
 		{
-			char text[256];
+			static const char *descs[] = {
+				"Very annoying (1)",
+				"Annoying (2)",
+				"Slightly annoying (3)",
+				"Perceptible, but not annoying (4)",
+				"Imperceptible (5)",
+			};
+
+			const char *text;
 			if (current_voting != 0)
-				snprintf(text, sizeof(text), "Voted %d", current_voting);
+				text = descs[current_voting - 1];
 			else
-				strcpy(text, "Voting ...");
+				text = "Voting ...";
 
 			flat_renderer.begin();
 
@@ -676,14 +684,6 @@ struct EvaluatorApplication : Application, EventHandler
 					vec4(0.1f, 0.25f, 0.05f, 1.0f),
 					vec4(0.1f, 0.35f, 0.05f, 1.0f),
 					vec4(0.0f, 0.55f, 0.05f, 1.0f),
-				};
-
-				static const char *descs[] = {
-					"Very annoying",
-					"Annoying",
-					"Slightly annoying",
-					"Perceptible, but not annoying",
-					"Imperceptible",
 				};
 
 				vec2 offset = vec2(0.0f, (float(i) / 5.0f) * cmd->get_viewport().height);
