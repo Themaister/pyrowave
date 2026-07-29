@@ -187,7 +187,9 @@ struct EvaluatorApplication : Application, EventHandler
 
 		get_wsi().set_backbuffer_format(BackbufferFormat::UNORM);
 		EVENT_MANAGER_REGISTER_LATCH(EvaluatorApplication, on_device_created, on_device_destroyed, DeviceCreatedEvent);
+		EVENT_MANAGER_REGISTER_LATCH(EvaluatorApplication, on_swapchain_created, on_swapchain_destroyed, SwapchainParameterEvent);
 		EVENT_MANAGER_REGISTER(EvaluatorApplication, on_key_press, KeyboardEvent);
+		EVENT_MANAGER_REGISTER(EvaluatorApplication, on_mouse_click, MouseButtonEvent);
 	}
 
 	ContextCreationFlags get_disable_context_creation_flags() override
@@ -200,6 +202,32 @@ struct EvaluatorApplication : Application, EventHandler
 	{
 		if (current_sub_iteration >= SecondReferenceSequence)
 			current_voting = score;
+	}
+
+	uint32_t swapchain_width = 0;
+	uint32_t swapchain_height = 0;
+
+	void on_swapchain_created(const SwapchainParameterEvent &swap)
+	{
+		swapchain_width = swap.get_width();
+		swapchain_height = swap.get_height();
+	}
+
+	void on_swapchain_destroyed(const SwapchainParameterEvent &)
+	{}
+
+	bool on_mouse_click(const MouseButtonEvent &e)
+	{
+		if (current_sub_iteration == MidGrayVote && e.get_pressed() && e.get_button() == MouseButton::Left)
+		{
+			if (e.get_abs_x() < 300.0)
+			{
+				int vote_index = muglm::max<int>(1, muglm::min<int>(5, int(1.0 + 5.0 * e.get_abs_y() / double(swapchain_height))));
+				register_voting(vote_index);
+			}
+		}
+
+		return true;
 	}
 
 	bool on_key_press(const KeyboardEvent &e)
@@ -394,8 +422,8 @@ struct EvaluatorApplication : Application, EventHandler
 
 		if  (sub_iteration_index == SubIterationCount)
 		{
-			fprintf(evaluation_file.get(), "%s,%d,%d\n",
-			        test_clips[current_clip_index].name.c_str(), current_test_index, current_voting);
+			fprintf(evaluation_file.get(), "%s,%s,%d\n",
+			        test_clips[current_clip_index].name.c_str(), test_clips[current_clip_index].name.c_str(), current_voting);
 		}
 
 		if (sub_iteration_index == SubIterationCount || current_iteration < 0)
@@ -530,7 +558,6 @@ struct EvaluatorApplication : Application, EventHandler
 			roundtrip_pyrowave(cmd, clip.clips[current_test_index].codec_mbits);
 		}
 
-
 		auto &representative_file = *test_clips.front().clips.front().file;
 		frame_pace_is_implicit = false;
 		uint64_t target_relative_ns = 1000000000ull * representative_file.get_frame_rate_den() / representative_file.get_frame_rate_num();
@@ -638,6 +665,34 @@ struct EvaluatorApplication : Application, EventHandler
 			                          vec2(cmd->get_viewport().width, cmd->get_viewport().height),
 			                          vec4(0.0f, 0.0f, 0.0f, 1.0f),
 			                          Font::Alignment::Center);
+
+			for (uint32_t i = 0; i < 5; i++)
+			{
+				static const vec4 colors[] = {
+					vec4(0.2f, 0.05f, 0.05f, 1.0f),
+					vec4(0.2f, 0.15f, 0.05f, 1.0f),
+					vec4(0.1f, 0.25f, 0.05f, 1.0f),
+					vec4(0.1f, 0.35f, 0.05f, 1.0f),
+					vec4(0.0f, 0.55f, 0.05f, 1.0f),
+				};
+
+				static const char *descs[] = {
+					"Very annoying",
+					"Annoying",
+					"Slightly annoying",
+					"Perceptible, but not annoying",
+					"Imperceptible",
+				};
+
+				vec2 offset = vec2(0.0f, (float(i) / 5.0f) * cmd->get_viewport().height);
+				vec2 size = vec2(400.0f, cmd->get_viewport().height / 5.0f);
+
+				flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
+					descs[i], vec3(offset, 0.0f), size, vec4(1.0f), Font::Alignment::Center);
+				flat_renderer.render_text(GRANITE_UI_MANAGER()->get_font(UI::FontSize::Large),
+					descs[i], vec3(offset + vec2(-2.0f, 2.0f), 0.1f), size, vec4(0.1f, 0.1f, 0.1f, 1.0f), Font::Alignment::Center);
+				flat_renderer.render_quad(vec3(offset, 0.5f), size, colors[i]);
+			}
 
 			flat_renderer.flush(*cmd, vec3(0), vec3(cmd->get_viewport().width, cmd->get_viewport().height, 1));
 		}

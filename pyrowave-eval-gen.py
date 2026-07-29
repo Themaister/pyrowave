@@ -43,7 +43,7 @@ def main():
         test_name = input_to_basename(inp)
         scaled_name = f'{test_name}.{args.width}x{args.height}x{444 if args.chroma444 else 420}.y4m'
         out_path = os.path.join(out_dir, scaled_name)
-        subprocess.run(['ffmpeg', '-y', '-i', inp, '-vf', f'scale={args.width}:{args.height}', '-pix_fmt', pix_fmt, out_path], check = True)
+        subprocess.run(['ffmpeg', '-y', '-i', inp, '-vf', f'scale={args.width}:{args.height}', '-pix_fmt', pix_fmt, '-t', '10', out_path], check = True)
         clips = []
         clips.append({ 'path' : scaled_name, 'name' : 'reference', 'desc' : 'reference' })
 
@@ -70,6 +70,7 @@ def main():
                 nut_name = f'{test_name}.{rate}.{pyro}.nut'
                 encoded_out_path = os.path.join(out_dir, encoded_name)
                 encoded_nut_path = os.path.join(out_dir, nut_name)
+                rate = int(rate * args.fps / 60)
                 subprocess.run([args.pyroenc_offline_path, '--output', encoded_out_path, '--intra-refresh', '32', '--bitrate-kbits', str(rate * 1000), out_path], check = True)
                 subprocess.run(['ffmpeg', '-fflags', '+genpts', '-y', '-r', str(args.fps), '-i', encoded_out_path, '-c:v', 'copy', encoded_nut_path], check = True)
                 clips.append({ 'codec' : 'ffmpeg', 'path' : nut_name, 'name' : f'h264_{rate}', 'desc' : f'{pyro} ({rate} mbits)' })
