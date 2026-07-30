@@ -186,7 +186,7 @@ struct EvaluatorApplication : Application, EventHandler
 		random_engine.seed(Util::get_current_time_nsecs());
 
 		get_wsi().set_backbuffer_format(BackbufferFormat::UNORM);
-		EVENT_MANAGER_REGISTER_LATCH(EvaluatorApplication, on_device_created, on_device_destroyed, DeviceCreatedEvent);
+		EVENT_MANAGER_REGISTER_LATCH(EvaluatorApplication, on_pipeline_ready, on_pipeline_done, DevicePipelineReadyEvent);
 		EVENT_MANAGER_REGISTER_LATCH(EvaluatorApplication, on_swapchain_created, on_swapchain_destroyed, SwapchainParameterEvent);
 		EVENT_MANAGER_REGISTER(EvaluatorApplication, on_key_press, KeyboardEvent);
 		EVENT_MANAGER_REGISTER(EvaluatorApplication, on_mouse_click, MouseButtonEvent);
@@ -255,7 +255,7 @@ struct EvaluatorApplication : Application, EventHandler
 		return true;
 	}
 
-	void on_device_created(const DeviceCreatedEvent &e)
+	void on_pipeline_ready(const DevicePipelineReadyEvent &e)
 	{
 		auto &representative_file = *test_clips.front().clips.front().file;
 
@@ -304,7 +304,7 @@ struct EvaluatorApplication : Application, EventHandler
 		decoder.init(&e.get_device(), representative_file.get_width(), representative_file.get_height(), chroma);
 	}
 
-	void on_device_destroyed(const DeviceCreatedEvent &)
+	void on_pipeline_done(const DevicePipelineReadyEvent &)
 	{
 		for (auto &clip_group : test_clips)
 			for (auto &clip : clip_group.clips)
