@@ -497,7 +497,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 	} push = {};
 
 	// Forward transforms.
-	cmd.set_program(shaders.dwt[PYROWAVE_PRECISION]);
+	cmd.set_program(shaders.dwt[Configuration::get().get_precision()]);
 
 	// Only need simple 2-lane swaps.
 	cmd.set_subgroup_size_log2(true, 2, 7);
