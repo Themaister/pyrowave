@@ -567,8 +567,11 @@ struct EvaluatorApplication : Application, EventHandler
 		uint64_t target_relative_ns = 1000000000ull * representative_file.get_frame_rate_den() / representative_file.get_frame_rate_num();
 
 		// If monitor refresh locks to content, just rely on that.
+		// If we cannot determine due to missing extensions (older SteamOS?), just assume frame pace is sound.
 		RefreshRateInfo refresh = {};
-		if (get_wsi().get_refresh_rate_info(refresh) && refresh.refresh_duration)
+		if (!get_wsi().get_refresh_rate_info(refresh) || !refresh.refresh_duration)
+			frame_pace_is_implicit = true;
+		else
 			frame_pace_is_implicit = muglm::abs(double(target_relative_ns) / double(refresh.refresh_duration) - 1.0) < 0.005;
 	}
 
