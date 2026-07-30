@@ -202,4 +202,3 @@ if (${PROJECT_IS_TOP_LEVEL})
         target_link_options(pyrowave-shared PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T)
     endif()
 endif()
-
