@@ -226,6 +226,12 @@ bool pyrowave_device_is_supported(pyrowave_mtl_device mtl_device)
 	return device_is_supported((__bridge id<MTLDevice>)mtl_device);
 }
 
+pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
+{
+	pyrowave_device_create_info info = {};
+	return pyrowave_device_create(&info, device);
+}
+
 pyrowave_result pyrowave_device_create(const pyrowave_device_create_info *info, pyrowave_device *device)
 {
 	if (!info || !device)

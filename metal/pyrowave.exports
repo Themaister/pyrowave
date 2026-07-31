@@ -1,4 +1,5 @@
 # pyrowave-metal.dylib exports
+_pyrowave_create_default_device
 _pyrowave_decoder_clear
 _pyrowave_decoder_create
 _pyrowave_decoder_decode_gpu_buffer

@@ -82,8 +82,9 @@ pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch);
 PYROWAVE_PUBLIC_API const char *
 pyrowave_result_to_string(pyrowave_result result);
 
-//////
-// Device
+// Device API.
+
+PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
 
 typedef struct pyrowave_device_create_info
 {
