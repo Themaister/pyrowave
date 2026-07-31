@@ -228,12 +228,14 @@ bool pyrowave_device_is_supported(pyrowave_mtl_device mtl_device)
 
 pyrowave_result pyrowave_device_create(const pyrowave_device_create_info *info, pyrowave_device *device)
 {
-	if (!info || !device || !info->mtl_device)
+	if (!info || !device)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	@autoreleasepool
 	{
 		id<MTLDevice> mtl = (__bridge id<MTLDevice>)info->mtl_device;
+		if (mtl == nil)
+			mtl = MTLCreateSystemDefaultDevice();
 		if (!device_is_supported(mtl))
 			return PYROWAVE_ERROR_UNSUPPORTED_DEVICE;
 
