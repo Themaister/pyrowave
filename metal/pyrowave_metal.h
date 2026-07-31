@@ -82,16 +82,16 @@ pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch);
 PYROWAVE_PUBLIC_API const char *
 pyrowave_result_to_string(pyrowave_result result);
 
-//////
-// Device
+// Device API.
+
+PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
 
 typedef struct pyrowave_device_create_info
 {
-	// The id<MTLDevice> to decode on. Must be non-NULL and pass
-	// pyrowave_device_is_supported().
+	// The id<MTLDevice> to decode on, or NULL to use the system default device.
 	pyrowave_mtl_device mtl_device;
 
-	// Optional diagnostics sink. If NULL, messages go to stderr.
+	// Optional message callback, or NULL to print to stderr.
 	pyrowave_message_cb message_callback;
 	void *message_userdata;
 } pyrowave_device_create_info;
