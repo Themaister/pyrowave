@@ -168,7 +168,7 @@ def main():
             print(f' 720p -> {rate_mbits(1280, 720, 60, chroma444, HDR):.6} mbit/s')
             print(f' 1080p -> {rate_mbits(1920, 1080, 60, chroma444, HDR):.6} mbit/s')
             print(f' 1440p -> {rate_mbits(2560, 1440, 60, chroma444, HDR):.6} mbit/s')
-            print(f' 4K -> {rate_mbits(3860, 2560, 60, chroma444, HDR):.6} mbit/s')
+            print(f' 4K -> {rate_mbits(3840, 2160, 60, chroma444, HDR):.6} mbit/s')
 
     # Upper end of viability for gigabit ethernet:
     print(f'4K 4:4:4 HDR10 120 FPS -> {rate_mbits(3860, 2560, 120, True, True):.6} mbit/s')
@@ -182,22 +182,22 @@ SDR 4:2:0:
  720p -> 125.0 mbit/s
  1080p -> 170.114 mbit/s
  1440p -> 211.686 mbit/s
- 4K -> 307.906 mbit/s
+ 4K -> 288.086 mbit/s
 SDR 4:4:4:
  720p -> 143.75 mbit/s
  1080p -> 195.631 mbit/s
  1440p -> 243.439 mbit/s
- 4K -> 354.092 mbit/s
+ 4K -> 331.299 mbit/s
 HDR10 4:2:0:
  720p -> 150.0 mbit/s
  1080p -> 204.136 mbit/s
  1440p -> 254.024 mbit/s
- 4K -> 369.487 mbit/s
+ 4K -> 345.703 mbit/s
 HDR10 4:4:4:
  720p -> 172.5 mbit/s
  1080p -> 234.757 mbit/s
  1440p -> 292.127 mbit/s
- 4K -> 424.91 mbit/s
+ 4K -> 397.559 mbit/s
 4K 4:4:4 HDR10 120 FPS -> 849.821 mbit/s (uncompressed is ~29860 mbit/s).
 ```
 
