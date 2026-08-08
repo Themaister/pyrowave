@@ -377,7 +377,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	//auto has_rdoc = Device::init_renderdoc_capture();
+	auto has_rdoc = Device::init_renderdoc_capture();
 
 	float height_factors[NumHeightFactors];
 	for (uint32_t i = 0; i < NumHeightFactors; i++)
@@ -477,6 +477,9 @@ int main(int argc, char **argv)
 
 	for (;;)
 	{
+		if (has_rdoc && frame_count == 10)
+			device.begin_renderdoc_capture();
+
 		VideoFrame reference_frame = {};
 		if (!reference->acquire_video_frame(reference_frame))
 			break;
@@ -490,8 +493,6 @@ int main(int argc, char **argv)
 			device.submit_empty(CommandBuffer::Type::AsyncCompute, nullptr, binary.get());
 			device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(binary), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
 		}
-
-		auto work_buffer = device.create_buffer(atomic_info);
 
 		ImageViewHandle reference_views[3];
 		{
@@ -525,6 +526,9 @@ int main(int argc, char **argv)
 			const ImageView *psnr_test_view = nullptr;
 			ImageViewHandle luma_test_view;
 			VideoFrame test_frame = {};
+			ImageHandle plane_images[3];
+
+			auto work_buffer = device.create_buffer(atomic_info);
 
 			if (test_case.decoder)
 			{
@@ -547,8 +551,6 @@ int main(int argc, char **argv)
 				auto image_info = ImageCreateInfo::immutable_2d_image(width, height, luma_format);
 				image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 				image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-				ImageHandle plane_images[3];
 
 				plane_images[0] = device.create_image(image_info);
 				if (chroma_subsample)
@@ -589,8 +591,12 @@ int main(int argc, char **argv)
 		device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
 		reference->release_video_frame(reference_frame.index, std::move(binary));
 
+		if (has_rdoc && frame_count == 10)
+			device.end_renderdoc_capture();
+
 		frame_count++;
 		LOGI("Completed %u frames ...\n", frame_count);
+
 		device.next_frame_context();
 	}
 
