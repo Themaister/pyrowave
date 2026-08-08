@@ -450,8 +450,14 @@ int main(int argc, char **argv)
 		}
 	}
 
-	auto timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
-	uint64_t timeline_value = 0;
+	struct
+	{
+		Semaphore timeline;
+		uint64_t timeline_value = 0;
+	} graphics_timeline, compute_timeline;
+
+	graphics_timeline.timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
+	compute_timeline.timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
 
 	for (auto &test_case : test_cases)
 	{
@@ -468,11 +474,11 @@ int main(int argc, char **argv)
 	}
 
 	if (!encoder.init(&device, width, height,
-	                  chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
+					  chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
 		return EXIT_FAILURE;
 
 	if (!decoder.init(&device, width, height,
-	                  chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
+					  chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
 		return EXIT_FAILURE;
 
 	for (;;)
@@ -485,11 +491,12 @@ int main(int argc, char **argv)
 			break;
 
 		device.add_wait_semaphore(CommandBuffer::Type::AsyncCompute, std::move(reference_frame.sem),
-		                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+								  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
 
 		{
 			// Dumb workaround so that we can block both queues.
-			auto binary = device.request_timeline_semaphore_as_binary(*timeline, ++timeline_value);
+			auto binary = device.request_timeline_semaphore_as_binary(
+				*compute_timeline.timeline, ++compute_timeline.timeline_value);
 			device.submit_empty(CommandBuffer::Type::AsyncCompute, nullptr, binary.get());
 			device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(binary), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
 		}
@@ -536,7 +543,7 @@ int main(int argc, char **argv)
 					continue;
 
 				device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(test_frame.sem),
-				                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+										  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
 
 				ImageViewCreateInfo view_info = {};
 				view_info.image = &test_frame.view->get_image();
@@ -562,10 +569,10 @@ int main(int argc, char **argv)
 				plane_images[2] = device.create_image(image_info);
 
 				roundtrip_pyrowave(device, encoder, decoder,
-				                   plane_images[0]->get_view(), plane_images[1]->get_view(),
-				                   plane_images[2]->get_view(),
-				                   *reference_views[0], *reference_views[1], *reference_views[2],
-				                   test_case.pyrowave_size);
+								   plane_images[0]->get_view(), plane_images[1]->get_view(),
+								   plane_images[2]->get_view(),
+								   *reference_views[0], *reference_views[1], *reference_views[2],
+								   test_case.pyrowave_size);
 
 				psnr_test_view = &plane_images[0]->get_view();
 			}
@@ -580,16 +587,18 @@ int main(int argc, char **argv)
 
 			if (test_case.decoder)
 			{
-				auto binary = device.request_timeline_semaphore_as_binary(*timeline, ++timeline_value);
+				auto binary = device.request_timeline_semaphore_as_binary(*graphics_timeline.timeline, ++graphics_timeline.timeline_value);
 				device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
 				test_case.decoder->release_video_frame(test_frame.index, std::move(binary));
 			}
 		}
 
 		// Release the reference frame.
-		auto binary = device.request_timeline_semaphore_as_binary(*timeline, ++timeline_value);
-		device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
-		reference->release_video_frame(reference_frame.index, std::move(binary));
+		{
+			auto binary = device.request_timeline_semaphore_as_binary(*graphics_timeline.timeline, ++graphics_timeline.timeline_value);
+			device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
+			reference->release_video_frame(reference_frame.index, std::move(binary));
+		}
 
 		if (has_rdoc && frame_count == 10)
 			device.end_renderdoc_capture();
@@ -616,6 +625,7 @@ int main(int argc, char **argv)
 	}
 
 	test_cases.clear();
-	timeline.reset();
+	graphics_timeline = {};
+	compute_timeline = {};
 	reference.reset();
 }
