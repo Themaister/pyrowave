@@ -85,12 +85,6 @@ if (PYROWAVE_DEVEL)
     target_link_libraries(pyrowave-decode PRIVATE pyrowave)
     target_link_libraries(pyrowave-decode PRIVATE granite-vulkan pyrowave-utils)
 
-    add_granite_offline_tool(pyrowave-psnr-hvs-m psnr.cpp)
-    target_link_libraries(pyrowave-psnr-hvs-m PRIVATE granite-vulkan pyrowave-utils pyrowave)
-    if (NOT ANDROID)
-        target_compile_definitions(pyrowave-psnr-hvs-m PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
-    endif()
-
     add_granite_application(pyrowave-viewer viewer.cpp)
     target_link_libraries(pyrowave-viewer PRIVATE pyrowave pyrowave-utils)
     if (NOT ANDROID)
@@ -175,6 +169,10 @@ if (${PROJECT_IS_TOP_LEVEL})
         install(TARGETS pyrowave-evaluator RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
         install(DIRECTORY assets DESTINATION ${CMAKE_INSTALL_BINDIR})
         install(DIRECTORY Granite/assets/fonts DESTINATION ${CMAKE_INSTALL_BINDIR}/builtin/assets)
+
+        add_granite_offline_tool(pyrowave-psnr-hvs-m psnr.cpp)
+        target_link_libraries(pyrowave-psnr-hvs-m PRIVATE granite-vulkan pyrowave-utils pyrowave granite-video)
+        target_compile_definitions(pyrowave-psnr-hvs-m PRIVATE ASSET_DIRECTORY=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\")
     endif()
 
     set(PYROWAVE_INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
