@@ -15,6 +15,7 @@
 #include "ffmpeg_decode.hpp"
 #include "thread_group.hpp"
 #include "path_utils.hpp"
+#include "scaler.hpp"
 
 using namespace Vulkan;
 using namespace Granite;
@@ -306,6 +307,224 @@ static float get_height_factor_from_index(uint32_t index)
 	return 1.0f + float(index) / 8.0f;
 }
 
+static bool run_reference_tests(Reference &reference, Device &device, std::vector<PSNRTestCase> &test_cases,
+                                PyroWaveRoundtripper &pyrowave, VideoScaler &scaler)
+{
+	FFmpegDecode::Shaders<> shaders;
+	auto *comp = device.get_shader_manager().register_compute("builtin://shaders/util/yuv_to_rgb.comp");
+	shaders.yuv_to_rgb = comp->register_variant({})->get_program();
+
+	if (!reference.decoder->begin_device_context(&device, shaders))
+		return false;
+
+	if (!reference.decoder->play())
+	{
+		LOGE("Failed to start payback of reference.\n");
+		return false;
+	}
+
+	// Throw away the first frame, with predictive codecs the first frame may be more damaged than usual.
+	VideoFrame frame;
+	if (!reference.decoder->acquire_video_frame(frame))
+	{
+		LOGE("Failed to acquire first frame.\n");
+		return false;
+	}
+	reference.decoder->release_video_frame(frame.index, std::move(frame.sem));
+
+	reference.width = frame.view->get_view_width();
+	reference.height = frame.view->get_view_height();
+
+	switch (frame.view->get_format())
+	{
+	case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
+		reference.luma_format = VK_FORMAT_R8_UNORM;
+		reference.chroma_format = VK_FORMAT_R8G8_UNORM;
+		reference.chroma_subsample = true;
+		reference.num_planes = 2;
+		break;
+
+	case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
+		reference.luma_format = VK_FORMAT_R8_UNORM;
+		reference.chroma_format = VK_FORMAT_R8_UNORM;
+		reference.chroma_subsample = true;
+		reference.num_planes = 3;
+		break;
+
+	case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
+		reference.luma_format = VK_FORMAT_R8_UNORM;
+		reference.chroma_format = VK_FORMAT_R8G8_UNORM;
+		reference.chroma_subsample = false;
+		reference.num_planes = 2;
+		break;
+
+	case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
+		reference.luma_format = VK_FORMAT_R8_UNORM;
+		reference.chroma_format = VK_FORMAT_R8_UNORM;
+		reference.chroma_subsample = false;
+		reference.num_planes = 3;
+		break;
+
+	default:
+		LOGE("TODO: Add more format support\n");
+		return false;
+	}
+
+	struct
+	{
+		Semaphore timeline;
+		uint64_t timeline_value = 0;
+	} graphics_timeline, compute_timeline;
+
+	graphics_timeline.timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
+	compute_timeline.timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
+
+	BufferCreateInfo atomic_info = {};
+	atomic_info.size = sizeof(uint64_t) * NumHeightFactors;
+	atomic_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	atomic_info.domain = BufferDomain::LinkedDeviceHost;
+	atomic_info.misc = BUFFER_MISC_ZERO_INITIALIZE_BIT;
+
+	float height_factors[NumHeightFactors];
+	for (uint32_t i = 0; i < NumHeightFactors; i++)
+		height_factors[i] = get_height_factor_from_index(i);
+
+	for (;;)
+	{
+		VideoFrame reference_frame = {};
+		if (!reference.decoder->acquire_video_frame(reference_frame))
+			break;
+
+		device.add_wait_semaphore(CommandBuffer::Type::AsyncCompute, std::move(reference_frame.sem),
+								  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+
+		{
+			// Dumb workaround so that we can block both queues.
+			auto binary = device.request_timeline_semaphore_as_binary(
+				*compute_timeline.timeline, ++compute_timeline.timeline_value);
+			device.submit_empty(CommandBuffer::Type::AsyncCompute, nullptr, binary.get());
+			device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(binary), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+		}
+
+		ImageViewHandle reference_views[3];
+		{
+			ImageViewCreateInfo view_info = {};
+			view_info.image = &reference_frame.view->get_image();
+			view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
+			view_info.format = reference.luma_format;
+			view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+
+			for (int i = 0; i < 3; i++)
+			{
+				view_info.format = i ? reference.chroma_format : reference.luma_format;
+
+				if (reference.num_planes == 2 && i == 2)
+				{
+					view_info.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+					view_info.swizzle.r = VK_COMPONENT_SWIZZLE_G;
+				}
+				else
+				{
+					view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT << i;
+					view_info.swizzle.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+				}
+
+				reference_views[i] = device.create_image_view(view_info);
+			}
+		}
+
+		for (auto &test_case : test_cases)
+		{
+			const ImageView *psnr_test_view = nullptr;
+			ImageViewHandle luma_test_view;
+			VideoFrame test_frame = {};
+			ImageHandle plane_images[3];
+
+			auto work_buffer = device.create_buffer(atomic_info);
+
+			if (test_case.decoder)
+			{
+				if (!test_case.decoder->acquire_video_frame(test_frame))
+					continue;
+
+				device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(test_frame.sem),
+										  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+
+				ImageViewCreateInfo view_info = {};
+				view_info.image = &test_frame.view->get_image();
+				view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
+				view_info.format = reference.luma_format;
+				view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+				luma_test_view = device.create_image_view(view_info);
+				psnr_test_view = luma_test_view.get();
+
+				if (test_frame.pts < 0.0 || muglm::abs(test_frame.pts - reference_frame.pts) > 0.001)
+				{
+					LOGI("Test %s, frame count %u, reference PTS %.3f != test PTS %.3f\n",
+						 test_case.desc.c_str(), reference.frame_count,
+						 reference_frame.pts, test_frame.pts);
+				}
+			}
+			else
+			{
+				if (!pyrowave.ensure(device, reference.width, reference.height,
+									 reference.chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
+					return false;
+
+				auto image_info = ImageCreateInfo::immutable_2d_image(reference.width, reference.height, reference.luma_format);
+				image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+				image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+				plane_images[0] = device.create_image(image_info);
+				if (reference.chroma_subsample)
+				{
+					image_info.width /= 2;
+					image_info.height /= 2;
+				}
+				plane_images[1] = device.create_image(image_info);
+				plane_images[2] = device.create_image(image_info);
+
+				roundtrip_pyrowave(device, *pyrowave.encoder, *pyrowave.decoder,
+								   plane_images[0]->get_view(), plane_images[1]->get_view(),
+								   plane_images[2]->get_view(),
+								   *reference_views[0], *reference_views[1], *reference_views[2],
+								   test_case.pyrowave_size);
+
+				psnr_test_view = &plane_images[0]->get_view();
+			}
+
+			WorkItem item;
+			auto sync = compute_total_errors_psnr_hvs_m(
+				device, *reference_views[0], *psnr_test_view,
+				*work_buffer, height_factors, NumHeightFactors, test_case.total_pixels);
+			item.fence = std::move(sync.fence);
+			item.buffer = std::move(work_buffer);
+			test_case.work_items.push_back(std::move(item));
+
+			if (test_case.decoder)
+			{
+				auto binary = device.request_timeline_semaphore_as_binary(*graphics_timeline.timeline, ++graphics_timeline.timeline_value);
+				device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
+				test_case.decoder->release_video_frame(test_frame.index, std::move(binary));
+			}
+
+			device.next_frame_context();
+		}
+
+		// Release the reference frame.
+		{
+			auto binary = device.request_timeline_semaphore_as_binary(*graphics_timeline.timeline, ++graphics_timeline.timeline_value);
+			device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
+			reference.decoder->release_video_frame(reference_frame.index, std::move(binary));
+		}
+
+		reference.frame_count++;
+		LOGI("Completed %u frames of %s ...\n", reference.frame_count, reference.desc.c_str());
+	}
+
+	return true;
+}
+
 int main(int argc, char **argv)
 {
 	std::vector<size_t> pyrowave_sizes;
@@ -435,6 +654,10 @@ int main(int argc, char **argv)
 	auto *comp = device.get_shader_manager().register_compute("builtin://shaders/util/yuv_to_rgb.comp");
 	shaders.yuv_to_rgb = comp->register_variant({})->get_program();
 
+	VideoScaler scaler;
+	auto *scaler_comp = device.get_shader_manager().register_compute("builtin://shaders/util/scaler.comp");
+	scaler.set_program(scaler_comp->register_variant({})->get_program());
+
 	for (auto &test_case : test_cases)
 	{
 		if (test_case.decoder)
@@ -450,28 +673,7 @@ int main(int argc, char **argv)
 		}
 	}
 
-	auto has_rdoc = Device::init_renderdoc_capture();
-
-	float height_factors[NumHeightFactors];
-	for (uint32_t i = 0; i < NumHeightFactors; i++)
-		height_factors[i] = get_height_factor_from_index(i);
-
-	BufferCreateInfo atomic_info = {};
-	atomic_info.size = sizeof(uint64_t) * NumHeightFactors;
-	atomic_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-	atomic_info.domain = BufferDomain::LinkedDeviceHost;
-	atomic_info.misc = BUFFER_MISC_ZERO_INITIALIZE_BIT;
-
 	PyroWaveRoundtripper pyrowave;
-
-	struct
-	{
-		Semaphore timeline;
-		uint64_t timeline_value = 0;
-	} graphics_timeline, compute_timeline;
-
-	graphics_timeline.timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
-	compute_timeline.timeline = device.request_semaphore(VK_SEMAPHORE_TYPE_TIMELINE);
 
 	for (auto &test_case : test_cases)
 	{
@@ -488,208 +690,10 @@ int main(int argc, char **argv)
 		test_case.decoder->release_video_frame(frame.index, std::move(frame.sem));
 	}
 
-	constexpr uint32_t CaptureFrameStart = 10;
-	constexpr uint32_t CaptureFrameEnd = 10;
-
 	for (auto &reference : references)
 	{
-		if (!reference.decoder->begin_device_context(&device, shaders))
+		if (!run_reference_tests(reference, device, test_cases, pyrowave, scaler))
 			return EXIT_FAILURE;
-		if (!reference.decoder->play())
-		{
-			LOGE("Failed to start payback of reference.\n");
-			return EXIT_FAILURE;
-		}
-
-		// Throw away the first frame, with predictive codecs the first frame may be more damaged than usual.
-		VideoFrame frame;
-		if (!reference.decoder->acquire_video_frame(frame))
-		{
-			LOGE("Failed to acquire first frame.\n");
-			return EXIT_FAILURE;
-		}
-		reference.decoder->release_video_frame(frame.index, std::move(frame.sem));
-
-		reference.width = frame.view->get_view_width();
-		reference.height = frame.view->get_view_height();
-
-		switch (frame.view->get_format())
-		{
-		case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
-			reference.luma_format = VK_FORMAT_R8_UNORM;
-			reference.chroma_format = VK_FORMAT_R8G8_UNORM;
-			reference.chroma_subsample = true;
-			reference.num_planes = 2;
-			break;
-
-		case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
-			reference.luma_format = VK_FORMAT_R8_UNORM;
-			reference.chroma_format = VK_FORMAT_R8_UNORM;
-			reference.chroma_subsample = true;
-			reference.num_planes = 3;
-			break;
-
-		case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
-			reference.luma_format = VK_FORMAT_R8_UNORM;
-			reference.chroma_format = VK_FORMAT_R8G8_UNORM;
-			reference.chroma_subsample = false;
-			reference.num_planes = 2;
-			break;
-
-		case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
-			reference.luma_format = VK_FORMAT_R8_UNORM;
-			reference.chroma_format = VK_FORMAT_R8_UNORM;
-			reference.chroma_subsample = false;
-			reference.num_planes = 3;
-			break;
-
-		default:
-			LOGE("TODO: Add more format support\n");
-			return EXIT_FAILURE;
-		}
-
-		for (;;)
-		{
-			if (has_rdoc && reference.frame_count == CaptureFrameStart)
-				device.begin_renderdoc_capture();
-
-			VideoFrame reference_frame = {};
-			if (!reference.decoder->acquire_video_frame(reference_frame))
-				break;
-
-			device.add_wait_semaphore(CommandBuffer::Type::AsyncCompute, std::move(reference_frame.sem),
-									  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
-
-			if (!distorted.empty())
-			{
-				// Dumb workaround so that we can block both queues.
-				auto binary = device.request_timeline_semaphore_as_binary(
-					*compute_timeline.timeline, ++compute_timeline.timeline_value);
-				device.submit_empty(CommandBuffer::Type::AsyncCompute, nullptr, binary.get());
-				device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(binary), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
-			}
-
-			ImageViewHandle reference_views[3];
-			{
-				ImageViewCreateInfo view_info = {};
-				view_info.image = &reference_frame.view->get_image();
-				view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
-				view_info.format = reference.luma_format;
-				view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
-
-				for (int i = 0; i < 3; i++)
-				{
-					view_info.format = i ? reference.chroma_format : reference.luma_format;
-
-					if (reference.num_planes == 2 && i == 2)
-					{
-						view_info.aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
-						view_info.swizzle.r = VK_COMPONENT_SWIZZLE_G;
-					}
-					else
-					{
-						view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT << i;
-						view_info.swizzle.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-					}
-
-					reference_views[i] = device.create_image_view(view_info);
-				}
-			}
-
-			for (auto &test_case : test_cases)
-			{
-				const ImageView *psnr_test_view = nullptr;
-				ImageViewHandle luma_test_view;
-				VideoFrame test_frame = {};
-				ImageHandle plane_images[3];
-
-				auto work_buffer = device.create_buffer(atomic_info);
-
-				if (test_case.decoder)
-				{
-					if (!test_case.decoder->acquire_video_frame(test_frame))
-						continue;
-
-					device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(test_frame.sem),
-											  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
-
-					ImageViewCreateInfo view_info = {};
-					view_info.image = &test_frame.view->get_image();
-					view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
-					view_info.format = reference.luma_format;
-					view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
-					luma_test_view = device.create_image_view(view_info);
-					psnr_test_view = luma_test_view.get();
-
-					if (test_frame.pts < 0.0 || muglm::abs(test_frame.pts - reference_frame.pts) > 0.001)
-					{
-						LOGI("Test %s, frame count %u, reference PTS %.3f != test PTS %.3f\n",
-							 test_case.desc.c_str(), reference.frame_count,
-							 reference_frame.pts, test_frame.pts);
-					}
-				}
-				else
-				{
-					if (!pyrowave.ensure(device, reference.width, reference.height,
-										 reference.chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
-						return EXIT_FAILURE;
-
-					auto image_info = ImageCreateInfo::immutable_2d_image(reference.width, reference.height, reference.luma_format);
-					image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-					image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-					plane_images[0] = device.create_image(image_info);
-					if (reference.chroma_subsample)
-					{
-						image_info.width /= 2;
-						image_info.height /= 2;
-					}
-					plane_images[1] = device.create_image(image_info);
-					plane_images[2] = device.create_image(image_info);
-
-					roundtrip_pyrowave(device, *pyrowave.encoder, *pyrowave.decoder,
-									   plane_images[0]->get_view(), plane_images[1]->get_view(),
-									   plane_images[2]->get_view(),
-									   *reference_views[0], *reference_views[1], *reference_views[2],
-									   test_case.pyrowave_size);
-
-					psnr_test_view = &plane_images[0]->get_view();
-				}
-
-				WorkItem item;
-				auto sync = compute_total_errors_psnr_hvs_m(
-					device, *reference_views[0], *psnr_test_view,
-					*work_buffer, height_factors, NumHeightFactors, test_case.total_pixels);
-				item.fence = std::move(sync.fence);
-				item.buffer = std::move(work_buffer);
-				test_case.work_items.push_back(std::move(item));
-
-				if (test_case.decoder)
-				{
-					auto binary = device.request_timeline_semaphore_as_binary(*graphics_timeline.timeline, ++graphics_timeline.timeline_value);
-					device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
-					test_case.decoder->release_video_frame(test_frame.index, std::move(binary));
-				}
-			}
-
-			// Release the reference frame.
-			{
-				auto binary = device.request_timeline_semaphore_as_binary(*graphics_timeline.timeline, ++graphics_timeline.timeline_value);
-				device.submit_empty(CommandBuffer::Type::Generic, nullptr, binary.get());
-				reference.decoder->release_video_frame(reference_frame.index, std::move(binary));
-			}
-
-			if (has_rdoc && reference.frame_count == CaptureFrameEnd)
-			{
-				device.end_renderdoc_capture();
-				break;
-			}
-
-			reference.frame_count++;
-			LOGI("Completed %u frames of %s ...\n", reference.frame_count, reference.desc.c_str());
-
-			device.next_frame_context();
-		}
 
 		// Save some resources.
 		reference = {};
@@ -704,12 +708,10 @@ int main(int argc, char **argv)
 		{
 			LOGI("Test: %s || TargetSize %zu || HeightFactor = %.2f || PSNR-HVS-M-H: (Y) %4.4f dB\n",
 				test_case.desc.c_str(), test_case.pyrowave_size,
-				height_factors[i], test_case.psnr_hvs_m[i]);
+				get_height_factor_from_index(i), test_case.psnr_hvs_m[i]);
 		}
 	}
 
 	test_cases.clear();
 	references.clear();
-	graphics_timeline = {};
-	compute_timeline = {};
 }
