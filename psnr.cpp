@@ -63,6 +63,7 @@ static void roundtrip_pyrowave(
 	buffers.meta.size = meta_gpu->get_create_info().size;
 
 	auto cmd = device.request_command_buffer(CommandBuffer::Type::AsyncCompute);
+	cmd->begin_region("Roundtrip encode");
 	encoder.encode(*cmd, views, buffers);
 
 	cmd->barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
@@ -72,6 +73,7 @@ static void roundtrip_pyrowave(
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 	Fence fence;
+	cmd->end_region();
 	device.submit(cmd, &fence);
 	fence->wait();
 
@@ -83,6 +85,7 @@ static void roundtrip_pyrowave(
 					  mapped_meta, mapped_bitstream);
 
 	cmd = device.request_command_buffer(CommandBuffer::Type::AsyncCompute);
+	cmd->begin_region("Roundtrip decode");
 
 	const Image *images[] = { &out_y.get_image(), &out_cb.get_image(), &out_cr.get_image() };
 
@@ -108,6 +111,7 @@ static void roundtrip_pyrowave(
 						   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 	}
 
+	cmd->end_region();
 	Semaphore sem;
 	device.submit(cmd, nullptr, 1, &sem);
 	device.add_wait_semaphore(CommandBuffer::Type::Generic, std::move(sem), VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
@@ -124,6 +128,8 @@ static Sync compute_total_errors_psnr_hvs_m(Device &device, const ImageView &a, 
                                             uint64_t &total_pixels)
 {
 	auto cmd = device.request_command_buffer();
+
+	cmd->begin_region("Compute PSNR");
 
 	cmd->set_program("assets://psnr_hvs_m.comp");
 	cmd->set_texture(0, 0, a);
@@ -209,6 +215,8 @@ static Sync compute_total_errors_psnr_hvs_m(Device &device, const ImageView &a, 
 
 	cmd->barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
 	             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+	cmd->end_region();
 	device.submit(cmd, &sync.fence, 1, &sync.semaphore);
 
 	return sync;
@@ -221,6 +229,7 @@ static void print_help()
 		"\t[--reference <path>]\n"
 		"\t[--pyrowave-target-size <bytes>]\n"
 		"\t[--pyrowave-target-size-range <start> <end> <step>]\n"
+		"\t[--scale-size <width> <height> <4:2:0 or 4:4:4>]\n"
 		"\t[--distorted <path>]\n");
 }
 
@@ -259,6 +268,10 @@ struct PSNRTestCase
 	uint64_t total_pixels = 0;
 	double psnr_hvs_m[NumHeightFactors] = {};
 	std::vector<WorkItem> work_items;
+
+	uint32_t scale_width = 0;
+	uint32_t scale_height = 0;
+	ChromaSubsampling scale_chroma = {};
 };
 
 struct Reference
@@ -389,11 +402,16 @@ static bool run_reference_tests(Reference &reference, Device &device, std::vecto
 	for (uint32_t i = 0; i < NumHeightFactors; i++)
 		height_factors[i] = get_height_factor_from_index(i);
 
+	bool has_rdoc = Device::init_renderdoc_capture();
+
 	for (;;)
 	{
 		VideoFrame reference_frame = {};
 		if (!reference.decoder->acquire_video_frame(reference_frame))
 			break;
+
+		if (has_rdoc)
+			device.begin_renderdoc_capture();
 
 		device.add_wait_semaphore(CommandBuffer::Type::AsyncCompute, std::move(reference_frame.sem),
 								  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
@@ -439,6 +457,8 @@ static bool run_reference_tests(Reference &reference, Device &device, std::vecto
 			ImageViewHandle luma_test_view;
 			VideoFrame test_frame = {};
 			ImageHandle plane_images[3];
+			const ImageView *input_views[3] = {};
+			ImageHandle scale_outputs[3];
 
 			auto work_buffer = device.create_buffer(atomic_info);
 
@@ -464,30 +484,104 @@ static bool run_reference_tests(Reference &reference, Device &device, std::vecto
 						 test_case.desc.c_str(), reference.frame_count,
 						 reference_frame.pts, test_frame.pts);
 				}
+
+				for (int i = 0; i < 3; i++)
+					input_views[i] = reference_views[i].get();
 			}
 			else
 			{
-				if (!pyrowave.ensure(device, reference.width, reference.height,
-									 reference.chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444))
-					return false;
+				auto reference_chroma = reference.chroma_subsample ? ChromaSubsampling::Chroma420 : ChromaSubsampling::Chroma444;
+				auto chroma = reference_chroma;
 
-				auto image_info = ImageCreateInfo::immutable_2d_image(reference.width, reference.height, reference.luma_format);
-				image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-				image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+				uint32_t width = reference.width;
+				uint32_t height = reference.height;
 
-				plane_images[0] = device.create_image(image_info);
-				if (reference.chroma_subsample)
+				if (test_case.scale_width && test_case.scale_height)
 				{
-					image_info.width /= 2;
-					image_info.height /= 2;
+					width = test_case.scale_width;
+					height = test_case.scale_height;
+					chroma = test_case.scale_chroma;
 				}
-				plane_images[1] = device.create_image(image_info);
-				plane_images[2] = device.create_image(image_info);
+
+				if (test_case.scale_width && test_case.scale_height &&
+				    (test_case.scale_width != reference.width ||
+				     test_case.scale_height != reference.height ||
+				     test_case.scale_chroma != reference_chroma))
+				{
+					auto image_info = ImageCreateInfo::immutable_2d_image(width, height, reference.luma_format);
+					image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+					image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+					scale_outputs[0] = device.create_image(image_info);
+					if (test_case.scale_chroma == ChromaSubsampling::Chroma420)
+					{
+						image_info.width /= 2;
+						image_info.height /= 2;
+					}
+					scale_outputs[1] = device.create_image(image_info);
+					scale_outputs[2] = device.create_image(image_info);
+
+					auto cmd = device.request_command_buffer(CommandBuffer::Type::AsyncCompute);
+					cmd->begin_region("scale");
+					for (auto &scale : scale_outputs)
+					{
+						cmd->image_barrier(*scale, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+						                   0, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+						                   VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+					}
+
+					VideoScaler::RescaleInfo scale_info = {};
+
+					for (int i = 0; i < 3; i++)
+					{
+						scale_info.input = reference_views[i].get();
+						scale_info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+						scale_info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+						scale_info.num_output_planes = 1;
+						scale_info.output_planes[0] = &scale_outputs[i]->get_view();
+						scaler.rescale(*cmd, scale_info);
+					}
+
+					for (auto &scale: scale_outputs)
+					{
+						cmd->image_barrier(*scale, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+						                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+						                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+					}
+
+					cmd->end_region();
+					device.submit(cmd);
+
+					for (int i = 0; i < 3; i++)
+						input_views[i] = &scale_outputs[i]->get_view();
+				}
+				else
+				{
+					for (int i = 0; i < 3; i++)
+						input_views[i] = reference_views[i].get();
+				}
+
+				{
+					auto image_info = ImageCreateInfo::immutable_2d_image(width, height, reference.luma_format);
+					image_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+					image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+					plane_images[0] = device.create_image(image_info);
+					if (chroma == ChromaSubsampling::Chroma420)
+					{
+						image_info.width /= 2;
+						image_info.height /= 2;
+					}
+					plane_images[1] = device.create_image(image_info);
+					plane_images[2] = device.create_image(image_info);
+				}
+
+				if (!pyrowave.ensure(device, width, height, chroma))
+					return false;
 
 				roundtrip_pyrowave(device, *pyrowave.encoder, *pyrowave.decoder,
 								   plane_images[0]->get_view(), plane_images[1]->get_view(),
 								   plane_images[2]->get_view(),
-								   *reference_views[0], *reference_views[1], *reference_views[2],
+								   *input_views[0], *input_views[1], *input_views[2],
 								   test_case.pyrowave_size);
 
 				psnr_test_view = &plane_images[0]->get_view();
@@ -495,7 +589,7 @@ static bool run_reference_tests(Reference &reference, Device &device, std::vecto
 
 			WorkItem item;
 			auto sync = compute_total_errors_psnr_hvs_m(
-				device, *reference_views[0], *psnr_test_view,
+				device, *input_views[0], *psnr_test_view,
 				*work_buffer, height_factors, NumHeightFactors, test_case.total_pixels);
 			item.fence = std::move(sync.fence);
 			item.buffer = std::move(work_buffer);
@@ -520,6 +614,12 @@ static bool run_reference_tests(Reference &reference, Device &device, std::vecto
 
 		reference.frame_count++;
 		LOGI("Completed %u frames of %s ...\n", reference.frame_count, reference.desc.c_str());
+
+		if (has_rdoc)
+		{
+			device.end_renderdoc_capture();
+			has_rdoc = false;
+		}
 	}
 
 	return true;
@@ -530,6 +630,7 @@ int main(int argc, char **argv)
 	std::vector<size_t> pyrowave_sizes;
 	std::vector<std::string> distorted;
 	std::vector<std::string> reference_paths;
+	std::vector<uvec3> scale_sizes;
 	CLICallbacks cbs;
 
 	cbs.add("--help", [&](CLIParser &parser) { parser.end(); });
@@ -548,6 +649,21 @@ int main(int argc, char **argv)
 			pyrowave_sizes.push_back(start_size);
 			start_size += step_size;
 		}
+	});
+	cbs.add("--scale-size", [&](CLIParser &parser)
+	{
+		uint32_t width = parser.next_uint();
+		uint32_t height = parser.next_uint();
+		uint32_t chroma_full;
+		const char *chroma = parser.next_string();
+		if (strcmp(chroma, "4:2:0") == 0)
+			chroma_full = 0;
+		else if (strcmp(chroma, "4:4:4") == 0)
+			chroma_full = 1;
+		else
+			throw std::invalid_argument("Need 4:2:0 or 4:4:4 chroma");
+
+		scale_sizes.emplace_back(width, height, chroma_full);
 	});
 	cbs.add("--distorted", [&](CLIParser &parser) { distorted.emplace_back(parser.next_string()); });
 
@@ -616,6 +732,14 @@ int main(int argc, char **argv)
 		test_case.desc = "pyrowave_" + std::to_string(pyro);
 		test_case.pyrowave_size = pyro;
 		test_cases.push_back(std::move(test_case));
+
+		for (auto &size: scale_sizes)
+		{
+			test_case.scale_width = size.x;
+			test_case.scale_height = size.y;
+			test_case.scale_chroma = size.z ? ChromaSubsampling::Chroma444 : ChromaSubsampling::Chroma420;
+			test_cases.push_back(std::move(test_case));
+		}
 	}
 
 	for (auto &dist : distorted)
@@ -706,8 +830,10 @@ int main(int argc, char **argv)
 
 		for (uint32_t i = 0; i < NumHeightFactors; i++)
 		{
-			LOGI("Test: %s || TargetSize %zu || HeightFactor = %.2f || PSNR-HVS-M-H: (Y) %4.4f dB\n",
-				test_case.desc.c_str(), test_case.pyrowave_size,
+			LOGI("Test: %s || ScaleSize %u x %u %s || TargetSize %zu || HeightFactor = %.2f || PSNR-HVS-M-H: (Y) %4.4f dB\n",
+				test_case.desc.c_str(), test_case.scale_width, test_case.scale_height,
+				(test_case.scale_chroma == ChromaSubsampling::Chroma420 ? "4:2:0" : "4:4:4"),
+				test_case.pyrowave_size,
 				get_height_factor_from_index(i), test_case.psnr_hvs_m[i]);
 		}
 	}
