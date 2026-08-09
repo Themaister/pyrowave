@@ -230,6 +230,7 @@ static void print_help()
 		"\t[--pyrowave-target-size <bytes>]\n"
 		"\t[--pyrowave-target-size-range <start> <end> <step>]\n"
 		"\t[--scale-size <width> <height> <4:2:0 or 4:4:4>]\n"
+		"\t[--scale-size-sweep]\n"
 		"\t[--csv <path>]\n"
 		"\t[--frames <frames>]\n"
 		"\t[--distorted <path>]\n");
@@ -674,6 +675,16 @@ int main(int argc, char **argv)
 
 		scale_sizes.emplace_back(width, height, chroma_full);
 	});
+	cbs.add("--scale-size-sweep", [&](CLIParser &)
+	{
+		for (uint32_t height = 720; height <= 2160; height += 9 * 4)
+		{
+			uint32_t width = (height / 9) * 16;
+			scale_sizes.emplace_back(width, height, 0);
+			scale_sizes.emplace_back(width, height, 1);
+			LOGI("Adding sweep size %u x %u\n", width, height);
+		}
+	});
 	cbs.add("--distorted", [&](CLIParser &parser) { distorted.emplace_back(parser.next_string()); });
 
 	CLIParser parser(std::move(cbs), argc - 1, argv + 1);
@@ -759,14 +770,20 @@ int main(int argc, char **argv)
 		PSNRTestCase test_case;
 		test_case.desc = "pyrowave_" + std::to_string(pyro);
 		test_case.pyrowave_size = pyro;
-		test_cases.push_back(std::move(test_case));
 
-		for (auto &size: scale_sizes)
+		if (scale_sizes.empty())
 		{
-			test_case.scale_width = size.x;
-			test_case.scale_height = size.y;
-			test_case.scale_chroma = size.z ? ChromaSubsampling::Chroma444 : ChromaSubsampling::Chroma420;
 			test_cases.push_back(std::move(test_case));
+		}
+		else
+		{
+			for (auto &size : scale_sizes)
+			{
+				test_case.scale_width = size.x;
+				test_case.scale_height = size.y;
+				test_case.scale_chroma = size.z ? ChromaSubsampling::Chroma444 : ChromaSubsampling::Chroma420;
+				test_cases.push_back(std::move(test_case));
+			}
 		}
 	}
 

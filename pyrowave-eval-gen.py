@@ -34,7 +34,7 @@ def main():
     tests = {}
     num_pixels = args.width * args.height
     pyrowave_bitrate_candidates_baseline = [ 10, 20, 35, 50, 75, 100, 125, 150, 175, 200, 250 ]
-    pyroenc_bitrate_candidates_baseline = [ 1, 2, 3, 5, 8, 10, 15, 20, 30, 50, 80, 100 ]
+    pyroenc_bitrate_candidates_baseline = [ 1, 2, 3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100 ]
 
     if (args.h264 or args.h265) and args.chroma444:
         raise ArgumentError('h264/h265 testing is currently not compatible with 4:4:4')
@@ -43,7 +43,7 @@ def main():
         test_name = input_to_basename(inp)
         scaled_name = f'{test_name}.{args.width}x{args.height}x{444 if args.chroma444 else 420}.y4m'
         out_path = os.path.join(out_dir, scaled_name)
-        subprocess.run(['ffmpeg', '-y', '-i', inp, '-vf', f'scale={args.width}:{args.height}', '-pix_fmt', pix_fmt, '-t', '10', '-ss', '1', out_path], check = True)
+        subprocess.run(['ffmpeg', '-r', str(args.fps), '-y', '-i', inp, '-vf', f'scale={args.width}:{args.height}', '-pix_fmt', pix_fmt, '-t', '10', '-ss', '1', out_path], check = True)
         clips = []
         clips.append({ 'path' : scaled_name, 'name' : 'reference', 'desc' : 'reference' })
 
@@ -73,7 +73,7 @@ def main():
                 rate = int(rate * args.fps / 60)
                 subprocess.run([args.pyroenc_offline_path, '--output', encoded_out_path, '--intra-refresh', '32', '--bitrate-kbits', str(rate * 1000), out_path], check = True)
                 subprocess.run(['ffmpeg', '-fflags', '+genpts', '-y', '-r', str(args.fps), '-i', encoded_out_path, '-c:v', 'copy', encoded_nut_path], check = True)
-                clips.append({ 'codec' : 'ffmpeg', 'path' : nut_name, 'name' : f'h264_{rate}', 'desc' : f'{pyro} ({rate} mbits)' })
+                clips.append({ 'codec' : 'ffmpeg', 'path' : nut_name, 'name' : f'{pyro}_{rate}', 'desc' : f'{pyro} ({rate} mbits)' })
                 os.remove(encoded_out_path)
 
         tests[test_name] = clips
