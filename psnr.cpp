@@ -230,6 +230,7 @@ static void print_help()
 		"\t[--pyrowave-target-size <bytes>]\n"
 		"\t[--pyrowave-target-size-range <start> <end> <step>]\n"
 		"\t[--scale-size <width> <height> <4:2:0 or 4:4:4>]\n"
+		"\t[--csv <path>]\n"
 		"\t[--distorted <path>]\n");
 }
 
@@ -631,11 +632,13 @@ int main(int argc, char **argv)
 	std::vector<std::string> distorted;
 	std::vector<std::string> reference_paths;
 	std::vector<uvec3> scale_sizes;
+	std::string csv;
 	CLICallbacks cbs;
 
 	cbs.add("--help", [&](CLIParser &parser) { parser.end(); });
 	cbs.add("--reference", [&](CLIParser &parser) { reference_paths.emplace_back(parser.next_string()); });
 	cbs.add("--pyrowave-target-size", [&](CLIParser &parser) { pyrowave_sizes.push_back(parser.next_uint()); });
+	cbs.add("--csv", [&](CLIParser &parser) { csv = parser.next_string(); });
 	cbs.add("--pyrowave-target-size-range", [&](CLIParser &parser)
 	{
 		uint32_t start_size = parser.next_uint();
@@ -698,6 +701,25 @@ int main(int argc, char **argv)
 		LOGE("Need to provide --distorted or --pyrowave-target-size at least once\n");
 		print_help();
 		return EXIT_SUCCESS;
+	}
+
+	FILE *csv_file = nullptr;
+	if (!csv.empty())
+	{
+		csv_file = fopen(csv.c_str(), "w");
+		if (!csv_file)
+		{
+			LOGE("Failed to open CSV: %s\n", csv.c_str());
+			return EXIT_FAILURE;
+		}
+	}
+
+	if (csv_file)
+	{
+		fprintf(csv_file, "size_kb,width,height,444");
+		for (uint32_t i = 0; i < NumHeightFactors; i++)
+			fprintf(csv_file, ",h_%d_cents_psnr_db", int(100 * get_height_factor_from_index(i)));
+		fprintf(csv_file, "\n");
 	}
 
 	std::vector<Reference> references;
@@ -820,13 +842,29 @@ int main(int argc, char **argv)
 			return EXIT_FAILURE;
 
 		// Save some resources.
-		reference = {};
+		reference.decoder.reset();
 	}
 
 	for (auto &test_case : test_cases)
 	{
 		compute_psnr_hvs_m(test_case.psnr_hvs_m, device, test_case.work_items.data(), test_case.work_items.size(),
 		                   test_case.total_pixels, true /* full_range */);
+
+		if (test_case.scale_width == 0)
+			test_case.scale_width = references.front().width;
+		if (test_case.scale_height == 0)
+			test_case.scale_height = references.front().height;
+
+		if (csv_file && test_case.pyrowave_size)
+		{
+			fprintf(csv_file, "%u,%u,%u,%u",
+			        unsigned(test_case.pyrowave_size / 1000),
+			        test_case.scale_width, test_case.scale_height,
+			        test_case.scale_chroma == ChromaSubsampling::Chroma444);
+			for (auto psnr : test_case.psnr_hvs_m)
+				fprintf(csv_file, ",%.4f", psnr);
+			fprintf(csv_file, "\n");
+		}
 
 		for (uint32_t i = 0; i < NumHeightFactors; i++)
 		{
@@ -840,4 +878,6 @@ int main(int argc, char **argv)
 
 	test_cases.clear();
 	references.clear();
+	if (csv_file)
+		fclose(csv_file);
 }
