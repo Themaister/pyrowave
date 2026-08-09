@@ -256,7 +256,7 @@ struct PSNRTestCase
 	std::unique_ptr<VideoDecoder> decoder;
 	size_t pyrowave_size = 0;
 	uint64_t total_pixels = 0;
-
+	double psnr_hvs_m[NumHeightFactors] = {};
 	std::vector<WorkItem> work_items;
 };
 
@@ -300,6 +300,11 @@ struct PyroWaveRoundtripper
 		return true;
 	}
 };
+
+static float get_height_factor_from_index(uint32_t index)
+{
+	return 1.0f + float(index) / 8.0f;
+}
 
 int main(int argc, char **argv)
 {
@@ -449,7 +454,7 @@ int main(int argc, char **argv)
 
 	float height_factors[NumHeightFactors];
 	for (uint32_t i = 0; i < NumHeightFactors; i++)
-		height_factors[i] = 1.0f + float(i) / 8.0f;
+		height_factors[i] = get_height_factor_from_index(i);
 
 	BufferCreateInfo atomic_info = {};
 	atomic_info.size = sizeof(uint64_t) * NumHeightFactors;
@@ -555,6 +560,7 @@ int main(int argc, char **argv)
 			device.add_wait_semaphore(CommandBuffer::Type::AsyncCompute, std::move(reference_frame.sem),
 									  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
 
+			if (!distorted.empty())
 			{
 				// Dumb workaround so that we can block both queues.
 				auto binary = device.request_timeline_semaphore_as_binary(
@@ -691,15 +697,14 @@ int main(int argc, char **argv)
 
 	for (auto &test_case : test_cases)
 	{
-		double psnr[NumHeightFactors];
-		compute_psnr_hvs_m(psnr, device, test_case.work_items.data(), test_case.work_items.size(),
+		compute_psnr_hvs_m(test_case.psnr_hvs_m, device, test_case.work_items.data(), test_case.work_items.size(),
 		                   test_case.total_pixels, true /* full_range */);
 
 		for (uint32_t i = 0; i < NumHeightFactors; i++)
 		{
 			LOGI("Test: %s || TargetSize %zu || HeightFactor = %.2f || PSNR-HVS-M-H: (Y) %4.4f dB\n",
 				test_case.desc.c_str(), test_case.pyrowave_size,
-				height_factors[i], psnr[i]);
+				height_factors[i], test_case.psnr_hvs_m[i]);
 		}
 	}
 
