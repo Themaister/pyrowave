@@ -231,6 +231,7 @@ static void print_help()
 		"\t[--pyrowave-target-size-range <start> <end> <step>]\n"
 		"\t[--scale-size <width> <height> <4:2:0 or 4:4:4>]\n"
 		"\t[--csv <path>]\n"
+		"\t[--frames <frames>]\n"
 		"\t[--distorted <path>]\n");
 }
 
@@ -322,7 +323,7 @@ static float get_height_factor_from_index(uint32_t index)
 }
 
 static bool run_reference_tests(Reference &reference, Device &device, std::vector<PSNRTestCase> &test_cases,
-                                PyroWaveRoundtripper &pyrowave, VideoScaler &scaler)
+                                PyroWaveRoundtripper &pyrowave, VideoScaler &scaler, unsigned num_frames)
 {
 	FFmpegDecode::Shaders<> shaders;
 	auto *comp = device.get_shader_manager().register_compute("builtin://shaders/util/yuv_to_rgb.comp");
@@ -621,6 +622,9 @@ static bool run_reference_tests(Reference &reference, Device &device, std::vecto
 			device.end_renderdoc_capture();
 			has_rdoc = false;
 		}
+
+		if (num_frames && reference.frame_count >= num_frames)
+			break;
 	}
 
 	return true;
@@ -634,11 +638,13 @@ int main(int argc, char **argv)
 	std::vector<uvec3> scale_sizes;
 	std::string csv;
 	CLICallbacks cbs;
+	unsigned frames = 0;
 
 	cbs.add("--help", [&](CLIParser &parser) { parser.end(); });
 	cbs.add("--reference", [&](CLIParser &parser) { reference_paths.emplace_back(parser.next_string()); });
 	cbs.add("--pyrowave-target-size", [&](CLIParser &parser) { pyrowave_sizes.push_back(parser.next_uint()); });
 	cbs.add("--csv", [&](CLIParser &parser) { csv = parser.next_string(); });
+	cbs.add("--frames", [&](CLIParser &parser) { frames = parser.next_uint(); });
 	cbs.add("--pyrowave-target-size-range", [&](CLIParser &parser)
 	{
 		uint32_t start_size = parser.next_uint();
@@ -838,7 +844,7 @@ int main(int argc, char **argv)
 
 	for (auto &reference : references)
 	{
-		if (!run_reference_tests(reference, device, test_cases, pyrowave, scaler))
+		if (!run_reference_tests(reference, device, test_cases, pyrowave, scaler, frames))
 			return EXIT_FAILURE;
 
 		// Save some resources.
