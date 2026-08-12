@@ -137,6 +137,9 @@ I don't think I got quite enough data to reach high confidence.
 The main goal was to get an idea how resolution would scale the bitrate requirements to get an equivalent subjective score curve.
 After collecting the results, I think I've generated a (very) rough estimate:
 
+**NOTE: This estimate is wrong and obsolete, a single power function does not agree with objective data.
+See [here](objective-bitrate-evaluation.md) for a more correct curve.**
+
 ```python
 #!/usr/bin/env python3
 

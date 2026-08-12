@@ -34,7 +34,7 @@ def main():
     tests = {}
     num_pixels = args.width * args.height
     pyrowave_bitrate_candidates_baseline = [ 10, 20, 35, 50, 75, 100, 125, 150, 175, 200, 250 ]
-    pyroenc_bitrate_candidates_baseline = [ 1, 2, 3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100 ]
+    pyroenc_bitrate_candidates_baseline = [ 1, 2, 3, 5, 8, 10, 12, 15, 18, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 200, 250, 300 ]
 
     if (args.h264 or args.h265) and args.chroma444:
         raise ArgumentError('h264/h265 testing is currently not compatible with 4:4:4')
