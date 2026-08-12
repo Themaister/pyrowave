@@ -269,7 +269,7 @@ void main()
 
     uvec4 code_word_ballot = subgroupBallot(active_code_word);
     uint local_ballot = gl_SubgroupSize >= 64 && linear_block_32x32_index >= 2 ? code_word_ballot.y : code_word_ballot.x;
-    local_ballot = bitfieldExtract(local_ballot, int(16u * (linear_block_32x32_index & 1u)), 16);
+    local_ballot = gl_SubgroupSize >= 32 ? bitfieldExtract(local_ballot, int(16u * (linear_block_32x32_index & 1u)), 16) : local_ballot;
 
     uint required_plane_bytes = compute_required_8x8_size(code_word);
     uint required_sign_bits = num_bits_for_q - required_plane_bytes * 8;
