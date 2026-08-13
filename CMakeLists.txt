@@ -26,6 +26,9 @@ add_library(pyrowave STATIC
         pyrowave_decoder.hpp pyrowave_decoder.cpp
         pyrowave_common.hpp pyrowave_common.cpp)
 
+add_library(pyrowave-regression-results INTERFACE)
+target_include_directories(pyrowave-regression-results INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/eval-results)
+
 target_include_directories(pyrowave PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(pyrowave PRIVATE ${PYROWAVE_CXX_FLAGS})
 set_target_properties(pyrowave PROPERTIES POSITION_INDEPENDENT_CODE ON)
