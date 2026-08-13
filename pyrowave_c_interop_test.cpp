@@ -1592,8 +1592,6 @@ static void test_d3d12_texture_layout()
 	Device vk_device;
 	vk_device.set_context(ctx);
 
-	// NV Windows is quite broken here and no matter what we do, it will only work for very specific resource sizes it seems ...
-
 	bool has_failure = false;
 
 	for (uint32_t height = 32; height < 2048; height += 31)
