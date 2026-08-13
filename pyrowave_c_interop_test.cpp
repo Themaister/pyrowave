@@ -1383,6 +1383,178 @@ static void test_d3d11_interop()
 	pyrowave_device_destroy(pyro_device);
 }
 
+static void test_d3d12_texture_layout()
+{
+	ComPtr<ID3D12Device> device;
+	ComPtr<ID3D12CommandQueue> queue;
+	ComPtr<ID3D12Fence> fence;
+	ComPtr<ID3D12GraphicsCommandList> list;
+	ComPtr<ID3D12CommandAllocator> allocator;
+	uint64_t timeline = 0;
+
+	uint32_t index = 0;
+	if (const char *env = getenv("ADAPTER"))
+		index = strtoul(env, nullptr, 0);
+
+	ComPtr<IDXGIFactory1> factory;
+	ComPtr<IDXGIAdapter> adapter;
+	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
+	CHECK_HRESULT(factory->EnumAdapters(index, (IDXGIAdapter **)adapter.ppv()));
+
+	CHECK_HRESULT(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_11_0, IID_ID3D12Device, device.ppv()));
+	CHECK_HRESULT(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator, allocator.ppv()));
+	CHECK_HRESULT(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.get(), nullptr, IID_ID3D12GraphicsCommandList, list.ppv()));
+	// Base API create command list starts a new command list, which we usually need to close right away ...
+	CHECK_HRESULT(list->Close());
+	D3D12_COMMAND_QUEUE_DESC queue_desc = {};
+	queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+	CHECK_HRESULT(device->CreateCommandQueue(&queue_desc, IID_ID3D12CommandQueue, queue.ppv()));
+
+	CHECK_HRESULT(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_ID3D12Fence, fence.ppv()));
+	auto luid = device->GetAdapterLuid();
+
+	ASSERT_THAT(Context::init_loader(nullptr));
+	Context ctx;
+	ctx.set_num_thread_indices(1);
+	ctx.set_system_handles({});
+	ASSERT_THAT(ctx.init_instance(nullptr, 0));
+
+	VkPhysicalDevice gpus[64];
+	uint32_t gpu_count = 64;
+	VkPhysicalDevice gpu = VK_NULL_HANDLE;
+	vkEnumeratePhysicalDevices(ctx.get_instance(), &gpu_count, gpus);
+	for (uint32_t i = 0; i < gpu_count; i++)
+	{
+		VkPhysicalDeviceIDProperties ids = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
+		VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ids };
+		vkGetPhysicalDeviceProperties2(gpus[i], &props2);
+		if (memcmp(ids.deviceLUID, &luid, sizeof(luid)) == 0)
+		{
+			gpu = gpus[i];
+			break;
+		}
+	}
+
+	ASSERT_THAT(gpu);
+	ASSERT_THAT(ctx.init_device(gpu, VK_NULL_HANDLE, nullptr, 0));
+	Device vk_device;
+	vk_device.set_context(ctx);
+
+	// NV Windows is quite broken here and no matter what we do, it will only work for very specific resource sizes it seems ...
+
+	bool has_failure = false;
+
+	for (uint32_t height = 32; height < 2048; height += 31)
+	{
+		for (uint32_t width = 32; width < 2048; width += 31)
+		{
+			D3D12_RESOURCE_DESC resource_desc = {};
+			resource_desc.Width = width;
+			resource_desc.Height = height;
+			resource_desc.DepthOrArraySize = 1;
+			resource_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+			resource_desc.SampleDesc.Count = 1;
+			resource_desc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+			resource_desc.MipLevels = 1;
+			resource_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+			D3D12_HEAP_PROPERTIES heap_props = {};
+			heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+			ComPtr<ID3D12Resource> img;
+			resource_desc.Format = DXGI_FORMAT_R8_UNORM;
+			CHECK_HRESULT(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_SHARED, &resource_desc,
+				D3D12_RESOURCE_STATE_COMMON, nullptr, IID_ID3D12Resource, img.ppv()));
+
+			HANDLE img_handle;
+			CHECK_HRESULT(device->CreateSharedHandle(img.get(), NULL, GENERIC_ALL, nullptr, &img_handle));
+
+			auto info = ImageCreateInfo::immutable_2d_image(width, height, VK_FORMAT_R8_UNORM);
+			info.misc |= IMAGE_MISC_EXTERNAL_MEMORY_BIT;
+			info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+			info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+			info.external.memory_handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT;
+			info.external.handle = img_handle;
+			auto vk_img = vk_device.create_image(info);
+
+			// Upload frame to NV12 image async.
+			list->Reset(allocator.get(), nullptr);
+			ComPtr<ID3D12Resource> staging_buffer; // Verify that sync works somewhat so defer destroy these.
+			upload_mirror_image(device.get(), list.get(), img.get(), 0, staging_buffer, 1, 3, 0, 0);
+			D3D12_RESOURCE_BARRIER barrier = {};
+			barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+			barrier.Transition.pResource = img.get();
+			barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+			barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
+			list->ResourceBarrier(1, &barrier);
+			list->Close();
+
+			ID3D12CommandList *lists[] = { list.get() };
+			queue->ExecuteCommandLists(1, lists);
+			queue->Signal(fence.get(), ++timeline);
+			CHECK_HRESULT(fence->SetEventOnCompletion(timeline, nullptr));
+
+			BufferHandle readback_vk;
+
+			{
+				auto cmd = vk_device.request_command_buffer();
+				cmd->acquire_image_barrier(*vk_img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+				BufferCreateInfo bufinfo = {};
+				bufinfo.size = width * height;
+				bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				bufinfo.domain = BufferDomain::CachedHost;
+				readback_vk = vk_device.create_buffer(bufinfo);
+				cmd->copy_image_to_buffer(*readback_vk, *vk_img, 0, {}, { width, height, 1 }, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
+				cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+				Fence fence;
+				vk_device.submit(cmd, &fence);
+				vk_device.next_frame_context();
+				fence->wait();
+			}
+
+			allocator->Reset();
+			list->Reset(allocator.get(), nullptr);
+			ComPtr<ID3D12Resource> readback_buffer;
+			UINT64 row_pitch = 0;
+			readback_buffer = readback_image(device.get(), list.get(), img.get(), 0, &row_pitch);
+			CHECK_HRESULT(list->Close());
+			queue->ExecuteCommandLists(1, lists);
+
+			// Wait for device to go idle.
+			queue->Signal(fence.get(), ++timeline);
+			// null event handle blocks on CPU directly.
+			fence->SetEventOnCompletion(timeline, nullptr);
+
+			const uint8_t *d3d12_ptr;
+			const uint8_t *vk_ptr;
+			CHECK_HRESULT(readback_buffer->Map(0, nullptr, (void **)&d3d12_ptr));
+			vk_ptr = static_cast<const uint8_t *>(vk_device.map_host_buffer(*readback_vk, MEMORY_ACCESS_READ_BIT));
+
+			bool success = true;
+
+			for (uint32_t y = 0; y < height && success; y++)
+			{
+				if (memcmp(vk_ptr + y * width, d3d12_ptr + y * row_pitch, width) != 0)
+					success = false;
+			}
+
+			readback_buffer->Unmap(0, nullptr);
+
+			if (success)
+				printf("Succeeded %u x %u R8 test\n", width, height);
+			else
+			{
+				printf("Failed %u x %u R8 test\n", width, height);
+				has_failure = true;
+			}
+		}
+	}
+
+	ASSERT_THAT(!has_failure);
+}
+
 static void test_d3d12_interop()
 {
 	ComPtr<ID3D12Device> device;
@@ -1877,6 +2049,9 @@ int main(int argc, char **argv)
 		test_child_interop();
 		return EXIT_SUCCESS;
 	}
+
+	printf("Running D3D12 texture layout test ...\n");
+	test_d3d12_texture_layout();
 
 	test_d3d11_cross_process_encode();
 
