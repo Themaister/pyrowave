@@ -1383,6 +1383,158 @@ static void test_d3d11_interop()
 	pyrowave_device_destroy(pyro_device);
 }
 
+static void test_d3d11_texture_layout()
+{
+	uint32_t index = 0;
+	if (const char *env = getenv("ADAPTER"))
+		index = strtoul(env, nullptr, 0);
+
+	bool validate = false;
+	if (const char *env = getenv("VALIDATE"))
+		validate = strtoul(env, nullptr, 0) != 0;
+
+	ComPtr<IDXGIFactory1> factory;
+	ComPtr<IDXGIAdapter> adapter;
+	ComPtr<ID3D11Device> device;
+	ComPtr<ID3D11Device5> device5;
+	ComPtr<ID3D11DeviceContext> context;
+	ComPtr<ID3D11DeviceContext4> context4;
+	ComPtr<ID3D11Fence> fence;
+	uint64_t timeline = 0;
+	CHECK_HRESULT(CreateDXGIFactory1(IID_IDXGIFactory, factory.ppv()));
+	CHECK_HRESULT(factory->EnumAdapters(index, (IDXGIAdapter **)adapter.ppv()));
+
+	HRESULT hr = D3D11CreateDevice(adapter.get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, validate ? D3D11_CREATE_DEVICE_DEBUG : 0, nullptr, 0, D3D11_SDK_VERSION,
+		(ID3D11Device **)device.ppv(), nullptr, (ID3D11DeviceContext **)context.ppv());
+	ASSERT_THAT(SUCCEEDED(hr));
+	CHECK_HRESULT(device->QueryInterface(IID_ID3D11Device5, device5.ppv()));
+
+	DXGI_ADAPTER_DESC adapter_desc;
+	CHECK_HRESULT(adapter->GetDesc(&adapter_desc));
+	LUID luid = adapter_desc.AdapterLuid;
+
+	CHECK_HRESULT(device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_ID3D11Fence, fence.ppv()));
+	CHECK_HRESULT(context->QueryInterface(IID_ID3D11DeviceContext4, context4.ppv()));
+
+	ASSERT_THAT(Context::init_loader(nullptr));
+	Context ctx;
+	ctx.set_num_thread_indices(1);
+	ctx.set_system_handles({});
+	ASSERT_THAT(ctx.init_instance(nullptr, 0));
+
+	VkPhysicalDevice gpus[64];
+	uint32_t gpu_count = 64;
+	VkPhysicalDevice gpu = VK_NULL_HANDLE;
+	vkEnumeratePhysicalDevices(ctx.get_instance(), &gpu_count, gpus);
+	for (uint32_t i = 0; i < gpu_count; i++)
+	{
+		VkPhysicalDeviceIDProperties ids = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
+		VkPhysicalDeviceProperties2 props2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &ids };
+		vkGetPhysicalDeviceProperties2(gpus[i], &props2);
+		if (memcmp(ids.deviceLUID, &luid, sizeof(luid)) == 0)
+		{
+			gpu = gpus[i];
+			break;
+		}
+	}
+
+	ASSERT_THAT(gpu);
+	ASSERT_THAT(ctx.init_device(gpu, VK_NULL_HANDLE, nullptr, 0));
+	Device vk_device;
+	vk_device.set_context(ctx);
+
+	bool has_failure = false;
+
+	for (uint32_t height = 32; height < 2048; height += 31)
+	{
+		for (uint32_t width = 32; width < 2048; width += 31)
+		{
+			D3D11_TEXTURE2D_DESC resource_desc = {};
+			resource_desc.Width = width;
+			resource_desc.Height = height;
+			resource_desc.ArraySize = 1;
+			resource_desc.Format = DXGI_FORMAT_R8_UNORM;
+			resource_desc.SampleDesc.Count = 1;
+			resource_desc.MipLevels = 1;
+			resource_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+			resource_desc.Usage = D3D11_USAGE_DEFAULT;
+			resource_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+
+			ComPtr<ID3D11Texture2D> img;
+
+			CHECK_HRESULT(device->CreateTexture2D(&resource_desc, nullptr, (ID3D11Texture2D **)img.ppv()));
+
+			HANDLE img_handle;
+			ComPtr<IDXGIResource1> res;
+			img->QueryInterface(IID_IDXGIResource1, res.ppv());
+			CHECK_HRESULT(res->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &img_handle));
+
+			std::unique_ptr<uint8_t[]> ptr(new uint8_t[width * height]);
+			for (uint32_t i = 0; i < width * height; i++)
+				ptr[i] = uint8_t(i * 15);
+			D3D11_BOX box = {};
+			box.right = width;
+			box.bottom = height;
+			box.back = 1;
+
+			context->UpdateSubresource(img.get(), 0, &box, ptr.get(), width, width * height);
+
+			auto info = ImageCreateInfo::immutable_2d_image(width, height, VK_FORMAT_R8_UNORM);
+			info.misc |= IMAGE_MISC_EXTERNAL_MEMORY_BIT;
+			info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+			info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+			info.external.memory_handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+			info.external.handle = img_handle;
+			auto vk_img = vk_device.create_image(info);
+
+			context4->Signal(fence.get(), ++timeline);
+			fence->SetEventOnCompletion(timeline, nullptr);
+
+			BufferHandle readback_vk;
+
+			{
+				auto cmd = vk_device.request_command_buffer();
+				cmd->acquire_image_barrier(*vk_img, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+				BufferCreateInfo bufinfo = {};
+				bufinfo.size = width * height;
+				bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				bufinfo.domain = BufferDomain::CachedHost;
+				readback_vk = vk_device.create_buffer(bufinfo);
+				cmd->copy_image_to_buffer(*readback_vk, *vk_img, 0, {}, { width, height, 1 }, 0, 0, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
+				cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+				Fence fence;
+				vk_device.submit(cmd, &fence);
+				vk_device.next_frame_context();
+				fence->wait();
+			}
+
+			const uint8_t *d3d11_ptr = ptr.get();
+			const uint8_t *vk_ptr;
+			vk_ptr = static_cast<const uint8_t *>(vk_device.map_host_buffer(*readback_vk, MEMORY_ACCESS_READ_BIT));
+
+			bool success = true;
+
+			for (uint32_t y = 0; y < height && success; y++)
+			{
+				if (memcmp(vk_ptr + y * width, d3d11_ptr + y * width, width) != 0)
+					success = false;
+			}
+
+			if (success)
+				printf("Succeeded %u x %u R8 test (D3D11)\n", width, height);
+			else
+			{
+				printf("Failed %u x %u R8 test (D3D11)\n", width, height);
+				has_failure = true;
+			}
+		}
+	}
+
+	ASSERT_THAT(!has_failure);
+}
+
 static void test_d3d12_texture_layout()
 {
 	ComPtr<ID3D12Device> device;
@@ -1543,10 +1695,10 @@ static void test_d3d12_texture_layout()
 			readback_buffer->Unmap(0, nullptr);
 
 			if (success)
-				printf("Succeeded %u x %u R8 test\n", width, height);
+				printf("Succeeded %u x %u R8 test (D3D12)\n", width, height);
 			else
 			{
-				printf("Failed %u x %u R8 test\n", width, height);
+				printf("Failed %u x %u R8 test (D3D12)\n", width, height);
 				has_failure = true;
 			}
 		}
@@ -2049,6 +2201,9 @@ int main(int argc, char **argv)
 		test_child_interop();
 		return EXIT_SUCCESS;
 	}
+
+	printf("Running D3D12 texture layout test ...\n");
+	test_d3d11_texture_layout();
 
 	printf("Running D3D12 texture layout test ...\n");
 	test_d3d12_texture_layout();
