@@ -207,3 +207,9 @@ if (${PROJECT_IS_TOP_LEVEL})
         target_link_options(pyrowave-shared PRIVATE -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/link.T)
     endif()
 endif()
+
+if (PYROWAVE_DEVEL AND WIN32)
+    add_granite_offline_tool(pyrowave-encode-desktop encode_desktop.cpp com_ptr.hpp)
+    target_link_libraries(pyrowave-encode-desktop PRIVATE pyrowave-shared dxgi d3d11 pyrowave-utils)
+endif()
+
