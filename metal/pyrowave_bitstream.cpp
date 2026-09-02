@@ -80,10 +80,12 @@ bool BlockLayout::init(int width_, int height_, ChromaSubsampling chroma_)
 				int blocks_x_8x8 = (level_w + 7) / 8;
 				int blocks_y_8x8 = (level_h + 7) / 8;
 				int blocks_x_32x32 = (level_w + 31) / 32;
+				int blocks_y_32x32 = (level_h + 31) / 32;
 
 				block_meta[component][level][band] = {
 					block_count_8x8, blocks_x_8x8,
 					block_count_32x32, blocks_x_32x32,
+					blocks_x_32x32 * blocks_y_32x32
 				};
 
 				accumulate_block_mapping(blocks_x_8x8, blocks_y_8x8);
@@ -252,7 +254,62 @@ bool BitstreamParser::push_packet(const void *data_, size_t size)
 	return true;
 }
 
-bool BitstreamParser::decode_is_ready(bool allow_partial_frame) const
+bool BitstreamParser::has_pristine_bands(int bands, const uint32_t *active_block_mask, size_t word_count) const
+{
+	// Account for 4:2:0 where level0 will not have packets.
+	// It's somewhat meaningless to ask for pristine bands all the way up to that point though.
+	assert(bands < DecompositionLevels);
+
+	// This analysis assumes that there are no "null" blocks present.
+	// For the lowest frequency bands, that is vanishingly unlikely to happen,
+	// and worst case we get a false positive rejection.
+	// The encoder's compute_block_active_words() can supply the real mask as
+	// sideband data when that matters.
+
+	const auto block_is_missing = [&](uint32_t block_index)
+	{
+		if (dequant_offset_buffer_cpu[block_index] != UINT32_MAX)
+			return false;
+
+		uint32_t word_index = block_index / 32;
+
+		if (!active_block_mask || word_index >= word_count)
+			return true;
+
+		// If the block wasn't expected to be active anyway, just pass it through.
+		return ((active_block_mask[word_index] >> (block_index % 32)) & 1) != 0;
+	};
+
+	for (int band = 0; band < bands; band++)
+	{
+		for (auto &component : layout->block_meta)
+		{
+			if (band == 0)
+			{
+				auto &meta = component[DecompositionLevels - 1][0];
+				for (int i = 0; i < meta.block_count_32x32; i++)
+					if (block_is_missing(meta.block_offset_32x32 + i))
+						return false;
+			}
+			else
+			{
+				// If we can reconstruct the LH, HL, HH bands, we can generate the higher-resolution LL band.
+				for (int high_freq_bands = 1; high_freq_bands < 4; high_freq_bands++)
+				{
+					auto &meta = component[DecompositionLevels - band][high_freq_bands];
+					for (int i = 0; i < meta.block_count_32x32; i++)
+						if (block_is_missing(meta.block_offset_32x32 + i))
+							return false;
+				}
+			}
+		}
+	}
+
+	return true;
+}
+
+bool BitstreamParser::decode_is_ready(bool allow_partial_frame, int num_pristine_bands, float minimum_packet_ratio,
+                                      const uint32_t *active_block_mask, size_t word_count) const
 {
 	if (decoded_frame_for_current_sequence)
 		return false;
@@ -260,12 +317,25 @@ bool BitstreamParser::decode_is_ready(bool allow_partial_frame) const
 	if (last_seq == UINT32_MAX)
 		return false;
 
-	// Need at least half of the frame decoded to accept, otherwise we assume the frame is complete garbage.
 	if (decoded_blocks < total_blocks_in_sequence)
-		if (!allow_partial_frame || decoded_blocks <= total_blocks_in_sequence / 2)
+	{
+		if (!allow_partial_frame)
 			return false;
 
+		if (!has_pristine_bands(num_pristine_bands, active_block_mask, word_count))
+			return false;
+		if (float(decoded_blocks) <= float(total_blocks_in_sequence) * minimum_packet_ratio)
+			return false;
+	}
+
 	return true;
+}
+
+bool BitstreamParser::decode_is_ready(bool allow_partial_frame) const
+{
+	// At the very least, we want some LL bands to be received properly,
+	// otherwise we get extreme artifacts.
+	return decode_is_ready(allow_partial_frame, 2, 0.9f, nullptr, 0);
 }
 
 void BitstreamParser::mark_frame_decoded()
@@ -288,7 +358,35 @@ int compute_block_count_per_subdivision(int num_blocks)
 	return pot;
 }
 
-size_t compute_num_packets(const BlockLayout &layout, const void *mapped_meta, size_t packet_boundary)
+size_t get_num_active_blocks(const BlockLayout &layout, int bands)
+{
+	assert(bands < DecompositionLevels);
+	if (bands <= 0)
+		return 0;
+
+	int last_subband = bands == 1 ? 0 : 3;
+	int last_band = bands - 1;
+
+	auto &meta = layout.block_meta[NumComponents - 1][DecompositionLevels - std::max<int>(1, last_band)][last_subband];
+	return meta.block_offset_32x32 + meta.block_count_32x32;
+}
+
+void compute_block_active_words(const BlockLayout &layout, int bands, uint32_t *words, size_t word_count,
+                                const void *mapped_meta)
+{
+	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
+	memset(words, 0, sizeof(uint32_t) * word_count);
+
+	size_t num_active_blocks = get_num_active_blocks(layout, bands);
+	assert(word_count * 32 >= num_active_blocks);
+
+	for (size_t i = 0; i < num_active_blocks; i++)
+		if (meta[i].num_words)
+			words[i / 32] |= 1u << (i % 32);
+}
+
+size_t compute_num_critical_packets(const BlockLayout &layout, int bands, const void *mapped_meta,
+                                    size_t packet_boundary, size_t padding_size)
 {
 	auto *meta = static_cast<const BitstreamPacket *>(mapped_meta);
 	size_t num_packets = 0;
@@ -296,15 +394,18 @@ size_t compute_num_packets(const BlockLayout &layout, const void *mapped_meta, s
 
 	size_in_packet += sizeof(BitstreamSequenceHeader);
 
-	for (int i = 0; i < layout.block_count_32x32; i++)
+	int block_count = bands >= 0 ? int(get_num_active_blocks(layout, bands)) : layout.block_count_32x32;
+
+	for (int i = 0; i < block_count; i++)
 	{
 		size_t packet_size = meta[i].num_words * sizeof(uint32_t);
 		if (!packet_size)
 			continue;
 
-		if (size_in_packet + packet_size > packet_boundary)
+		if (size_in_packet + packet_size + padding_size > packet_boundary)
 		{
 			size_in_packet = 0;
+			padding_size = 0;
 			num_packets++;
 		}
 
@@ -317,9 +418,16 @@ size_t compute_num_packets(const BlockLayout &layout, const void *mapped_meta, s
 	return num_packets;
 }
 
+size_t compute_num_packets(const BlockLayout &layout, const void *mapped_meta, size_t packet_boundary,
+                           size_t padding_size)
+{
+	return compute_num_critical_packets(layout, -1, mapped_meta, packet_boundary, padding_size);
+}
+
 size_t packetize(const BlockLayout &layout, Packet *packets, size_t packet_boundary,
                  void *output_bitstream_, size_t size,
-                 const void *mapped_meta, const void *mapped_bitstream)
+                 const void *mapped_meta, const void *mapped_bitstream,
+                 size_t padding_size)
 {
 	size_t num_packets = 0;
 	size_t size_in_packet = 0;
@@ -357,11 +465,12 @@ size_t packetize(const BlockLayout &layout, Packet *packets, size_t packet_bound
 		if (!packet_size)
 			continue;
 
-		if (size_in_packet + packet_size > packet_boundary)
+		if (size_in_packet + packet_size + padding_size > packet_boundary)
 		{
 			packets[num_packets++] = { packet_offset, size_in_packet };
 			size_in_packet = 0;
 			packet_offset = output_offset;
+			padding_size = 0;
 		}
 
 		if (output_offset + packet_size > size)

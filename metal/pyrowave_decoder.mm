@@ -310,6 +310,20 @@ bool pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_parti
 	return decoder && decoder->parser.decode_is_ready(allow_partial_frame);
 }
 
+bool pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
+                                                    int num_pristine_bands, float minimum_packet_ratio,
+                                                    const uint32_t *active_block_mask, size_t word_count)
+{
+	// num_pristine_bands is range checked only by an assert in has_pristine_bands(),
+	// matching the Vulkan C API. It indexes block_meta[..][DecompositionLevels - band][..],
+	// so a large enough value walks off the front of the array with NDEBUG.
+	if (!decoder)
+		return false;
+
+	return decoder->parser.decode_is_ready(allow_partial_frame, num_pristine_bands, minimum_packet_ratio,
+	                                       active_block_mask, word_count);
+}
+
 pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
                                                    pyrowave_mtl_command_buffer command_buffer,
                                                    const pyrowave_gpu_buffers *buffers)
