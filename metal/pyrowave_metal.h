@@ -26,7 +26,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 4
+#define PYROWAVE_API_VERSION_MINOR 5
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -202,6 +202,12 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder,
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary,
                                      size_t *num_packets);
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_compute_num_packets_with_padding(
+		pyrowave_encoder encoder, size_t packet_boundary, size_t padding_size, size_t *num_packets);
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_compute_num_critical_packets(
+		pyrowave_encoder encoder, int bands, size_t packet_boundary, size_t padding_size, size_t *num_packets);
 
 // `packets` must have room for at least the count reported above; the number
 // actually written is at most that and is returned in out_packets.
@@ -215,6 +221,25 @@ PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets,
                            size_t packet_boundary, size_t *out_packets,
                            void *bitstream, size_t size);
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_packetize_with_padding(
+		pyrowave_encoder encoder, pyrowave_packet *packets, size_t packet_boundary, size_t padding_size,
+		size_t *out_packets, void *bitstream, size_t size);
+
+// Special purpose for manual packetization.
+// Client is expected to understand the pyrowave bitstream format.
+// Don't use if you don't know what you're doing.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_get_mapped_raw_bitstream(
+		pyrowave_encoder encoder, const void **mapped_bitstream, size_t *mapped_bitstream_size,
+		const void **mapped_metadata, size_t *mapped_metadata_size);
+
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_get_num_active_blocks(pyrowave_encoder encoder, int bands, size_t *num_active_blocks);
+
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_compute_block_active_words(pyrowave_encoder encoder,
+		int bands, uint32_t *words, size_t word_count);
 
 // Decoder API
 typedef struct pyrowave_decoder_create_info
@@ -247,11 +272,14 @@ pyrowave_decoder_clear(pyrowave_decoder decoder);
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_push_packet(pyrowave_decoder decoder, const void *data, size_t size);
 
-// For error correction purposes it may be acceptable to decode a frame that dropped
-// some packets. With allow_partial_frame, a frame is considered ready once more than
-// half of its blocks have arrived.
+// For error correction purposes, it may be okay to decode a frame which dropped some packets.
 PYROWAVE_PUBLIC_API bool
 pyrowave_decoder_decode_is_ready(pyrowave_decoder decoder, bool allow_partial_frame);
+
+PYROWAVE_PUBLIC_API bool
+pyrowave_decoder_decode_is_ready_with_sideband(pyrowave_decoder decoder, bool allow_partial_frame,
+		int num_pristine_bands, float minimum_packet_ratio,
+		const uint32_t *active_block_mask, size_t word_count);
 
 // Y, Cb, Cr as three separate single-channel textures.
 //

@@ -1183,10 +1183,12 @@ pyrowave_result pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder
 	return encode_frame(encoder, encoder->cpu_input.sampled, rate_control);
 }
 
-pyrowave_result pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary,
-                                                     size_t *num_packets)
+pyrowave_result pyrowave_encoder_compute_num_packets_with_padding(pyrowave_encoder encoder,
+                                                                  size_t packet_boundary,
+                                                                  size_t padding_size,
+                                                                  size_t *num_packets)
 {
-	if (!encoder || !num_packets || packet_boundary < sizeof(BitstreamSequenceHeader))
+	if (!encoder || !num_packets)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto result = wait_for_result(encoder);
@@ -1194,16 +1196,39 @@ pyrowave_result pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, s
 		return result;
 
 	*num_packets = compute_num_packets(encoder->layout, encoder->bitstream_meta.contents,
-	                                   packet_boundary);
+	                                   packet_boundary, padding_size);
 	return PYROWAVE_SUCCESS;
 }
 
-pyrowave_result pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets,
-                                           size_t packet_boundary, size_t *out_packets,
-                                           void *bitstream, size_t size)
+pyrowave_result pyrowave_encoder_compute_num_packets(pyrowave_encoder encoder, size_t packet_boundary,
+                                                     size_t *num_packets)
 {
-	if (!encoder || !packets || !out_packets || !bitstream ||
-	    packet_boundary < sizeof(BitstreamSequenceHeader))
+	return pyrowave_encoder_compute_num_packets_with_padding(encoder, packet_boundary, 0, num_packets);
+}
+
+pyrowave_result pyrowave_encoder_compute_num_critical_packets(pyrowave_encoder encoder, int bands,
+                                                              size_t packet_boundary, size_t padding_size,
+                                                              size_t *num_packets)
+{
+	// Internal assertion.
+	if (!encoder || !num_packets || bands < 0 || bands > 4)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto result = wait_for_result(encoder);
+	if (result != PYROWAVE_SUCCESS)
+		return result;
+
+	*num_packets = compute_num_critical_packets(encoder->layout, bands, encoder->bitstream_meta.contents,
+	                                            packet_boundary, padding_size);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result pyrowave_encoder_packetize_with_padding(pyrowave_encoder encoder, pyrowave_packet *packets,
+                                                        size_t packet_boundary, size_t padding_size,
+                                                        size_t *out_packets,
+                                                        void *bitstream, size_t size)
+{
+	if (!encoder || !packets || !out_packets || !bitstream)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto result = wait_for_result(encoder);
@@ -1213,7 +1238,68 @@ pyrowave_result pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_pa
 	static_assert(sizeof(pyrowave_packet) == sizeof(Packet), "pyrowave_packet layout mismatch.");
 	*out_packets = packetize(encoder->layout, reinterpret_cast<Packet *>(packets), packet_boundary,
 	                         bitstream, size,
-	                         encoder->bitstream_meta.contents, encoder->bitstream.contents);
+	                         encoder->bitstream_meta.contents, encoder->bitstream.contents,
+	                         padding_size);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets,
+                                           size_t packet_boundary, size_t *out_packets,
+                                           void *bitstream, size_t size)
+{
+	return pyrowave_encoder_packetize_with_padding(encoder, packets, packet_boundary, 0,
+	                                               out_packets, bitstream, size);
+}
+
+pyrowave_result pyrowave_encoder_get_mapped_raw_bitstream(pyrowave_encoder encoder,
+                                                          const void **mapped_bitstream,
+                                                          size_t *mapped_bitstream_size,
+                                                          const void **mapped_metadata,
+                                                          size_t *mapped_metadata_size)
+{
+	if (!encoder || !mapped_bitstream || !mapped_bitstream_size ||
+	    !mapped_metadata || !mapped_metadata_size)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto result = wait_for_result(encoder);
+	if (result != PYROWAVE_SUCCESS)
+		return result;
+
+	// Both are MTLStorageModeShared, so this is just the existing CPU pointer.
+	*mapped_bitstream = encoder->bitstream.contents;
+	*mapped_bitstream_size = encoder->bitstream.length;
+	*mapped_metadata = encoder->bitstream_meta.contents;
+	*mapped_metadata_size = encoder->bitstream_meta.length;
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result pyrowave_encoder_get_num_active_blocks(pyrowave_encoder encoder, int bands,
+                                                       size_t *num_active_blocks)
+{
+	if (!encoder || !num_active_blocks || bands < 0 || bands > 4)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	*num_active_blocks = get_num_active_blocks(encoder->layout, bands);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result pyrowave_encoder_compute_block_active_words(pyrowave_encoder encoder, int bands,
+                                                            uint32_t *words, size_t word_count)
+{
+	// Internal assertion.
+	if (!encoder || !words || bands < 0 || bands > 4)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	// An undersized word_count is only caught by an assert in compute_block_active_words(),
+	// matching the Vulkan C API. The loop there runs to get_num_active_blocks(bands)
+	// regardless, so with NDEBUG this writes past the end of `words`. The caller is
+	// responsible for the size, as documented in pyrowave_metal.h.
+	auto result = wait_for_result(encoder);
+	if (result != PYROWAVE_SUCCESS)
+		return result;
+
+	compute_block_active_words(encoder->layout, bands, words, word_count,
+	                           encoder->bitstream_meta.contents);
 	return PYROWAVE_SUCCESS;
 }
 

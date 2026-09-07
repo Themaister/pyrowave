@@ -120,6 +120,7 @@ struct BlockLayout
 		int block_stride_8x8;
 		int block_offset_32x32;
 		int block_stride_32x32;
+		int block_count_32x32;
 	};
 	BlockInfo block_meta[NumComponents][DecompositionLevels][NumFrequencyBandsPerLevel] = {};
 
@@ -165,6 +166,15 @@ public:
 
 	bool decode_is_ready(bool allow_partial_frame) const;
 
+	// A more refined version of decode_is_ready() that allows a bit more control.
+	// The default is num_pristine_bands = 2 (the next-to-final LL band) and minimum_packet_ratio = 0.9.
+	// active_block_mask is an optional pointer.
+	// If bit i % 32 of active_block_mask[i / 32] is not set, then a missing block for that block index
+	// is ignored. This is intended to cover advanced cases for error correction.
+	// If the pointer is null, it is implied that all blocks are active for purposes of this call.
+	bool decode_is_ready(bool allow_partial_frame, int num_pristine_bands, float minimum_packet_ratio,
+	                     const uint32_t *active_block_mask, size_t word_count) const;
+
 	// Call once a frame has actually been submitted for decode, so the same
 	// sequence is not decoded twice.
 	void mark_frame_decoded();
@@ -191,6 +201,7 @@ private:
 	bool decoded_frame_for_current_sequence = false;
 
 	bool decode_packet(const BitstreamHeader *header);
+	bool has_pristine_bands(int bands, const uint32_t *active_block_mask, size_t word_count) const;
 };
 
 //////
@@ -239,12 +250,34 @@ struct Packet
 
 // How many packets the frame needs if each may carry at most packet_boundary
 // bytes. `mapped_meta` is block_count_32x32 BitstreamPacket entries.
-size_t compute_num_packets(const BlockLayout &layout, const void *mapped_meta, size_t packet_boundary);
+//
+// padding_size reserves that many bytes in the first packet for application defined
+// scratch space. It only affects the first split point.
+size_t compute_num_packets(const BlockLayout &layout, const void *mapped_meta, size_t packet_boundary,
+                           size_t padding_size = 0);
+
+// Same, but only counts the packets holding the first get_num_active_blocks(bands)
+// blocks. Pass bands < 0 to consider the whole frame, i.e. compute_num_packets().
+size_t compute_num_critical_packets(const BlockLayout &layout, int bands, const void *mapped_meta,
+                                    size_t packet_boundary, size_t padding_size = 0);
 
 // Copies the coded blocks into `output_bitstream`, prefixed by a sequence header,
 // and fills in the packet boundaries. Returns the number of packets written,
 // which is at most what compute_num_packets() reported.
 size_t packetize(const BlockLayout &layout, Packet *packets, size_t packet_boundary,
                  void *output_bitstream, size_t size,
-                 const void *mapped_meta, const void *mapped_bitstream);
+                 const void *mapped_meta, const void *mapped_bitstream,
+                 size_t padding_size = 0);
+
+// For advanced error correction purposes.
+// If bands = 1, blocks for the lowest resolution band is included.
+// For bands = 2, HL/LH/HH for last decomposition is included to reconstruct next resolution LL band, etc.
+// Returns number of blocks which are possibly included in this range.
+// bands = 2 or 3 is a good default if using the more advanced model.
+// bands = 1 will return some redundant information due to the nature of the bitstream.
+size_t get_num_active_blocks(const BlockLayout &layout, int bands);
+
+// word_count must be at least round_up(get_num_active_blocks(bands) / 32).
+void compute_block_active_words(const BlockLayout &layout, int bands, uint32_t *words, size_t word_count,
+                                const void *mapped_meta);
 }
