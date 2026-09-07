@@ -86,6 +86,21 @@ That test also serves as a basic user guide for the API.
 
 `build-steamrt.sh` builds against the Sniper SDK and is also supported.
 
+#### Android standalone build
+
+This assumes that NDK is installed somewhere.
+
+```
+# Replace as needed. Any NDK should work in theory, but this is the one I checked with.
+$ NDK_VERSION=29.0.14206865
+
+$ cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_HOME/ndk/$NDK_VERSION/build/cmake/android.toolchain.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DANDROID_ABI=arm64-v8a \
+    -G Ninja -DCMAKE_INSTALL_PREFIX=output
+$ ninja install
+```
+
 ### Local development and CLI
 
 For the sample and test applications in this repo however, check out
