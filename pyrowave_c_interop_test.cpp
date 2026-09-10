@@ -12,6 +12,9 @@
 #include <cstdlib>
 #include <exception>
 #include <vector>
+#include <cmath>
+
+#include "shaders/slangmosh_test.hpp"
 
 #ifdef _WIN32
 #include <d3d11_4.h>
@@ -2184,6 +2187,178 @@ static void test_child_interop()
 }
 #endif
 
+static void test_extended_ycbcr_interop()
+{
+	ASSERT_THAT(Context::init_loader(nullptr));
+
+	Context ctx;
+	ctx.set_num_thread_indices(1);
+	ctx.set_system_handles({});
+	ASSERT_THAT(ctx.init_instance_and_device(nullptr, 0, nullptr, 0));
+
+	Device device;
+	device.set_context(ctx);
+
+	// Tests that we can successfully write to YCbCr as storage image for various formats in decoder.
+
+	static const struct
+	{
+		const char *name;
+		VkFormat image_format;
+		VkFormat planar_format;
+		bool subsampled;
+	} configs[] = {
+		{ "yuv420p", VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM, VK_FORMAT_R8_UNORM, true },
+		{ "yuv444p", VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM, VK_FORMAT_R8_UNORM, false },
+		{ "yuv420p16", VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM, VK_FORMAT_R16_UNORM, true },
+		{ "yuv444p16", VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM, VK_FORMAT_R16_UNORM, false },
+		{ "p010", VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16, VK_FORMAT_R10X6_UNORM_PACK16, true },
+		{ "p410", VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16, VK_FORMAT_R10X6_UNORM_PACK16, false },
+	};
+
+	for (auto &config : configs)
+	{
+		VkFormatProperties3 props = { VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3 };
+		device.get_format_properties(config.image_format, &props);
+
+		const VkFormatFeatureFlags2 required_image =
+				VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+				VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+				VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT |
+				VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT |
+				(config.subsampled ? VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT : 0);
+
+		if ((props.optimalTilingFeatures & required_image) != required_image)
+		{
+			fprintf(stderr, "Format %s not supported for YCbCr sampling, skipping. optimalFeatures = #%llx\n",
+			        config.name, static_cast<unsigned long long>(props.optimalTilingFeatures));
+			continue;
+		}
+
+		const VkFormatFeatureFlags2 required_planar =
+				VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+				VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
+
+		device.get_format_properties(config.planar_format, &props);
+		if ((props.optimalTilingFeatures & required_planar) != required_planar)
+		{
+			fprintf(stderr,
+			        "Planar format %s not supported for storage image without format, skipping. optimalFeatures = #%llx\n",
+			        config.name, static_cast<unsigned long long>(props.optimalTilingFeatures));
+			continue;
+		}
+
+		ResourceLayout layout;
+		ShaderBank::Shaders<> shaders(device, layout, 0);
+
+		VkSamplerYcbcrConversionCreateInfo ycbcr_info = { VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO };
+		ycbcr_info.chromaFilter = VK_FILTER_NEAREST;
+		ycbcr_info.format = config.image_format;
+		ycbcr_info.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+		ycbcr_info.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
+		ycbcr_info.xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+		ycbcr_info.yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
+		auto *ycbcr_conv = device.request_immutable_ycbcr_conversion(ycbcr_info);
+
+		SamplerCreateInfo sampler_info = {};
+		sampler_info.address_mode_u = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sampler_info.address_mode_v = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sampler_info.address_mode_w = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+		sampler_info.min_filter = VK_FILTER_NEAREST;
+		sampler_info.mag_filter = VK_FILTER_NEAREST;
+		auto *sampler = device.request_immutable_sampler(sampler_info, ycbcr_conv);
+
+		auto image_info = ImageCreateInfo::immutable_2d_image(64, 64, config.image_format);
+		image_info.ycbcr_conversion = ycbcr_conv;
+		image_info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+		image_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+		image_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		auto image = device.create_image(image_info);
+
+		ImageViewHandle planar_views[3];
+		for (int i = 0; i < 3; i++)
+		{
+			ImageViewCreateInfo view_info = {};
+			view_info.format = config.planar_format;
+			view_info.image = image.get();
+			view_info.aspect = VK_IMAGE_ASPECT_PLANE_0_BIT << i;
+			view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
+			planar_views[i] = device.create_image_view(view_info);
+		}
+
+		BufferCreateInfo bufinfo = {};
+		bufinfo.size = 64 * 64 * sizeof(uint32_t);
+		bufinfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		bufinfo.domain = BufferDomain::CachedHost;
+		auto readback = device.create_buffer(bufinfo);
+
+		auto cmd = device.request_command_buffer();
+
+		auto *shader = shaders.test_read_ycbcr->get_shader(ShaderStage::Compute);
+		ImmutableSamplerBank sampler_bank = {};
+		sampler_bank.samplers[0][0] = sampler;
+		auto *read_program = device.request_program(shader, &sampler_bank);
+
+		cmd->set_program(shaders.test_write_ycbcr);
+		cmd->image_barrier(*image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+		                   0, 0, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+		for (int i = 0; i < 3; i++)
+			cmd->set_storage_texture(0, i, *planar_views[i]);
+		cmd->dispatch(64 / 8, 64 / 8, 1);
+
+		cmd->image_barrier(*image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+						   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+						   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+
+		cmd->set_program(read_program);
+		cmd->set_texture(0, 0, image->get_view());
+		cmd->set_storage_buffer(0, 1, *readback);
+		cmd->dispatch(64 / 8, 64 / 8, 1);
+		cmd->barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+		             VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+
+		Fence fence;
+		device.submit(cmd, &fence);
+		fence->wait();
+
+		auto *ptr = static_cast<const uint32_t *>(device.map_host_buffer(*readback, MEMORY_ACCESS_READ_BIT));
+		for (int y = 0; y < 64; y++)
+		{
+			for (int x = 0; x < 64; x++)
+			{
+				uint32_t pix = ptr[y * 64 + x];
+				int r = int(pix >>  0) & 0xff;
+				int g = int(pix >>  8) & 0xff;
+				int b = int(pix >> 16) & 0xff;
+
+				int chroma_x = x >> config.subsampled;
+				int chroma_y = y >> config.subsampled;
+
+				float chroma_shift = config.planar_format == VK_FORMAT_R8_UNORM ? 128.0f / 255.0f : 512.0f / 1023.0f;
+
+				float Y = float(128 + ((x & 3) ^ (y & 7))) / 255.0f;
+				float Cb = float(128 + ((chroma_x & 7) ^ (chroma_y & 3))) / 255.0f - chroma_shift;
+				float Cr = float(128 + ((chroma_x & 7) ^ (chroma_y & 7))) / 255.0f - chroma_shift;
+
+				float R = Y + 1.5748f * Cr;
+				float G = Y - 0.13397432f / 0.7152f * Cb - 0.33480248f / 0.7152f * Cr;
+				float B = Y + 1.8556f * Cb;
+
+				auto intR = std::lround(float(R) * 255.0f);
+				auto intG = std::lround(float(G) * 255.0f);
+				auto intB = std::lround(float(B) * 255.0f);
+
+				// Allow maximum 1 ULP error in reconstruction.
+				ASSERT_THAT(std::abs(r - intR) <= 1);
+				ASSERT_THAT(std::abs(g - intG) <= 1);
+				ASSERT_THAT(std::abs(b - intB) <= 1);
+			}
+		}
+
+		fprintf(stderr, "Planar storage image test for %s succeeded!\n", config.name);
+	}
+}
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32
@@ -2220,6 +2395,8 @@ int main(int argc, char **argv)
 	(void)argc;
 	(void)argv;
 #endif
+
+	test_extended_ycbcr_interop();
 
 	printf("Running Vulkan <-> Vulkan interop test with direct device share ...\n");
 	test_direct_interop();
