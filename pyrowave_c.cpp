@@ -137,7 +137,11 @@ pyrowave_result pyrowave_create_device_by_compat(
 		return PYROWAVE_ERROR_NO_VULKAN;
 	}
 
-	dev->device.set_context(dev->context);
+	ContextOptions context_opts = {};
+	context_opts.memory_priorities = false;
+	context_opts.lean_memory_mode = true;
+
+	dev->device.set_context(dev->context, context_opts);
 	*device = dev;
 	return PYROWAVE_SUCCESS;
 }
@@ -222,7 +226,10 @@ pyrowave_result pyrowave_create_device(const pyrowave_device_create_info *info, 
 	if (!dev->context.init_device(info->physical_device, VK_NULL_HANDLE, nullptr, 0))
 		return PYROWAVE_ERROR_NO_VULKAN;
 
-	dev->device.set_context(dev->context);
+	ContextOptions context_opts = {};
+	context_opts.memory_priorities = false;
+	context_opts.lean_memory_mode = true;
+	dev->device.set_context(dev->context, context_opts);
 
 	dev->device.set_queue_lock(
 		[cb = info->queue_lock_callback, userdata = info->userdata]() {
