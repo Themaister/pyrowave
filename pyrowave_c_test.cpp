@@ -329,6 +329,7 @@ static void test_error_correction_api()
 
 	pyrowave_decoder_destroy(decoder);
 	pyrowave_encoder_destroy(encoder);
+	pyrowave_device_destroy(device);
 }
 
 static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode, pyrowave_chroma_subsampling chroma)
@@ -512,6 +513,7 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 
 	pyrowave_decoder_destroy(decoder);
 	pyrowave_encoder_destroy(encoder);
+	pyrowave_device_destroy(device);
 }
 
 static void test_basic_system_stability()
