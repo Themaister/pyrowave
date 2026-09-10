@@ -252,9 +252,29 @@ void pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_m
 	device->device.timestamp_log([=](const std::string &tag, const TimestampIntervalReport &report)
 	{
 		char msg[256];
-		snprintf(msg, sizeof(msg), "%s: %.3f ms per frame\n", tag.c_str(), report.time_per_frame_context * 1e3);
+		snprintf(msg, sizeof(msg), "%s: %.3f ms per frame", tag.c_str(), report.time_per_frame_context * 1e3);
 		cb(userdata, msg);
 	});
+
+	if (device->device.get_device_features().supports_memory_budget)
+	{
+		HeapBudget budgets[VK_MAX_MEMORY_HEAPS];
+		device->device.get_memory_budget(budgets);
+		for (uint32_t i = 0; i < device->device.get_memory_properties().memoryHeapCount; i++)
+		{
+			char msg[256];
+			snprintf(msg, sizeof(msg), "Memory Heap %u (%s): "
+			         "MaxSize %.3f MiB, BudgetSize %.3f MiB, DeviceUsage %.3f MiB, TrackedUsage %.3f MiB", i,
+			         (device->device.get_memory_properties().memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+				         ? "DEVICE"
+				         : "HOST",
+			         float(budgets[i].max_size) / (1024.0f * 1024.0f),
+			         float(budgets[i].budget_size) / (1024.0f * 1024.0f),
+			         float(budgets[i].device_usage) / (1024.0f * 1024.0f),
+			         float(budgets[i].tracked_usage) / (1024.0f * 1024.0f));
+			cb(userdata, msg);
+		}
+	}
 
 	if (reset)
 		device->device.timestamp_log_reset();
