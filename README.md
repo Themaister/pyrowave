@@ -1,6 +1,6 @@
 # PyroWave
 
-PyroWave is an intra-only video codec (practially speaking a still-image codec)
+PyroWave is an intra-only video codec (practically speaking a still-image codec)
 that is optimized for extremely fast GPU encode (< ~0.1 ms encode and decode at 1080p, < ~0.2 ms at 4K).
 It is fully implemented in Vulkan compute shaders.
 
