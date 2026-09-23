@@ -335,12 +335,13 @@ pyrowave_image_get_handle(pyrowave_image image);
 
 // Generates an image view from an (imported) image automatically for convenience.
 // - Aspect must be VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_ASPECT_PLANE_0_BIT, PLANE_1_BIT or PLANE_2_BIT.
-// - Only non-YCbCr images support ASPECT_COLOR_BIT.
 // - For 2-plane YCbCr image formats or two component image formats, image view swizzles are used to synthesize 3 planes.
 // - For single component image formats, the aspect is ignored (the image is the plane itself).
 // - For 3-component image formats, the aspect selects the component index through image swizzle.
 // - If COLOR_BIT aspect is used, the image format is used as-is as the view format, with exception
 //   for sRGB. The equivalent UNORM format is used as view format, and image must be created with compatible casting.
+// - COLOR_BIT aspect can be used with YCbCr, but it's only supported by the scaling path, and only NV12 format.
+//   Very special case for pipewire interop. Don't use unless you know what you're doing.
 //
 // Some validation rules:
 // - For 2-plane YCbCr image formats, usage must not be STORAGE_BIT.

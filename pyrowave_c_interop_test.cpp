@@ -315,14 +315,22 @@ static void send_image_to_encoder(pyrowave_image pyro_image,
 	pyrowave_gpu_sync_operation acquire = {};
 	pyrowave_gpu_sync_operation release = {};
 	pyrowave_gpu_buffers buffers = {};
+	pyrowave_image_view view = {};
 	pyrowave_rate_control rate_control = { BitstreamSize };
 
+	// Exercise the NV12 scaler path as well.
 	CHECKED(pyrowave_image_get_image_view(pyro_image,
 		VK_IMAGE_ASPECT_PLANE_0_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[0]));
 	CHECKED(pyrowave_image_get_image_view(pyro_image,
 		VK_IMAGE_ASPECT_PLANE_1_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[1]));
 	CHECKED(pyrowave_image_get_image_view(pyro_image,
 		VK_IMAGE_ASPECT_PLANE_2_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[2]));
+
+	if (buffers.planes[0].image_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+	{
+		CHECKED(pyrowave_image_get_image_view(pyro_image,
+				VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, &view));
+	}
 
 	acquire.num_images = 1;
 	acquire.images = &ref;
@@ -334,7 +342,19 @@ static void send_image_to_encoder(pyrowave_image pyro_image,
 	release.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync_release);
 	release.sync.value = release_value;
 
-	CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
+	if (buffers.planes[0].image_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+	{
+		pyrowave_scaled_encode_info scaled_info = {};
+		scaled_info.view = view;
+		scaled_info.force_linear_filtering = true;
+		scaled_info.skip_dither = true;
+		scaled_info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+		scaled_info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+		scaled_info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
+		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, &acquire, &release, &scaled_info, &rate_control));
+	}
+	else
+		CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
 }
 
 static void send_granite_image_to_encoder(Device &device, Image &granite_image, pyrowave_image pyro_image,

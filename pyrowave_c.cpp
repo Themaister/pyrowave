@@ -1203,12 +1203,16 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 
 	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
 	{
+		// Sam wanted this,
 		WrappedViewBuffers wrapped;
 		pyrowave_gpu_buffers buffers = {};
 
-		buffers.planes[0] = scaling_info->view;
-		buffers.planes[1] = scaling_info->view;
-		buffers.planes[2] = scaling_info->view;
+		for (auto &plane : buffers.planes)
+			plane = scaling_info->view;
+
+		buffers.planes[0].view_format = VK_FORMAT_R8_UNORM;
+		buffers.planes[1].view_format = VK_FORMAT_R8G8_UNORM;
+		buffers.planes[2].view_format = VK_FORMAT_R8G8_UNORM;
 
 		buffers.planes[0].aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
 		buffers.planes[1].aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
