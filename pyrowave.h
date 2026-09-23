@@ -467,6 +467,10 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 typedef struct pyrowave_scaled_encode_info
 {
 	// Input view must be some RGB(A) UNORM format.
+	// Alternatively, as a special case, NV12 (G8_B8R8_2PLANE_420) is allowed here with COLOR_ASPECT.
+	// This is only intended to be used with pipewire dmabuf screen capture path.
+	// If scaling NV12, the crop-rect (if any) must be aligned to 2 pixel offset and extent.
+	// The crop rect will be scaled accordingly for chroma plane.
 	pyrowave_image_view view;
 
 	// For SDR, use VK_COLOR_SPACE_SRGB_NONLINEAR.

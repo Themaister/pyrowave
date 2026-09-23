@@ -1166,11 +1166,6 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 		if (!plane)
 			return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
-	ImageHandle wrapped_image;
-	ImageViewHandle wrapped_view;
-	if (!wrap_view(device, scaling_info->view, wrapped_image, wrapped_view, VK_IMAGE_USAGE_SAMPLED_BIT))
-		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
-
 	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
 	auto cmd =
@@ -1199,17 +1194,81 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	}
 
 	VideoScaler::RescaleInfo info = {};
-	info.input = wrapped_view.get();
 	info.input_color_space = scaling_info->input_color_space;
 	info.output_color_space = scaling_info->output_color_space;
-	for (int i = 0; i < 3; i++)
-		info.output_planes[i] = &encoder->scaler_planes[i]->get_view();
-	info.num_output_planes = 3;
 	info.crop_rect = scaling_info->crop_rect;
 	info.skip_dither = scaling_info->skip_dither;
 	info.force_linear_filtering = scaling_info->force_linear_filtering;
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
-	encoder->scaler.rescale(*cmd, info);
+
+	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+	{
+		WrappedViewBuffers wrapped;
+		pyrowave_gpu_buffers buffers = {};
+
+		buffers.planes[0] = scaling_info->view;
+		buffers.planes[1] = scaling_info->view;
+		buffers.planes[2] = scaling_info->view;
+
+		buffers.planes[0].aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
+		buffers.planes[1].aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+		buffers.planes[2].aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;
+		buffers.planes[2].swizzle = VK_COMPONENT_SWIZZLE_G;
+
+		if (!wrapped.wrap(device, &buffers, VK_IMAGE_USAGE_SAMPLED_BIT))
+		{
+			device->submit_discard(cmd);
+			return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+		}
+
+		auto crop_rect = scaling_info->crop_rect ? *scaling_info->crop_rect : VkRect2D{};
+		info.crop_rect = scaling_info->crop_rect ? &crop_rect : nullptr;
+
+		if (crop_rect.offset.x % 2 || crop_rect.offset.y % 2 || crop_rect.extent.width % 2 || crop_rect.extent.height % 2)
+		{
+			device->submit_discard(cmd);
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		}
+
+		// Scale one plane at a time. Easier with how implementation works.
+		info.num_output_planes = 1;
+		for (int i = 0; i < 3; i++)
+		{
+			info.input = wrapped.planes[i];
+			info.output_planes[0] = &encoder->scaler_planes[i]->get_view();
+			encoder->scaler.rescale(*cmd, info);
+
+			if (i == 0)
+			{
+				crop_rect.offset.x >>= 1;
+				crop_rect.offset.y >>= 1;
+				crop_rect.extent.width >>= 1;
+				crop_rect.extent.height >>= 1;
+			}
+		}
+	}
+	else if (format_ycbcr_num_planes(scaling_info->view.view_format) == 1)
+	{
+		ImageHandle wrapped_image;
+		ImageViewHandle wrapped_view;
+		if (!wrap_view(device, scaling_info->view, wrapped_image, wrapped_view, VK_IMAGE_USAGE_SAMPLED_BIT))
+		{
+			device->submit_discard(cmd);
+			return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+		}
+
+		info.input = wrapped_view.get();
+		for (int i = 0; i < 3; i++)
+			info.output_planes[i] = &encoder->scaler_planes[i]->get_view();
+		info.num_output_planes = 3;
+		encoder->scaler.rescale(*cmd, info);
+	}
+	else
+	{
+		// Could be supported if need be, but let's not unless we can prove we need it ...
+		device->submit_discard(cmd);
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	}
 
 	for (int i = 0; i < 3; i++)
 	{
