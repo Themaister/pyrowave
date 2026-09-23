@@ -671,6 +671,8 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 			view->view_format = VK_FORMAT_R8G8B8A8_UNORM;
 		else if (view->view_format == VK_FORMAT_B8G8R8A8_SRGB)
 			view->view_format = VK_FORMAT_B8G8R8A8_UNORM;
+		else if (view->view_format == VK_FORMAT_A8B8G8R8_SRGB_PACK32)
+			view->view_format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
 
 		return PYROWAVE_SUCCESS;
 	}
@@ -1203,6 +1205,7 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	for (int i = 0; i < 3; i++)
 		info.output_planes[i] = &encoder->scaler_planes[i]->get_view();
 	info.num_output_planes = 3;
+	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
 	encoder->scaler.rescale(*cmd, info);
 
 	for (int i = 0; i < 3; i++)
@@ -1213,7 +1216,15 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 						   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 	}
 
-	device->submit(cmd);
+	if (encoder->pyro_device->cmd)
+	{
+		device->submit_discard(cmd);
+		device->submit_external(encoder->pyro_device->queue_type);
+	}
+	else
+	{
+		device->submit(cmd);
+	}
 
 	ViewBuffers buffers = {};
 	for (int i = 0; i < 3; i++)

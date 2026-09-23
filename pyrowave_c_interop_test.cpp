@@ -673,6 +673,244 @@ static void test_direct_interop()
 	pyrowave_device_destroy(pyro_device);
 }
 
+static void test_direct_interop_scaling()
+{
+	ASSERT_THAT(Context::init_loader(nullptr));
+
+	Context ctx;
+	ctx.set_num_thread_indices(1);
+	ctx.set_system_handles({});
+
+	VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+	app_info.apiVersion = VK_API_VERSION_1_3;
+	app_info.pApplicationName = "pyrowave-c-test";
+	app_info.pEngineName = "Granite";
+	ctx.set_application_info(&app_info);
+
+	ASSERT_THAT(ctx.init_instance_and_device(nullptr, 0, nullptr, 0));
+
+	Device device;
+	device.set_context(ctx);
+
+	bool has_rdoc = Device::init_renderdoc_capture();
+	if (has_rdoc)
+		device.begin_renderdoc_capture();
+
+	// Fill in a proxy instance create info.
+	VkInstanceCreateInfo instance_create_info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+	instance_create_info.enabledExtensionCount = device.get_device_features().num_instance_extensions;
+	instance_create_info.ppEnabledExtensionNames = device.get_device_features().instance_extensions;
+	instance_create_info.pApplicationInfo = &ctx.get_application_info();
+
+	// Fill in a proxy device create info.
+	VkDeviceCreateInfo device_create_info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
+	VkDeviceQueueCreateInfo queue_info = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
+	queue_info.queueFamilyIndex = device.get_queue_info().family_indices[QUEUE_INDEX_GRAPHICS];
+	queue_info.queueCount = 1;
+	device_create_info.pNext = ctx.get_enabled_device_features().pdf2;
+	device_create_info.enabledExtensionCount = ctx.get_enabled_device_features().num_device_extensions;
+	device_create_info.ppEnabledExtensionNames = ctx.get_enabled_device_features().device_extensions;
+	device_create_info.queueCreateInfoCount = 1;
+	device_create_info.pQueueCreateInfos = &queue_info;
+
+	// Hand over a concrete VkQueue we want implementation to use.
+	pyrowave_device_create_queue_info device_queue_info = {};
+	device_queue_info.familyIndex = queue_info.queueFamilyIndex;
+	device_queue_info.index = 0;
+	device_queue_info.queue = device.get_queue_info().queues[QUEUE_INDEX_GRAPHICS];
+
+	pyrowave_device_create_info info = {};
+	info.GetInstanceProcAddr = vkGetInstanceProcAddr;
+	info.instance = ctx.get_instance();
+	info.physical_device = ctx.get_gpu();
+	info.device = ctx.get_device();
+	info.device_create_info = &device_create_info;
+	info.instance_create_info = &instance_create_info;
+	info.queue_info_count = 1;
+	info.queue_info = &device_queue_info;
+	info.userdata = &device;
+	info.queue_lock_callback = [](void *userdata) { static_cast<Device *>(userdata)->external_queue_lock(); };
+	info.queue_unlock_callback = [](void *userdata) { static_cast<Device *>(userdata)->external_queue_unlock(); };
+
+	pyrowave_encoder encoder;
+	pyrowave_decoder decoder;
+	pyrowave_device pyro_device;
+	CHECKED(pyrowave_create_device(&info, &pyro_device));
+
+	pyrowave_encoder_create_info encoder_info = {};
+	encoder_info.device = pyro_device;
+	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_444;
+	encoder_info.width = 64;
+	encoder_info.height = 64;
+	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
+
+	pyrowave_decoder_create_info decoder_info = {};
+	decoder_info.device = pyro_device;
+	decoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_444;
+	decoder_info.width = 64;
+	decoder_info.height = 64;
+	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
+
+	uint32_t plane_data[64][64];
+
+	for (int y = 0; y < 64; y++)
+	{
+		for (int x = 0; x < 64; x++)
+		{
+#if 1
+			int r = mirror(128 + y * 3 + x * 1);
+			int g = mirror(128 + y * 5 + x * 3);
+			int b = mirror(128 + y * 7 + x * 5);
+#else
+			int r = 128;
+			int g = 128;
+			int b = 128;
+#endif
+			plane_data[y][x] = r | (g << 8) | (b << 16);
+		}
+	}
+
+	auto image_info = ImageCreateInfo::immutable_2d_image(64, 64, VK_FORMAT_R8G8B8A8_SRGB);
+	image_info.initial_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
+	image_info.misc = IMAGE_MISC_MUTABLE_SRGB_BIT;
+	ImageInitialData initial_data = { plane_data };
+	auto input_image = device.create_image(image_info, &initial_data);
+	ASSERT_THAT(input_image);
+
+	image_info.format = VK_FORMAT_R16_UNORM;
+	image_info.misc = 0;
+	image_info.layers = 3;
+	image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+	image_info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
+	auto output_image = device.create_image(image_info);
+	ASSERT_THAT(output_image);
+
+	pyrowave_rate_control rate_control = { 500000 };
+	pyrowave_gpu_buffers gpu_buffers = {};
+
+	pyrowave_image_view view = {};
+
+	view.image = input_image->get_image();
+	view.width = 64;
+	view.height = 64;
+	view.image_format = VK_FORMAT_R8G8B8A8_SRGB;
+	view.view_format = VK_FORMAT_R8G8B8A8_UNORM;
+	view.layer = 0;
+	view.layout = input_image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+	view.mip_level = 0;
+	view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+
+	auto cmd = device.request_command_buffer();
+
+	// Encode to provided cmd.
+	// Redirect commands here.
+	pyrowave_scaled_encode_info scaling = {};
+	scaling.intermediate_plane_format = VK_FORMAT_R16_UNORM;
+	scaling.view = view;
+	scaling.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	scaling.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+	scaling.ycbcr_chroma_midpoint = 130.0f / 255.0f;
+
+	pyrowave_device_set_command_buffer(pyro_device, cmd->get_command_buffer());
+	CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
+	pyrowave_device_set_command_buffer(pyro_device, VK_NULL_HANDLE);
+
+	// Wait on CPU before we call packetization.
+	Fence fence;
+	device.submit(cmd, &fence);
+	fence->wait();
+
+	size_t num_packets;
+	CHECKED(pyrowave_encoder_compute_num_packets(encoder, rate_control.maximum_bitstream_size, &num_packets));
+	ASSERT_THAT(num_packets == 1);
+
+	std::unique_ptr<uint8_t[]> bitstream(new uint8_t[rate_control.maximum_bitstream_size]);
+	pyrowave_packet packet;
+	CHECKED(pyrowave_encoder_packetize(encoder, &packet, rate_control.maximum_bitstream_size, &num_packets,
+		bitstream.get(), rate_control.maximum_bitstream_size));
+
+	CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.get() + packet.offset, packet.size));
+	ASSERT_THAT(pyrowave_decoder_decode_is_ready(decoder, false));
+
+	for (auto &plane : gpu_buffers.planes)
+	{
+		plane.image = output_image->get_image();
+		plane.layout = VK_IMAGE_LAYOUT_GENERAL;
+		plane.width = 64;
+		plane.height = 64;
+		plane.image_format = VK_FORMAT_R16_UNORM;
+		plane.view_format = VK_FORMAT_R16_UNORM;
+		plane.layer = &plane - gpu_buffers.planes;
+		plane.layout = input_image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
+		plane.mip_level = 0;
+		plane.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+	}
+
+	cmd = device.request_command_buffer();
+	// Redirect commands here.
+	pyrowave_device_set_command_buffer(pyro_device, cmd->get_command_buffer());
+	CHECKED(pyrowave_decoder_decode_gpu_buffer(decoder, nullptr, nullptr, &gpu_buffers));
+	pyrowave_device_set_command_buffer(pyro_device, VK_NULL_HANDLE);
+
+	cmd->image_barrier(*output_image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+	                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+
+	BufferCreateInfo bufinfo = {};
+	bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	bufinfo.size = 64 * 64 * 3 * sizeof(uint16_t);
+	bufinfo.domain = BufferDomain::CachedHost;
+
+	auto readback_buffer = device.create_buffer(bufinfo);
+	cmd->copy_image_to_buffer(*readback_buffer, *output_image, 0,  {}, { 64, 64, 1 }, 0, 0,
+		{ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 3 });
+	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+	             VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+	fence.reset();
+	device.submit(cmd, &fence);
+	fence->wait();
+
+	auto *readback_ptr = static_cast<const uint16_t *>(device.map_host_buffer(*readback_buffer, MEMORY_ACCESS_READ_BIT));
+
+	for (int y = 0; y < 64; y++)
+	{
+		for (int x = 0; x < 64; x++)
+		{
+#if 1
+			auto r = float(mirror(128 + y * 3 + x * 1)) / 255.0f;
+			auto g = float(mirror(128 + y * 5 + x * 3)) / 255.0f;
+			auto b = float(mirror(128 + y * 7 + x * 5)) / 255.0f;
+#else
+			float r = 128.0f / 255.0f;
+			float g = 128.0f / 255.0f;
+			float b = 128.0f / 255.0f;
+#endif
+
+			auto Y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+			auto Cb = 130.0f / 255.0f - 0.114572f * r - 0.385428f * g + 0.5f * b;
+			auto Cr = 130.0f / 255.0f + 0.5f * r - 0.454153f * g - 0.0458471f * b;
+
+			float readback_y = float(readback_ptr[0 * 64 * 64 + y * 64 + x]) / float(0xffff);
+			float readback_cb = float(readback_ptr[1 * 64 * 64 + y * 64 + x]) / float(0xffff);
+			float readback_cr = float(readback_ptr[2 * 64 * 64 + y * 64 + x]) / float(0xffff);
+
+			float y_delta = std::abs(readback_y - Y);
+			float cb_delta = std::abs(readback_cb - Cb);
+			float cr_delta = std::abs(readback_cr - Cr);
+			ASSERT_THAT(y_delta <= 1.0f / 255.0f);
+			ASSERT_THAT(cb_delta <= 2.0f / 255.0f);
+			ASSERT_THAT(cr_delta <= 2.0f / 255.0f);
+		}
+	}
+
+	pyrowave_encoder_destroy(encoder);
+	pyrowave_decoder_destroy(decoder);
+	pyrowave_device_destroy(pyro_device);
+
+	if (has_rdoc)
+		device.end_renderdoc_capture();
+}
+
 // Most basic interop scenario, OPAQUE_FD for everything.
 static void test_opaque_interop(bool win32_kmt)
 {
@@ -2400,6 +2638,7 @@ int main(int argc, char **argv)
 
 	printf("Running Vulkan <-> Vulkan interop test with direct device share ...\n");
 	test_direct_interop();
+	test_direct_interop_scaling();
 
 	printf("Running opaque Vulkan <-> Vulkan interop test ...\n");
 	test_opaque_interop(false);

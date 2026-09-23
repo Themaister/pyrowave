@@ -470,10 +470,11 @@ typedef struct pyrowave_scaled_encode_info
 	pyrowave_image_view view;
 
 	// For SDR, use VK_COLOR_SPACE_SRGB_NONLINEAR.
-	// SPACE_EXTENDED_SRGB_LINEAR_EXT and HDR10_ST2084 is supported as well.
+	// SPACE_EXTENDED_SRGB_LINEAR_EXT (80 nits normalized) and HDR10_ST2084 is supported as well.
 	VkColorSpaceKHR input_color_space;
 
 	// Use VK_COLOR_SPACE_SRGB_NONLINEAR or HDR10_ST2084.
+	// HDR10 is *not* tonemapped.
 	VkColorSpaceKHR output_color_space;
 
 	// YCbCr transform is always full-range, center chroma siting.
@@ -483,7 +484,17 @@ typedef struct pyrowave_scaled_encode_info
 	// Intermediate format used for planes. Should be R8_UNORM or R16_UNORM.
 	// R16_UNORM is more or less required for HDR10, but can be used for SDR too
 	// to avoid some potential banding, especially for 10-bit SDR swapchains.
+	// R8_UNORM intermediate format will receive dithering to avoid some banding artifacts.
+	// The dither will smooth out nicely when encoding.
 	VkFormat intermediate_plane_format;
+
+	// In YCbCr, the center point for chroma may depend on bit depth in some cases.
+	// Since Pyrowave is a floating point codec, this is mostly irrelevant for us,
+	// but provided here for compatibility. Consumer of the final image is expected
+	// to know which midpoint was used.
+	// Common values would be 0.5f (bit-depth agnostic default),
+	// 128.0 / 255.0 (8-bit BT) or 512.0 / 1023.0 (10-bit BT).
+	float ycbcr_chroma_midpoint;
 } pyrowave_scaled_encode_info;
 
 PYROWAVE_PUBLIC_API pyrowave_result
