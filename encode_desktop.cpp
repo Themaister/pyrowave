@@ -23,52 +23,6 @@
 	if (_res != PYROWAVE_SUCCESS) { LOGE("Got pyrowave result %d while executing %s at line %d.\n", _res, #x, __LINE__); std::terminate(); } \
 } while(false)
 
-static void convert_rgb_to_ycbcr(ID3D11Device *device, ID3D11DeviceContext *context,
-		ID3D11VertexShader *vs, ID3D11PixelShader *ps,
-		ID3D11ShaderResourceView *srv,
-		ID3D11RenderTargetView *y,
-		ID3D11RenderTargetView *cb,
-		ID3D11RenderTargetView *cr,
-		uint32_t width, uint32_t height)
-{
-	context->VSSetShader(vs, nullptr, 0);
-	context->PSSetShader(ps, nullptr, 0);
-
-	ID3D11RenderTargetView *rtvs[] = { y, cb, cr };
-	context->OMSetRenderTargets(3, rtvs, nullptr);
-	context->PSSetShaderResources(0, 1, &srv);
-
-	D3D11_SAMPLER_DESC sampler_desc = {};
-	sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-	sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-	sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-	sampler_desc.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
-	ID3D11SamplerState *sampler;
-	CHECK_HRESULT(device->CreateSamplerState(&sampler_desc, &sampler));
-	context->PSSetSamplers(0, 1, &sampler);
-
-	context->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-	ID3D11RasterizerState *rs;
-	D3D11_RASTERIZER_DESC raster_desc = {};
-	raster_desc.CullMode = D3D11_CULL_NONE;
-	raster_desc.FillMode = D3D11_FILL_SOLID;
-	CHECK_HRESULT(device->CreateRasterizerState(&raster_desc, &rs));
-	context->RSSetState(rs);
-
-	D3D11_VIEWPORT vp = { 0, 0, float(width), float(height), 0, 1};
-	D3D11_RECT sci = { 0, 0, int(width), int(height) };
-	context->RSSetViewports(1, &vp);
-	context->RSSetScissorRects(1, &sci);
-	context->Draw(3, 0);
-
-	sampler->Release();
-	rs->Release();
-}
-
-#include "shaders/encode_desktop.vs.inc"
-#include "shaders/encode_desktop.ps.inc"
-
 static void print_help()
 {
 	LOGE("Usage: pyrowave-encode-desktop [out-path.y4m] [--width W] [--height H] [--frames N] [--size <bytes per frame>]\n");
@@ -143,7 +97,7 @@ int main(int argc, char **argv)
 
 	YUV4MPEGFile y4m;
 	char y4m_params[256];
-	snprintf(y4m_params, sizeof(y4m_params), "W%u H%u F10:1 Ip A1:1 C444 XYSCSS=444 XCOLORRANGE=FULL\n", out_width, out_height);
+	snprintf(y4m_params, sizeof(y4m_params), "W%u H%u F10:1 Ip A1:1 C420 XYSCSS=420 XCOLORRANGE=FULL\n", out_width, out_height);
 	if (!y4m.open_write(out_path, y4m_params))
 	{
 		LOGE("Failed to open y4m for writing.\n");
@@ -153,7 +107,7 @@ int main(int argc, char **argv)
 	pyrowave_device pyro_device;
 	pyrowave_encoder encoder;
 	pyrowave_decoder decoder;
-	pyrowave_image pyro_images[3];
+	pyrowave_image pyro_image;
 	pyrowave_sync_object pyro_sync;
 
 	DXGI_ADAPTER_DESC adapter_desc;
@@ -165,13 +119,13 @@ int main(int argc, char **argv)
 				reinterpret_cast<const pyrowave_luid *>(&adapter_desc.AdapterLuid), &pyro_device));
 
 	pyrowave_encoder_create_info encoder_info = {};
-	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_444;
+	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
 	encoder_info.width = out_width;
 	encoder_info.height = out_height;
 	encoder_info.device = pyro_device;
 
 	pyrowave_decoder_create_info decoder_info = {};
-	decoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_444;
+	decoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
 	decoder_info.width = out_width;
 	decoder_info.height = out_height;
 	decoder_info.device = pyro_device;
@@ -179,51 +133,21 @@ int main(int argc, char **argv)
 	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
 	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
 
-	D3D11_TEXTURE2D_DESC tex_desc = {};
-	tex_desc.Format = DXGI_FORMAT_R8_UNORM;
-	tex_desc.Width = out_width;
-	tex_desc.Height = out_height;
-	tex_desc.MipLevels = 1;
-	tex_desc.ArraySize = 1;
-	tex_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-	tex_desc.Usage = D3D11_USAGE_DEFAULT;
-	tex_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-	tex_desc.SampleDesc.Count = 1;
+	pyrowave_image_create_info image_info = {};
+	VkImageCreateInfo image_create_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	image_info.device = pyro_device;
+	image_info.handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
+	image_info.image_create_info = &image_create_info;
 
-	ComPtr<ID3D11Texture2D> shared_planes[3];
-	ComPtr<ID3D11RenderTargetView> rtv[3];
-	HANDLE shared_handles[3];
-
-	for (int i = 0; i < 3; i++)
-	{
-		CHECK_HRESULT(device->CreateTexture2D(&tex_desc, nullptr, (ID3D11Texture2D **)shared_planes[i].ppv()));
-		ComPtr<IDXGIResource1> res;
-		CHECK_HRESULT(shared_planes[i]->QueryInterface(IID_IDXGIResource1, res.ppv()));
-		CHECK_HRESULT(res->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handles[i]));
-		CHECK_HRESULT(device->CreateRenderTargetView(shared_planes[i].get(), nullptr, (ID3D11RenderTargetView **)rtv[i].ppv()));
-	}
-
-	for (int i = 0; i < 3; i++)
-	{
-		pyrowave_image_create_info image_info = {};
-		VkImageCreateInfo image_create_info = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-		image_info.device = pyro_device;
-		image_info.external_handle = (pyrowave_os_handle)shared_handles[i];
-		image_info.handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D11_TEXTURE_BIT;
-		image_info.image_create_info = &image_create_info;
-
-		image_create_info.imageType = VK_IMAGE_TYPE_2D;
-		image_create_info.extent = { out_width, out_height, 1 };
-		image_create_info.format = VK_FORMAT_R8_UNORM;
-		image_create_info.mipLevels = 1;
-		image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
-		image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-		image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-		image_create_info.arrayLayers = 1;
-		image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-		CHECKED(pyrowave_image_create(&image_info, &pyro_images[i]));
-	}
+	image_create_info.imageType = VK_IMAGE_TYPE_2D;
+	image_create_info.extent = { out_width, out_height, 1 };
+	image_create_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+	image_create_info.mipLevels = 1;
+	image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+	image_create_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	image_create_info.arrayLayers = 1;
+	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 	pyrowave_sync_object_create_info sync_create_info = {};
 	sync_create_info.device = pyro_device;
@@ -231,11 +155,6 @@ int main(int argc, char **argv)
 	sync_create_info.handle_type = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT;
 	sync_create_info.semaphore_type = VK_SEMAPHORE_TYPE_TIMELINE;
 	CHECKED(pyrowave_sync_object_create(&sync_create_info, &pyro_sync));
-
-	ComPtr<ID3D11VertexShader> vs;
-	ComPtr<ID3D11PixelShader> ps;
-	CHECK_HRESULT(device->CreateVertexShader(encode_desktop_vs, sizeof(encode_desktop_vs), nullptr, (ID3D11VertexShader **)vs.ppv()));
-	CHECK_HRESULT(device->CreatePixelShader(encode_desktop_ps, sizeof(encode_desktop_ps), nullptr, (ID3D11PixelShader **)ps.ppv()));
 
 	std::vector<std::vector<uint8_t>> encoded_frames;
 	uint64_t timeline = 0;
@@ -265,6 +184,7 @@ int main(int argc, char **argv)
 		ComPtr<ID3D11Texture2D> tex;
 		CHECK_HRESULT(resource->QueryInterface(IID_ID3D11Texture2D, tex.ppv()));
 
+		D3D11_TEXTURE2D_DESC tex_desc;
 		tex->GetDesc(&tex_desc);
 		LOGI("Got texture: %u x %u (fmt #%x)\n", tex_desc.Width, tex_desc.Height, tex_desc.Format);
 
@@ -277,38 +197,47 @@ int main(int argc, char **argv)
 		if (tex_desc.Width != desc.ModeDesc.Width || tex_desc.Height != desc.ModeDesc.Height)
 			LOGW("Mismatch in desktop mode vs captured texture ... ?\n");
 
-		ComPtr<ID3D11ShaderResourceView> srv;
-		device->CreateShaderResourceView(tex.get(), nullptr, (ID3D11ShaderResourceView **)srv.ppv());
-		convert_rgb_to_ycbcr(device.get(), context.get(), vs.get(), ps.get(),
-				srv.get(), rtv[0].get(), rtv[1].get(), rtv[2].get(),
-				out_width, out_height);
+		ComPtr<IDXGIResource1> resource1;
+		CHECK_HRESULT(resource->QueryInterface(IID_IDXGIResource1, resource1.ppv()));
+
+		HANDLE shared_handle;
+		CHECK_HRESULT(resource1->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &shared_handle));
+		image_create_info.extent.width = tex_desc.Width;
+		image_create_info.extent.height = tex_desc.Height;
+		image_info.external_handle = (pyrowave_os_handle)shared_handle;
+		CHECKED(pyrowave_image_create(&image_info, &pyro_image));
+
+		// Unclear if we need to synchronize here, but given it's D3D11, we might
+		// have to convert implicit sync into explicit sync, who knows ...
 		context4->Signal(share_fence.get(), ++timeline);
 
 		pyrowave_gpu_sync_operation acquire, release;
-		pyrowave_gpu_buffers buffers;
+		pyrowave_scaled_encode_info info = {};
 		pyrowave_rate_control rate_control = { payload_size };
 
-		pyrowave_gpu_external_reference external_refs[3];
+		pyrowave_gpu_external_reference external_ref;
 
 		acquire = {};
 		acquire.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync);
 		acquire.sync.value = timeline;
-		acquire.num_images = 3;
-		acquire.images = external_refs;
+		acquire.num_images = 1;
+		acquire.images = &external_ref;
 
 		release = {};
 		release.sync.semaphore = pyrowave_sync_object_get_semaphore(pyro_sync);
 		release.sync.value = ++timeline;
 
-		for (int i = 0; i < 3; i++)
-		{
-			pyrowave_image_get_image_view(pyro_images[i], VkImageAspectFlagBits(VK_IMAGE_ASPECT_PLANE_0_BIT << i),
-					VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[i]);
-			external_refs[i].image = pyro_images[i];
-			external_refs[i].queue_family_index = VK_QUEUE_FAMILY_EXTERNAL;
-		}
+		CHECKED(pyrowave_image_get_image_view(pyro_image, VK_IMAGE_ASPECT_COLOR_BIT,
+				VK_IMAGE_USAGE_SAMPLED_BIT, &info.view));
+		external_ref.image = pyro_image;
+		external_ref.queue_family_index = VK_QUEUE_FAMILY_EXTERNAL;
 
-		CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
+		info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+		info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+		info.ycbcr_chroma_midpoint = 128.0f / 255.0f;
+		info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
+
+		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, &acquire, &release, &info, &rate_control));
 
 		std::vector<uint8_t> bitstream(rate_control.maximum_bitstream_size);
 		pyrowave_packet packet = {};
@@ -320,14 +249,16 @@ int main(int argc, char **argv)
 		encoded_frames.push_back(std::move(bitstream));
 
 		context4->Wait(share_fence.get(), timeline);
+
+		pyrowave_image_destroy(pyro_image);
 	}
 
 	output_duplication = {};
 
 	std::unique_ptr<uint8_t[]> y, cb, cr;
 	y.reset(new uint8_t[out_width * out_height]);
-	cb.reset(new uint8_t[out_width * out_height]);
-	cr.reset(new uint8_t[out_width * out_height]);
+	cb.reset(new uint8_t[out_width * out_height / 4]);
+	cr.reset(new uint8_t[out_width * out_height / 4]);
 
 	for (auto &frame : encoded_frames)
 	{
@@ -340,11 +271,11 @@ int main(int argc, char **argv)
 		cpu_buffer.data[2] = cr.get();
 		cpu_buffer.width = out_width;
 		cpu_buffer.height = out_height;
-		cpu_buffer.format = PYROWAVE_CPU_BUFFER_FORMAT_YUV444P;
+		cpu_buffer.format = PYROWAVE_CPU_BUFFER_FORMAT_YUV420P;
 		for (int i = 0; i < 3; i++)
 		{
-			cpu_buffer.plane_size_in_bytes[i] = out_width * out_height;
-			cpu_buffer.row_stride_in_bytes[i] = out_width;
+			cpu_buffer.plane_size_in_bytes[i] = (out_width * out_height) >> (i ? 2 : 0);
+			cpu_buffer.row_stride_in_bytes[i] = out_width >> (i ? 1 : 0);
 		}
 		CHECKED(pyrowave_decoder_decode_cpu_buffer_synchronous(decoder, &cpu_buffer));
 
@@ -364,8 +295,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-	for (auto &img : pyro_images)
-		pyrowave_image_destroy(img);
 	pyrowave_encoder_destroy(encoder);
 	pyrowave_decoder_destroy(decoder);
 	pyrowave_sync_object_destroy(pyro_sync);
