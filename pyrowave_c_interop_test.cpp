@@ -2596,8 +2596,8 @@ static void test_extended_ycbcr_interop()
 				int g = int(pix >>  8) & 0xff;
 				int b = int(pix >> 16) & 0xff;
 
-				int chroma_x = x >> config.subsampled;
-				int chroma_y = y >> config.subsampled;
+				int chroma_x = x >> int(config.subsampled);
+				int chroma_y = y >> int(config.subsampled);
 
 				float chroma_shift = config.planar_format == VK_FORMAT_R8_UNORM ? 128.0f / 255.0f : 512.0f / 1023.0f;
 
