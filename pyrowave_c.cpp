@@ -9,6 +9,8 @@
 #include "pyrowave_decoder.hpp"
 #include "pyrowave_encoder.hpp"
 #include "logging.hpp"
+#include "slangmosh_scaler.hpp"
+#include "scaler.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -829,6 +831,10 @@ struct pyrowave_encoder_opaque
 	ChromaSubsampling chroma = {};
 	int width = 0;
 	int height = 0;
+
+	// For scaling path.
+	ImageHandle scaler_planes[3];
+	VideoScaler scaler;
 };
 
 pyrowave_result
@@ -858,6 +864,10 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 		return PYROWAVE_ERROR_GENERIC;
 	}
 
+	ResourceLayout layout;
+	Shaders<> shaders(info->device->device, layout, 0);
+	enc->scaler.set_program(shaders.scaler);
+
 	*encoder = enc;
 	return PYROWAVE_SUCCESS;
 }
@@ -869,46 +879,54 @@ struct WrappedViewBuffers : ViewBuffers
 	bool wrap(Device *device, const pyrowave_gpu_buffers *buffers, VkImageUsageFlags usage);
 };
 
+static bool wrap_view(Device *device, const pyrowave_image_view &view, ImageHandle &wrapped_image,
+                      ImageViewHandle &wrapped_view,
+                      VkImageUsageFlags usage)
+{
+	ImageCreateInfo image_info = {};
+	image_info.usage = usage;
+	image_info.type = VK_IMAGE_TYPE_2D;
+	image_info.domain = ImageDomain::Physical;
+	image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+	image_info.width = view.width;
+	image_info.height = view.height;
+	image_info.format = view.image_format;
+
+	// The exact numbers aren't important.
+	image_info.layers = view.layer + 1;
+	image_info.levels = view.mip_level + 1;
+
+	image_info.layout = view.layout == VK_IMAGE_LAYOUT_GENERAL ? ImageLayout::General : ImageLayout::Optimal;
+	wrapped_image = device->wrap_image(image_info, view.image);
+	if (!wrapped_image)
+		return false;
+
+	ImageViewCreateInfo view_info = {};
+	view_info.image = wrapped_image.get();
+	view_info.format = view.view_format;
+	view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
+	view_info.layers = 1;
+	view_info.levels = 1;
+	view_info.base_level = view.mip_level;
+	view_info.base_layer = view.layer;
+	view_info.swizzle.r = view.swizzle;
+	view_info.swizzle.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.swizzle.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.swizzle.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+	view_info.aspect = view.aspect;
+	wrapped_view = device->create_image_view(view_info);
+	if (!wrapped_view)
+		return false;
+
+	return true;
+}
+
 bool WrappedViewBuffers::wrap(Device *device, const pyrowave_gpu_buffers *buffers, VkImageUsageFlags usage)
 {
 	for (int i = 0; i < 3; i++)
 	{
-		ImageCreateInfo image_info = {};
-		image_info.usage = usage;
-		image_info.type = VK_IMAGE_TYPE_2D;
-		image_info.domain = ImageDomain::Physical;
-		image_info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-		image_info.width = buffers->planes[i].width;
-		image_info.height = buffers->planes[i].height;
-		image_info.format = buffers->planes[i].image_format;
-
-		// The exact numbers aren't important.
-		image_info.layers = buffers->planes[i].layer + 1;
-		image_info.levels = buffers->planes[i].mip_level + 1;
-
-		image_info.layout =
-			buffers->planes[i].layout == VK_IMAGE_LAYOUT_GENERAL ? ImageLayout::General : ImageLayout::Optimal;
-		wrapped_images[i] = device->wrap_image(image_info, buffers->planes[i].image);
-		if (!wrapped_images[i])
+		if (!wrap_view(device, buffers->planes[i], wrapped_images[i], image_views[i], usage))
 			return false;
-
-		ImageViewCreateInfo view_info = {};
-		view_info.image = wrapped_images[i].get();
-		view_info.format = buffers->planes[i].view_format;
-		view_info.view_type = VK_IMAGE_VIEW_TYPE_2D;
-		view_info.layers = 1;
-		view_info.levels = 1;
-		view_info.base_level = buffers->planes[i].mip_level;
-		view_info.base_layer = buffers->planes[i].layer;
-		view_info.swizzle.r = buffers->planes[i].swizzle;
-		view_info.swizzle.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-		view_info.swizzle.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-		view_info.swizzle.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-		view_info.aspect = buffers->planes[i].aspect;
-		image_views[i] = device->create_image_view(view_info);
-		if (!image_views[i])
-			return false;
-
 		planes[i] = image_views[i].get();
 	}
 
@@ -948,20 +966,19 @@ static void pyrowave_device_signal_semaphore(Device *device, CommandBuffer::Type
 	}
 }
 
-pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_gpu_sync_operation *acquire,
-                                        const pyrowave_gpu_sync_operation *release,
-                                        const pyrowave_gpu_buffers *buffers,
-                                        const pyrowave_rate_control *rate_control)
+static pyrowave_result
+pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
+                                              const pyrowave_gpu_sync_operation *acquire,
+                                              const pyrowave_gpu_sync_operation *release,
+                                              const ViewBuffers &views,
+                                              const pyrowave_rate_control *rate_control)
 {
+	auto *device = encoder->device;
+
 	if (encoder->pyro_device->cmd && (acquire || release))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	Util::set_thread_logging_interface(&null_logger);
-	auto *device = encoder->device;
-
-	device->next_frame_context();
 
 	BufferCreateInfo bufinfo = {};
 	bufinfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -1001,10 +1018,6 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	Encoder::BitstreamBuffers bitstream_buffers = {};
-
-	WrappedViewBuffers views = {};
-	if (!views.wrap(device, buffers, VK_IMAGE_USAGE_SAMPLED_BIT))
-		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bitstream_buffers.meta.buffer = queued_meta_gpu.get();
 	bitstream_buffers.meta.size = queued_meta_gpu->get_create_info().size;
@@ -1058,7 +1071,6 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
 
-	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 	encoder->queued_fence.reset();
 
 	if (encoder->pyro_device->cmd)
@@ -1075,6 +1087,118 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	pyrowave_device_signal_semaphore(device, encoder->pyro_device->queue_type, release);
 
 	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
+                                        const pyrowave_gpu_sync_operation *acquire,
+                                        const pyrowave_gpu_sync_operation *release,
+                                        const pyrowave_gpu_buffers *buffers,
+                                        const pyrowave_rate_control *rate_control)
+{
+	auto *device = encoder->device;
+	WrappedViewBuffers views = {};
+	if (!views.wrap(device, buffers, VK_IMAGE_USAGE_SAMPLED_BIT))
+		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+	device->next_frame_context();
+	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, acquire, release, views, rate_control);
+}
+
+pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
+											   const pyrowave_gpu_sync_operation *acquire,
+											   const pyrowave_gpu_sync_operation *release,
+											   const pyrowave_scaled_encode_info *scaling_info,
+											   const pyrowave_rate_control *rate_control)
+{
+	Util::set_thread_logging_interface(&null_logger);
+
+	if (scaling_info->intermediate_plane_format != VK_FORMAT_R8_UNORM &&
+		scaling_info->intermediate_plane_format != VK_FORMAT_R16_UNORM)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto *device = encoder->device;
+	device->next_frame_context();
+
+	if (!encoder->scaler_planes[0])
+	{
+		auto info = ImageCreateInfo::immutable_2d_image(
+			encoder->width, encoder->height, scaling_info->intermediate_plane_format);
+		info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+
+		encoder->scaler_planes[0] = encoder->device->create_image(info);
+
+		if (encoder->chroma == ChromaSubsampling::Chroma420)
+		{
+			info.width /= 2;
+			info.height /= 2;
+		}
+
+		encoder->scaler_planes[1] = encoder->device->create_image(info);
+		encoder->scaler_planes[2] = encoder->device->create_image(info);
+	}
+
+	for (auto &plane : encoder->scaler_planes)
+		if (!plane)
+			return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
+
+	ImageHandle wrapped_image;
+	ImageViewHandle wrapped_view;
+	if (!wrap_view(device, scaling_info->view, wrapped_image, wrapped_view, VK_IMAGE_USAGE_SAMPLED_BIT))
+		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+
+	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+	auto cmd =
+			encoder->pyro_device->cmd
+				? device->request_borrowed_command_buffer(encoder->pyro_device->cmd)
+				: device->request_command_buffer(encoder->pyro_device->queue_type);
+
+	if (acquire)
+	{
+		for (size_t i = 0; i < acquire->num_images; i++)
+		{
+			cmd->acquire_image_barrier(*acquire->images[i].image->img,
+									   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+									   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+									   VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+									   acquire->images[i].queue_family_index);
+		}
+	}
+
+	for (int i = 0; i < 3; i++)
+	{
+		cmd->image_barrier(*encoder->scaler_planes[i], VK_IMAGE_LAYOUT_UNDEFINED,
+						   VK_IMAGE_LAYOUT_GENERAL,
+						   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+						   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+	}
+
+	VideoScaler::RescaleInfo info = {};
+	info.input = wrapped_view.get();
+	info.input_color_space = scaling_info->input_color_space;
+	info.output_color_space = scaling_info->output_color_space;
+	for (int i = 0; i < 3; i++)
+		info.output_planes[i] = &encoder->scaler_planes[i]->get_view();
+	info.num_output_planes = 3;
+	encoder->scaler.rescale(*cmd, info);
+
+	for (int i = 0; i < 3; i++)
+	{
+		cmd->image_barrier(*encoder->scaler_planes[i],
+						   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+						   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+						   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+	}
+
+	device->submit(cmd);
+
+	ViewBuffers buffers = {};
+	for (int i = 0; i < 3; i++)
+		buffers.planes[i] = &encoder->scaler_planes[i]->get_view();
+	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, nullptr, release, buffers, rate_control);
 }
 
 pyrowave_result

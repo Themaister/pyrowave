@@ -19,7 +19,7 @@ extern "C" {
 // API and ABI is not considered stable until MAJOR version hits 1!
 
 #define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 5
+#define PYROWAVE_API_VERSION_MINOR 6
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -460,6 +460,35 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
                                         const pyrowave_gpu_sync_operation *release,
                                         const pyrowave_gpu_buffers *buffers,
                                         const pyrowave_rate_control *rate_control);
+
+typedef struct pyrowave_scaled_encode_info
+{
+	// Input view must be some RGB(A) UNORM format.
+	pyrowave_image_view view;
+
+	// For SDR, use VK_COLOR_SPACE_SRGB_NONLINEAR.
+	// SPACE_EXTENDED_SRGB_LINEAR_EXT and HDR10_ST2084 is supported as well.
+	VkColorSpaceKHR input_color_space;
+
+	// Use VK_COLOR_SPACE_SRGB_NONLINEAR or HDR10_ST2084.
+	VkColorSpaceKHR output_color_space;
+
+	// YCbCr transform is always full-range, center chroma siting.
+	// If output color space is HDR10_ST2084, BT.2020 NCL transform is used,
+	// otherwise, BT.701 coefficients are used.
+
+	// Intermediate format used for planes. Should be R8_UNORM or R16_UNORM.
+	// R16_UNORM is more or less required for HDR10, but can be used for SDR too
+	// to avoid some potential banding, especially for 10-bit SDR swapchains.
+	VkFormat intermediate_plane_format;
+} pyrowave_scaled_encode_info;
+
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
+                                               const pyrowave_gpu_sync_operation *acquire,
+                                               const pyrowave_gpu_sync_operation *release,
+                                               const pyrowave_scaled_encode_info *scaling_info,
+                                               const pyrowave_rate_control *rate_control);
 
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result

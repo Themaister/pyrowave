@@ -23,6 +23,7 @@ EXPORTS
 	pyrowave_image_destroy
 	pyrowave_encoder_create
 	pyrowave_encoder_encode_gpu_synchronous
+	pyrowave_encoder_encode_gpu_scaled_synchronous
 	pyrowave_encoder_encode_cpu_synchronous
 	pyrowave_encoder_compute_num_packets
 	pyrowave_encoder_compute_num_packets_with_padding

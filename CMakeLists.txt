@@ -121,10 +121,12 @@ endif()
 target_link_libraries(pyrowave PRIVATE granite-vulkan granite-math)
 
 if (${PROJECT_IS_TOP_LEVEL})
-    add_library(pyrowave-shared SHARED pyrowave_c.cpp pyrowave.h)
-    target_link_libraries(pyrowave-shared PRIVATE pyrowave granite-vulkan)
+    add_library(pyrowave-shared SHARED pyrowave_c.cpp pyrowave.h
+            Granite/video/scaler.cpp Granite/video/scaler.hpp shaders/slangmosh_scaler.hpp)
+    target_link_libraries(pyrowave-shared PRIVATE pyrowave granite-vulkan granite-math)
     target_compile_definitions(pyrowave-shared PRIVATE PYROWAVE_EXPORT_SYMBOLS)
     target_compile_options(pyrowave-shared PRIVATE ${PYROWAVE_CXX_FLAGS})
+    target_include_directories(pyrowave-shared PRIVATE shaders Granite/video)
 
     add_executable(pyrowave-c-test pyrowave_c_test.cpp)
     target_link_libraries(pyrowave-c-test PRIVATE pyrowave-shared granite-volk-headers)
@@ -139,7 +141,7 @@ if (${PROJECT_IS_TOP_LEVEL})
     target_compile_options(pyrowave-device-validation PRIVATE ${PYROWAVE_CXX_FLAGS})
 
     set(PYROWAVE_API_VERSION_MAJOR 0)
-    set(PYROWAVE_API_VERSION_MINOR 5)
+    set(PYROWAVE_API_VERSION_MINOR 6)
     set(PYROWAVE_API_VERSION_PATCH 0)
     set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 
