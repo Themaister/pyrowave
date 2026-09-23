@@ -751,11 +751,11 @@ static void test_direct_interop_scaling()
 	decoder_info.height = 64;
 	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
 
-	uint32_t plane_data[64][64];
+	uint32_t plane_data[66][67];
 
-	for (int y = 0; y < 64; y++)
+	for (int y = 0; y < 66; y++)
 	{
-		for (int x = 0; x < 64; x++)
+		for (int x = 0; x < 67; x++)
 		{
 #if 1
 			int r = mirror(128 + y * 3 + x * 1);
@@ -770,7 +770,7 @@ static void test_direct_interop_scaling()
 		}
 	}
 
-	auto image_info = ImageCreateInfo::immutable_2d_image(64, 64, VK_FORMAT_R8G8B8A8_SRGB);
+	auto image_info = ImageCreateInfo::immutable_2d_image(67, 66, VK_FORMAT_R8G8B8A8_SRGB);
 	image_info.initial_layout = VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL;
 	image_info.misc = IMAGE_MISC_MUTABLE_SRGB_BIT;
 	ImageInitialData initial_data = { plane_data };
@@ -778,6 +778,8 @@ static void test_direct_interop_scaling()
 	ASSERT_THAT(input_image);
 
 	image_info.format = VK_FORMAT_R16_UNORM;
+	image_info.width = 64;
+	image_info.height = 64;
 	image_info.misc = 0;
 	image_info.layers = 3;
 	image_info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
@@ -791,9 +793,9 @@ static void test_direct_interop_scaling()
 	pyrowave_image_view view = {};
 
 	view.image = input_image->get_image();
-	view.width = 64;
-	view.height = 64;
-	view.image_format = VK_FORMAT_R8G8B8A8_SRGB;
+	view.width = input_image->get_width();
+	view.height = input_image->get_height();
+	view.image_format = input_image->get_format();
 	view.view_format = VK_FORMAT_R8G8B8A8_UNORM;
 	view.layer = 0;
 	view.layout = input_image->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
@@ -810,6 +812,9 @@ static void test_direct_interop_scaling()
 	scaling.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	scaling.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	scaling.ycbcr_chroma_midpoint = 130.0f / 255.0f;
+	scaling.force_linear_filtering = true;
+	VkRect2D crop_rect = { { 2, 1 }, { 64, 64 } };
+	scaling.crop_rect = &crop_rect;
 
 	pyrowave_device_set_command_buffer(pyro_device, cmd->get_command_buffer());
 	CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
@@ -872,14 +877,15 @@ static void test_direct_interop_scaling()
 
 	auto *readback_ptr = static_cast<const uint16_t *>(device.map_host_buffer(*readback_buffer, MEMORY_ACCESS_READ_BIT));
 
+#if 1
 	for (int y = 0; y < 64; y++)
 	{
 		for (int x = 0; x < 64; x++)
 		{
 #if 1
-			auto r = float(mirror(128 + y * 3 + x * 1)) / 255.0f;
-			auto g = float(mirror(128 + y * 5 + x * 3)) / 255.0f;
-			auto b = float(mirror(128 + y * 7 + x * 5)) / 255.0f;
+			auto r = float(mirror(128 + (y + 1) * 3 + (x + 2) * 1)) / 255.0f;
+			auto g = float(mirror(128 + (y + 1) * 5 + (x + 2) * 3)) / 255.0f;
+			auto b = float(mirror(128 + (y + 1) * 7 + (x + 2) * 5)) / 255.0f;
 #else
 			float r = 128.0f / 255.0f;
 			float g = 128.0f / 255.0f;
@@ -902,6 +908,7 @@ static void test_direct_interop_scaling()
 			ASSERT_THAT(cr_delta <= 2.0f / 255.0f);
 		}
 	}
+#endif
 
 	pyrowave_encoder_destroy(encoder);
 	pyrowave_decoder_destroy(decoder);

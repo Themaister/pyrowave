@@ -491,10 +491,19 @@ typedef struct pyrowave_scaled_encode_info
 	// In YCbCr, the center point for chroma may depend on bit depth in some cases.
 	// Since Pyrowave is a floating point codec, this is mostly irrelevant for us,
 	// but provided here for compatibility. Consumer of the final image is expected
-	// to know which midpoint was used.
-	// Common values would be 0.5f (bit-depth agnostic default),
+	// to know which encoding for pure gray was used.
+	// Common values would be 0.5 (bit-depth agnostic default),
 	// 128.0 / 255.0 (8-bit BT) or 512.0 / 1023.0 (10-bit BT).
 	float ycbcr_chroma_midpoint;
+
+	// Instead of sinc, force plain LINEAR scaling filter.
+	bool force_linear_filtering;
+
+	// Skip any dithering for 8-bit outputs.
+	bool skip_dither;
+
+	// Optional.
+	const VkRect2D *crop_rect;
 } pyrowave_scaled_encode_info;
 
 PYROWAVE_PUBLIC_API pyrowave_result

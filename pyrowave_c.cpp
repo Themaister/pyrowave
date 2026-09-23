@@ -1205,6 +1205,9 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	for (int i = 0; i < 3; i++)
 		info.output_planes[i] = &encoder->scaler_planes[i]->get_view();
 	info.num_output_planes = 3;
+	info.crop_rect = scaling_info->crop_rect;
+	info.skip_dither = scaling_info->skip_dither;
+	info.force_linear_filtering = scaling_info->force_linear_filtering;
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
 	encoder->scaler.rescale(*cmd, info);
 
