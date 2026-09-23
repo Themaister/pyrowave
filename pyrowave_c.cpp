@@ -641,8 +641,12 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 {
 	Util::set_thread_logging_interface(&null_logger);
 
-	if ((aspect & (VK_IMAGE_ASPECT_PLANE_0_BIT | VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT)) == 0)
+	if ((aspect & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_PLANE_0_BIT |
+	               VK_IMAGE_ASPECT_PLANE_1_BIT | VK_IMAGE_ASPECT_PLANE_2_BIT)) == 0)
+	{
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	}
+
 	if (usage != VK_IMAGE_USAGE_SAMPLED_BIT && usage != VK_IMAGE_USAGE_STORAGE_BIT)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
@@ -653,7 +657,23 @@ pyrowave_image_get_image_view(pyrowave_image image, VkImageAspectFlagBits aspect
 	view->image_format = img.get_format();
 	view->width = img.get_width();
 	view->height = img.get_height();
+
+	// Imported images just use GENERAL.
 	view->layout = VK_IMAGE_LAYOUT_GENERAL;
+
+	if (aspect == VK_IMAGE_ASPECT_COLOR_BIT)
+	{
+		view->aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+		view->swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
+		view->view_format = img.get_format();
+
+		if (view->view_format == VK_FORMAT_R8G8B8A8_SRGB)
+			view->view_format = VK_FORMAT_R8G8B8A8_UNORM;
+		else if (view->view_format == VK_FORMAT_B8G8R8A8_SRGB)
+			view->view_format = VK_FORMAT_B8G8R8A8_UNORM;
+
+		return PYROWAVE_SUCCESS;
+	}
 
 	// Handle the usual suspects.
 	switch (img.get_format())
