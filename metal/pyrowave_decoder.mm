@@ -367,12 +367,16 @@ pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 
 	auto *cmd = (__bridge id<MTLCommandBuffer>)(command_buffer);
 
+	// Per pass timestamps, null unless collection is on. Timing the command buffer
+	// as a whole would be meaningless: it is the caller's and may carry other work.
+	auto batch = device->timestamps->begin_batch();
+
 	// Every dequant dispatch writes a distinct (component, level, band) region of
 	// the pyramid and none reads another's output, so they can all run at once. A
 	// serial encoder would barrier between all ~42, but the cost is underutilization
 	// rather than barrier latency: each dispatch is far too small to fill the GPU on
 	// its own, which is why this pays at low resolution and not at 1080p 4:4:4.
-	auto dequant_enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+	auto dequant_enc = begin_compute_pass(cmd, MTLDispatchTypeConcurrent, batch.get(), "decode dequant");
 	if (!dequant_enc)
 		return PYROWAVE_ERROR_GENERIC;
 
@@ -384,13 +388,16 @@ pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	// a level are independent, so this is also concurrent with explicit barriers
 	// at the level boundaries only. Ordering against the dequant work above comes
 	// from the encoder boundary, which Metal tracks automatically.
-	auto idwt_enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+	auto idwt_enc = begin_compute_pass(cmd, MTLDispatchTypeConcurrent, batch.get(), "decode idwt");
 	if (!idwt_enc)
 		return PYROWAVE_ERROR_GENERIC;
 
 	idwt_enc.label = @("pyrowave idwt");
 	encode_idwt(decoder, idwt_enc, planes);
 	[idwt_enc endEncoding];
+
+	if (batch)
+		batch->submit(cmd);
 
 	// Retained until this slot comes round again, so its buffers cannot be rewritten
 	// while the GPU is still reading them.

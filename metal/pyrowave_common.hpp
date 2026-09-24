@@ -16,8 +16,13 @@
 #include "pyrowave_metal.h"
 #include "pyrowave_bitstream.hpp"
 
+#include <atomic>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <stdint.h>
+#include <string>
+#include <vector>
 
 namespace PyroWave
 {
@@ -73,6 +78,88 @@ id<MTLComputePipelineState> create_pipeline_bool_constant(pyrowave_device device
                                                           uint32_t required_threads,
                                                           uint32_t index, bool value);
 
+class DeviceTimestamps;
+
+// The timestamped passes of one command buffer.
+struct TimestampBatch : std::enable_shared_from_this<TimestampBatch>
+{
+	explicit TimestampBatch(std::shared_ptr<DeviceTimestamps> owner_);
+
+	// A two sample buffer to attach to a pass descriptor, or nil if none could be
+	// allocated, leaving that pass untimed. `tag` must outlive the batch.
+	id<MTLCounterSampleBuffer> add_pass(const char *tag);
+
+	// Resolves the passes added above once `cmd` completes. Call before commit.
+	void submit(id<MTLCommandBuffer> cmd);
+	void resolve();
+
+	struct Pass
+	{
+		id<MTLCounterSampleBuffer> buffer;
+		const char *tag;
+	};
+
+	std::vector<Pass> passes;
+	std::shared_ptr<DeviceTimestamps> owner;
+
+	// Start of the CPU/GPU correlation window; resolve() takes the end pair.
+	MTLTimestamp cpu_begin = 0;
+	MTLTimestamp gpu_begin = 0;
+};
+
+// GPU timing behind pyrowave_device_report_performance_stats(). Apple GPUs sample
+// the timestamp counter at pass boundaries only, so the finest granularity is one
+// interval per compute or blit pass.
+//
+// Held by shared_ptr by the device and by every in-flight batch, so a command
+// buffer landing after pyrowave_device_destroy() still resolves into a live object.
+class DeviceTimestamps : public std::enable_shared_from_this<DeviceTimestamps>
+{
+public:
+	explicit DeviceTimestamps(id<MTLDevice> mtl_);
+
+	bool counters_supported() const { return counter_set != nil; }
+
+	// Off unless PYROWAVE_TIMESTAMPS is set or report() has been called once.
+	bool collecting() const { return enabled.load(std::memory_order_relaxed); }
+
+	// Null when collection is off or pass timestamps are unavailable, which call
+	// sites read as "do not instrument".
+	std::shared_ptr<TimestampBatch> begin_batch();
+
+	// Thread safe: completion handlers run on Metal's own threads.
+	void accumulate(const char *tag, double seconds);
+	void report(pyrowave_message_cb cb, void *userdata, bool reset);
+
+	// For TimestampBatch.
+	id<MTLCounterSampleBuffer> acquire_sample_buffer();
+	void recycle_sample_buffer(id<MTLCounterSampleBuffer> buffer);
+	void sample_correlation(MTLTimestamp *cpu, MTLTimestamp *gpu) const;
+
+private:
+	id<MTLDevice> mtl;
+	// nil when the GPU cannot sample at pass boundaries.
+	id<MTLCounterSet> counter_set;
+	std::atomic<bool> enabled;
+
+	std::mutex lock;
+	// Recycled, so a steady stream settles on as many buffers as it keeps in flight.
+	std::vector<id<MTLCounterSampleBuffer>> pool;
+	struct Entry
+	{
+		double total_time = 0.0;
+		uint64_t iterations = 0;
+	};
+	// Ordered, so the report comes out the same way every time.
+	std::map<std::string, Entry> entries;
+};
+
+// Samples GPU timestamps around the pass when `batch` is non-null, otherwise an
+// ordinary untimed pass.
+id<MTLComputeCommandEncoder> begin_compute_pass(id<MTLCommandBuffer> cmd, MTLDispatchType dispatch_type,
+                                                TimestampBatch *batch, const char *tag);
+id<MTLBlitCommandEncoder> begin_blit_pass(id<MTLCommandBuffer> cmd, TimestampBatch *batch, const char *tag);
+
 // The wavelet coefficient pyramid. The decoder fills it from the bitstream and
 // runs the iDWT out of it; the encoder runs the DWT into it and quantizes out of
 // it. Both want exactly the same texture and the same set of views, so this is
@@ -119,6 +206,9 @@ struct pyrowave_device_opaque
 	// Clamp to transparent black. Only the encoder's quantizer wants this, so it
 	// is created together with the encode pipelines.
 	id<MTLSamplerState> border_sampler;
+
+	// Always created, but idle until collection is switched on.
+	std::shared_ptr<PyroWave::DeviceTimestamps> timestamps;
 
 	pyrowave_message_cb message_cb = nullptr;
 	void *message_userdata = nullptr;

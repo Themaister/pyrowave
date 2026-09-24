@@ -12,4 +12,5 @@ Port notes:
 * The API has been simplified, removing Vulkanisms and using Metal objects for GPU decode.
 * You can set the environment variable PYROWAVE_PRECISION to 0, 1, or 2, to make the same precision/speed tradeoffs as the main library.
 * Using FP32 math and FP16 storage in the shaders ended up being the fastest and most accurate combination on Apple hardware.
+* pyrowave_device_report_performance_stats() reports GPU time per pass rather than per dispatch, since Apple GPUs only sample the timestamp counter at pass boundaries. Collection is off until PYROWAVE_TIMESTAMPS=1 is set or the function is called once, so it costs nothing unless asked for.
 * This implementation is roughly twice as fast as the Vulkan implementation running on KosmicKrisp on macOS
