@@ -45,7 +45,7 @@ PyroWave has been battled tested over long distance streaming over fiber links.
 
 ### Bitstream definition
 
-See [docs/bitstream.md]()
+See [bitstream/bitstream.md](bitstream/bitstream.md)
 
 ## Building
 
