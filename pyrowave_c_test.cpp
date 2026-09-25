@@ -516,10 +516,23 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	pyrowave_device_destroy(device);
 }
 
-static void test_basic_system_stability()
+static void test_basic_system_stability(bool realtime_prio)
 {
 	pyrowave_device device;
-	CHECKED(pyrowave_create_default_device(&device));
+
+	if (realtime_prio)
+	{
+		CHECKED(pyrowave_create_device_by_compat2(0, 0, nullptr, nullptr, nullptr,
+			VK_QUEUE_GLOBAL_PRIORITY_REALTIME, &device));
+	}
+	else
+	{
+		CHECKED(pyrowave_create_default_device(&device));
+	}
+
+	fprintf(stderr, "Got global priority: expected %u, got %u\n",
+	        realtime_prio ? VK_QUEUE_GLOBAL_PRIORITY_REALTIME : VK_QUEUE_GLOBAL_PRIORITY_MEDIUM,
+	        pyrowave_device_get_global_priority(device));
 
 	// 4K, upper bound of normal usage.
 	constexpr int Width = 3840;
@@ -684,7 +697,9 @@ static void test_basic_system_stability()
 int main()
 {
 	printf("Running system stability test ...\n");
-	test_basic_system_stability();
+	test_basic_system_stability(false);
+	printf("Running system stability test ... (REALTIME) \n");
+	test_basic_system_stability(true);
 
 	// Correctness tests for small-ish outputs.
 	for (int variant = 0; variant < 8; variant++)

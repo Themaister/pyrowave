@@ -51,14 +51,20 @@ void pyrowave_device_set_command_buffer(pyrowave_device device, VkCommandBuffer 
 	device->cmd = cmd;
 }
 
-pyrowave_result pyrowave_create_device_by_compat(
-	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
-	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
-	uint32_t vid, uint32_t pid,
-	const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
-	const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
-	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
-	pyrowave_device *device)
+VkQueueGlobalPriority pyrowave_device_get_global_priority(pyrowave_device device)
+{
+	return device->device.get_device_features().global_compute_priority;
+}
+
+pyrowave_result pyrowave_create_device_by_compat2(
+		// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
+		// Risks picking the wrong device if there are multiple ICDs for the same GPU.
+		uint32_t vid, uint32_t pid,
+		const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
+		const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
+		const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
+		VkQueueGlobalPriority global_priority,
+		pyrowave_device *device)
 {
 	// TODO: Find a better way to do this.
 	Util::set_thread_logging_interface(&null_logger);
@@ -126,7 +132,13 @@ pyrowave_result pyrowave_create_device_by_compat(
 		if (device_luid && memcmp(device_luid, ids.deviceLUID, VK_LUID_SIZE) != 0)
 			continue;
 
-		if (dev->context.init_device(gpu, VK_NULL_HANDLE, nullptr, 0, CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT))
+		ContextCreationFlags flags = CONTEXT_CREATION_ENABLE_VIDEO_FEATURE_ONLY_BIT;
+		if (global_priority == VK_QUEUE_GLOBAL_PRIORITY_REALTIME)
+			flags |= CONTEXT_CREATION_ENABLE_COMPUTE_REALTIME_GLOBAL_PRIORITY_BIT;
+		else if (global_priority == VK_QUEUE_GLOBAL_PRIORITY_HIGH)
+			flags |= CONTEXT_CREATION_ENABLE_COMPUTE_HIGH_GLOBAL_PRIORITY_BIT;
+
+		if (dev->context.init_device(gpu, VK_NULL_HANDLE, nullptr, 0, flags))
 		{
 			selected_gpu = gpu;
 			break;
@@ -145,7 +157,24 @@ pyrowave_result pyrowave_create_device_by_compat(
 
 	dev->device.set_context(dev->context, context_opts);
 	*device = dev;
+
+	if (global_priority > VK_QUEUE_GLOBAL_PRIORITY_MEDIUM)
+		pyrowave_device_set_queue_type(dev, VK_QUEUE_COMPUTE_BIT);
+
 	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result pyrowave_create_device_by_compat(
+		// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
+		// Risks picking the wrong device if there are multiple ICDs for the same GPU.
+		uint32_t vid, uint32_t pid,
+		const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
+		const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
+		const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
+		pyrowave_device *device)
+{
+	return pyrowave_create_device_by_compat2(vid, pid, device_uuid, driver_uuid, device_luid,
+	                                         VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, device);
 }
 
 pyrowave_result pyrowave_create_default_device(pyrowave_device *device)

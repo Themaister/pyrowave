@@ -162,6 +162,24 @@ PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat(
 	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
 	pyrowave_device *device);
 
+PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat2(
+	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
+	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
+	uint32_t vid, uint32_t pid,
+	const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
+	const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
+	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
+	// Intended to request HIGH or REALTIME global queue priorities.
+	// Only affects the compute queue. If HIGH or REALTIME is used,
+	// the device is automatically set to use async compute queues as per pyrowave_device_set_queue_type.
+	VkQueueGlobalPriority global_priority,
+	pyrowave_device *device);
+
+// Even if HIGH or REALTIME is requested, the system may not allow it.
+// On Linux at least, the process needs either root or CAP_SYS_NICE permissions to request > MEDIUM.
+// MEDIUM is the normal default.
+PYROWAVE_PUBLIC_API VkQueueGlobalPriority pyrowave_device_get_global_priority(pyrowave_device device);
+
 // For performance debugging, reports GPU timestamps.
 PYROWAVE_PUBLIC_API void
 pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset);
