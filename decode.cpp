@@ -23,6 +23,7 @@ struct DecodedBuffer
 static DecodedBuffer run_decoder_frame(CommandBufferHandle &cmd,
                                        PyroWave::Decoder &dec,
                                        const PyroWave::ViewBuffers &outputs,
+                                       bool fragment_path,
                                        uint32_t frame_index)
 {
 	auto &device = cmd->get_device();
@@ -44,10 +45,20 @@ static DecodedBuffer run_decoder_frame(CommandBufferHandle &cmd,
 
 	for (auto &plane : outputs.planes)
 	{
-		cmd->image_barrier(plane->get_image(),
-		                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-		                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-		                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+		if (fragment_path)
+		{
+			cmd->image_barrier(plane->get_image(),
+			                   VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+		}
+		else
+		{
+			cmd->image_barrier(plane->get_image(),
+			                   VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+		}
 	}
 
 	for (int i = 0; i < 3; i++)
@@ -74,12 +85,16 @@ struct YCbCrImages
 	PyroWave::ViewBuffers views;
 };
 
-static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt, PyroWave::ChromaSubsampling chroma)
+static YCbCrImages create_ycbcr_images(Device &device, int width, int height, VkFormat fmt,
+                                       PyroWave::ChromaSubsampling chroma, bool fragment_path)
 {
 	YCbCrImages images;
 	auto info = ImageCreateInfo::immutable_2d_image(width, height, fmt);
 	info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 	             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	// The fragment path writes the planes as colour attachments.
+	if (fragment_path)
+		info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	images.images[0] = device.create_image(info);
@@ -197,7 +212,10 @@ static void run_decoder(Device &device, const char *out_path, const char *in_pat
 	int frame_rate_num = u32_params[5];
 	int frame_rate_den = u32_params[6];
 	// Unused chroma siting. YUV4MPEG doesn't seem to have proper support for that.
-	if (!dec.init(&device, width, height, chroma))
+	// Pick the decode path the same way bench does.
+	bool fragment_path = PyroWave::Decoder::device_prefers_fragment_path(device);
+	LOGI("Using %s decode path.\n", fragment_path ? "fragment" : "compute");
+	if (!dec.init(&device, width, height, chroma, fragment_path))
 		return;
 
 	YUV4MPEGFile output;
@@ -213,7 +231,7 @@ static void run_decoder(Device &device, const char *out_path, const char *in_pat
 	}
 
 	auto fmt = YUV4MPEGFile::format_to_bytes_per_component(output.get_format()) == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-	auto outputs = create_ycbcr_images(device, width, height, fmt, chroma);
+	auto outputs = create_ycbcr_images(device, width, height, fmt, chroma, fragment_path);
 
 	DecodedBuffer queue[2];
 	uint32_t frame_index = 0;
@@ -239,12 +257,22 @@ static void run_decoder(Device &device, const char *out_path, const char *in_pat
 
 		for (auto &img : outputs.images)
 		{
-			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-			                   VK_PIPELINE_STAGE_2_COPY_BIT, 0,
-			                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+			if (fragment_path)
+			{
+				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+				                   VK_PIPELINE_STAGE_2_COPY_BIT, 0,
+				                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+				                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+			}
+			else
+			{
+				cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+				                   VK_PIPELINE_STAGE_2_COPY_BIT, 0,
+				                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+			}
 		}
 
-		queue[frame_index & 1] = run_decoder_frame(cmd, dec, outputs.views, frame_index);
+		queue[frame_index & 1] = run_decoder_frame(cmd, dec, outputs.views, fragment_path, frame_index);
 		frame_index++;
 	}
 
