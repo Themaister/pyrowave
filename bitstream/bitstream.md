@@ -1,8 +1,11 @@
-# Bitstream definition
+# Bitstream definition (v1)
 
-### Disclaimer
+### Bitstream freeze
 
-This specification is considered a draft and may change at any time.
+This specification was frozen on 2026-10-03 and marks version v1 of PyroWave.
+It has remained unchanged since this document was published.
+If there are mismatches in the document compared to the pyrowave implementation
+in this repository, the implementation is authoritative and this document should be updated.
 
 ## Introduction
 
@@ -17,7 +20,7 @@ while maintaining reasonable compression ratios.
 
 ### Previous work
 
-The design of this codec is a reimagining of [my master thesis from 2014](https://ntnuopen.ntnu.no/ntnu-xmlui/handle/11250/2400689),
+The design of this codec is a re-imagining of [my master thesis from 2014](https://ntnuopen.ntnu.no/ntnu-xmlui/handle/11250/2400689),
 with laser focus on the local game streaming use case.
 
 ### Conventions
@@ -91,9 +94,17 @@ See source code for the trick on how to do it. Note that GPU mirroring is not qu
 
 The decoding process is not bit-exact.
 This is generally the case for the CDF 9/7 since it is defined in floating-point.
-The inverse wavelet transform must be performed with at least FP16 precision.
+Also, as this is a codec optimized for GPU, floating point is preferable to integer math for performance reasons.
+The main reasons to have bit-exact decode also don't necessarily apply to this codec:
+
+- This codec is not concerned with motion estimation drift
+- This codec is not intended as a professional production codec where multiple stage of recompression is required
+
+The inverse wavelet transform must be performed with at least FP16 precision,
+but for quality, it is recommended to use FP32 as much as possible for the lifting math.
+Intermediate storage between stages can be FP16 without much quality loss.
 The range of intermediate floating point values can exceed +/- 1.0.
-Intermediate values above +/- 4.0 may be saturated to that range for practical reasons.
+Intermediate values above +/- 4.0 may be saturated to that range for practical reasons, allowing fixed-point implementations.
 Inf and NaN cannot occur.
 
 ### Image dimension alignment and padding
@@ -231,8 +242,8 @@ enum
 
 enum
 {
-  COLOR_PRIMARIES_BT709 = 0,
-  COLOR_PRIMARIES_BT2020 = 1
+  COLOR_PRIMARIES_SRGB = 0, // VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+  COLOR_PRIMARIES_BT2020 = 1 // VK_COLOR_SPACE_HDR10_ST2084
 };
 
 enum
@@ -243,8 +254,8 @@ enum
 
 enum
 {
-  TRANSFER_FUNCTION_BT709 = 0,
-  TRANSFER_FUNCTION_PQ = 1
+  TRANSFER_FUNCTION_SRGB = 0, // VK_COLOR_SPACE_SRGB_NONLINEAR_KHR
+  TRANSFER_FUNCTION_PQ = 1 // VK_COLOR_SPACE_HDR10_ST2084
 };
 
 struct BitstreamSequenceHeader
@@ -310,9 +321,15 @@ The last 5 fields are purely "video usability" information. It has no semantic i
 but are used to signal how to interpret the output Y, Cb and Cr values.
 The definitions of full/limited, bt709/bt2020, etc, are left to the respective specifications.
 bt2020 YCbCr transform is the NCL variant.
+This information may be superseded by signaling that is outside this specification.
 
-There is no distinction for 8-bit and 10-bit.
+There is no distinction for 8-bit and 10-bit (or other bit depths in typical fixed point codecs).
 The decoding process is defined in floating-point, and it is not specified how the final decoded values are quantized into a UNORM image.
+It is not specified here which center-point for chroma is used. 8-bit and 10-bit YCbCr use 128/255 and 512/1023 for example.
+Signaling this information is done elsewhere if desired.
+
+`TRANSFER_FUNCTION_SRGB` is deliberately a little vague. Generally it should be understood to be `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR`,
+which could mean a pure gamma 2.2 or the piecewise curve depending on how you interpret it.
 
 #### Decoding 8x8 blocks
 
@@ -535,3 +552,54 @@ WriteToImage(LumaShifted);
 WriteToImage(CbShifted);
 WriteToImage(CrShifted);
 ```
+
+## Raw disk format specification
+
+To allow basic interchange of pyrowave bitstreams, a simple on-disk format is defined.
+Like the bitstream itself, little endian is assumed for the struct layouts.
+This format is not required if this information is signaled by other means.
+
+### Base header
+
+- 4 bytes, storing the ascii string: "PWV1", marking v1 of PyroWave bitstream.
+
+```
+struct PWV1Header
+{
+    BitstreamSequenceHeader pyro;
+    uint32_t frame_rate_num;
+    uint32_t frame_rate_den;
+    uint8_t reference_bit_depth;
+    uint8_t header_version; // Must be 1.
+    uint8_t padding[2]; // Reserved, must be 0.
+};
+```
+
+- PWV1Header. All fields have semantic meaning, except for these fields, which are reserved, and must be 0.
+  - `pyro.sequence`
+  - `pyro.extended`
+  - `pyro.total_blocks`
+  - `pyro.code`
+
+#### `reference_bit_depth`
+
+When working with normal YCbCr video, samples have a specific bit-depth
+  and the bit-depth subtly affects how YCbCr conversion to and from RGB should be done
+  and exact scaling factors for limited range, etc.
+  Can be 0, 8, 10, 12, 14 or 16. If 0, "arbitrary precision" is assumed.
+
+#### `header_version`
+
+Must be 1.
+
+#### `frame_rate_{num,den}`
+
+Frame rates do not have any semantic impact and can be overridden by other signaling mechanisms.
+A frame rate of 0 can be used, and means the image sequence is an arbitrary sequence of images
+with no temporal relation to each other.
+
+### Sequence of frames
+
+For every encoded frame, a u32 size element is encoded, followed by that many bytes of data which
+contains a start of frame header followed by 32x32 blocks packed together to form a frame.
+
