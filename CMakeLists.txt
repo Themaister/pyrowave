@@ -184,7 +184,7 @@ if (${PROJECT_IS_TOP_LEVEL})
     set(PYROWAVE_INSTALL_INC_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/pkg-config/pyrowave-shared.pc.in
             ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc @ONLY)
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
     if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
         target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)
