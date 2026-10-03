@@ -140,8 +140,8 @@ if (${PROJECT_IS_TOP_LEVEL})
     target_link_libraries(pyrowave-device-validation PRIVATE pyrowave-shared granite-util granite-volk-headers)
     target_compile_options(pyrowave-device-validation PRIVATE ${PYROWAVE_CXX_FLAGS})
 
-    set(PYROWAVE_API_VERSION_MAJOR 0)
-    set(PYROWAVE_API_VERSION_MINOR 6)
+    set(PYROWAVE_API_VERSION_MAJOR 1)
+    set(PYROWAVE_API_VERSION_MINOR 0)
     set(PYROWAVE_API_VERSION_PATCH 0)
     set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 

@@ -16,10 +16,8 @@ extern "C" {
 #include <stdbool.h>
 #endif
 
-// API and ABI is not considered stable until MAJOR version hits 1!
-
-#define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 6
+#define PYROWAVE_API_VERSION_MAJOR 1
+#define PYROWAVE_API_VERSION_MINOR 0
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
