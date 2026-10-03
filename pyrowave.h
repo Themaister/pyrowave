@@ -5,7 +5,8 @@
 #define PYROWAVE_H_
 
 #if !defined(VULKAN_CORE_H_)
-#error "Must include vulkan headers before including pyrowave.h"
+#warning "Should include vulkan headers before including pyrowave.h"
+#include <vulkan/vulkan.h>
 #endif
 
 #include <stddef.h>
