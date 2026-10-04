@@ -8,6 +8,7 @@
 
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const bool DCShift = false;
+layout(constant_id = 1) const float RangeScale = 1.0;
 
 uint local_index;
 
@@ -207,6 +208,8 @@ void main()
             VEC2 v = load_shared(y, x);
             if (DCShift)
                 v += FLOAT(0.5);
+			if (RangeScale != 1.0)
+				v = clamp(v, FLOAT(0.0), FLOAT(1.0)) * FLOAT(RangeScale);
             imageStore(uOutput, ivec2(2 * y + 0, x) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), v.xxxx);
             imageStore(uOutput, ivec2(2 * y + 1, x) + BLOCK_SIZE * ivec2(gl_WorkGroupID.yx), v.yyyy);
         }

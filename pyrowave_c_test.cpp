@@ -516,6 +516,154 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	pyrowave_device_destroy(device);
 }
 
+static void test_extended_cpu_formats(bool subsampled)
+{
+	pyrowave_device device;
+	CHECKED(pyrowave_create_default_device(&device));
+
+	constexpr int Width = 16;
+	constexpr int Height = 16;
+
+	pyrowave_encoder_create_info encoder_info = {};
+	encoder_info.device = device;
+	encoder_info.width = Width;
+	encoder_info.height = Height;
+	encoder_info.chroma = subsampled ? PYROWAVE_CHROMA_SUBSAMPLING_420 : PYROWAVE_CHROMA_SUBSAMPLING_444;
+
+	pyrowave_decoder_create_info decoder_info = {};
+	decoder_info.device = device;
+	decoder_info.width = Width;
+	decoder_info.height = Height;
+	decoder_info.chroma = subsampled ? PYROWAVE_CHROMA_SUBSAMPLING_420 : PYROWAVE_CHROMA_SUBSAMPLING_444;
+
+	pyrowave_decoder decoder;
+	pyrowave_encoder encoder;
+	CHECKED(pyrowave_decoder_create(&decoder_info, &decoder));
+	CHECKED(pyrowave_encoder_create(&encoder_info, &encoder));
+
+	const struct
+	{
+		pyrowave_cpu_buffer_format format;
+		int y, cb, cr;
+	} tests[] = {
+		{ subsampled ? PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10 : PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10, 0x3ff, 0x200, 0 },
+		{ subsampled ? PYROWAVE_CPU_BUFFER_FORMAT_YUV420P16 : PYROWAVE_CPU_BUFFER_FORMAT_YUV444P16, 0xffff, 0x8000, 0 },
+	};
+
+	for (auto &test : tests)
+	{
+		// 10-bit encode path.
+		uint16_t luma[Width * Height];
+		uint16_t cb[Width * Height];
+		uint16_t cr[Width * Height];
+
+		for (int i = 0; i < Width * Height; i++)
+		{
+			luma[i] = test.y;
+			cb[i] = test.cb;
+			cr[i] = test.cr;
+		}
+
+		pyrowave_cpu_buffer encode_buffer = {}, decode_buffer = {};
+
+		encode_buffer.data[0] = luma;
+		encode_buffer.data[1] = cb;
+		encode_buffer.data[2] = cr;
+		encode_buffer.format = test.format;
+		encode_buffer.width = Width;
+		encode_buffer.height = Height;
+		for (int i = 0; i < 3; i++)
+		{
+			encode_buffer.row_stride_in_bytes[i] = Width * sizeof(uint16_t);
+			encode_buffer.plane_size_in_bytes[i] = Width * Height * sizeof(uint16_t);
+			if (i && subsampled)
+				encode_buffer.plane_size_in_bytes[i] /= 2;
+		}
+
+		decode_buffer = encode_buffer;
+
+		const pyrowave_rate_control rate_control = { 64 * 1024 };
+
+		std::vector<uint8_t> bitstream;
+		bitstream.reserve(rate_control.maximum_bitstream_size);
+		CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &encode_buffer, &rate_control));
+
+		size_t after_packets = 0;
+		pyrowave_packet packet;
+		bitstream.resize(rate_control.maximum_bitstream_size);
+		CHECKED(pyrowave_encoder_packetize(encoder, &packet, rate_control.maximum_bitstream_size,
+				&after_packets, bitstream.data(), bitstream.size()));
+
+		CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packet.offset, packet.size));
+		decode_buffer.format = subsampled ? PYROWAVE_CPU_BUFFER_FORMAT_YUV420P16 : PYROWAVE_CPU_BUFFER_FORMAT_YUV444P16;
+		CHECKED(pyrowave_decoder_decode_cpu_buffer_synchronous(decoder, &decode_buffer));
+
+		const auto abs_diff = [](int a, int b) { return std::abs(a - b); };
+
+		int ref_y, ref_cb, ref_cr;
+
+		if (test.format == PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10 ||
+		    test.format == PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10)
+		{
+			ref_y = (test.y * 0xffff + 0x1ff) / 0x3ff;
+			ref_cb = (test.cb * 0xffff + 0x1ff) / 0x3ff;
+			ref_cr = (test.cr * 0xffff + 0x1ff) / 0x3ff;
+		}
+		else
+		{
+			ref_y = test.y;
+			ref_cb = test.cb;
+			ref_cr = test.cr;
+		}
+
+		// The quantizers and FP math isn't accurate enough to resolve full 16-bit accuracy unless perhaps
+		// using full 32-bit precision everywhere.
+		for (int y = 0; y < Height; y++)
+		{
+			for (int x = 0; x < Width; x++)
+			{
+				ASSERT_THAT(abs_diff(luma[y * Width + x], ref_y) < 0x40);
+				if (!subsampled || (x < Width / 2 && y < Height / 2))
+				{
+					ASSERT_THAT(abs_diff(cb[y * Width + x], ref_cb) < 0x40);
+					ASSERT_THAT(abs_diff(cr[y * Width + x], ref_cr) < 0x40);
+				}
+			}
+		}
+
+		CHECKED(pyrowave_decoder_push_packet(decoder, bitstream.data() + packet.offset, packet.size));
+		decode_buffer.format = subsampled ? PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10 : PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10;
+		CHECKED(pyrowave_decoder_decode_cpu_buffer_synchronous(decoder, &decode_buffer));
+
+		if (test.format == PYROWAVE_CPU_BUFFER_FORMAT_YUV444P16 ||
+		    test.format == PYROWAVE_CPU_BUFFER_FORMAT_YUV420P16)
+		{
+			ref_y = (test.y * 0x3ff + 0x7fff) / 0xffff;
+			ref_cb = (test.cb * 0x3ff + 0x7fff) / 0xffff;
+			ref_cr = (test.cr * 0x3ff + 0x7fff) / 0xffff;
+		}
+		else
+		{
+			ref_y = test.y;
+			ref_cb = test.cb;
+			ref_cr = test.cr;
+		}
+
+		for (int y = 0; y < Height; y++)
+		{
+			for (int x = 0; x < Width; x++)
+			{
+				ASSERT_THAT(abs_diff(luma[y * Width + x], ref_y) <= 1);
+				if (!subsampled || (x < Width / 2 && y < Height / 2))
+				{
+					ASSERT_THAT(abs_diff(cb[y * Width + x], ref_cb) <= 1);
+					ASSERT_THAT(abs_diff(cr[y * Width + x], ref_cr) <= 1);
+				}
+			}
+		}
+	}
+}
+
 static void test_basic_system_stability(bool realtime_prio)
 {
 	pyrowave_device device;
@@ -709,6 +857,9 @@ int main()
 			(variant & 1) != 0, (variant & 2) != 0,
 			(variant & 4) != 0 ? PYROWAVE_CHROMA_SUBSAMPLING_444 : PYROWAVE_CHROMA_SUBSAMPLING_420);
 	}
+
+	test_extended_cpu_formats(false);
+	test_extended_cpu_formats(true);
 
 	test_error_correction_api();
 

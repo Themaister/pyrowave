@@ -427,14 +427,16 @@ typedef struct pyrowave_gpu_sync_operation
 	pyrowave_sync_point sync;
 } pyrowave_gpu_sync_operation;
 
-// TODO: Add support for importing external memory as GPU buffers.
-
 // The CPU path is mostly for bringup testing.
 typedef enum pyrowave_cpu_buffer_format
 {
 	PYROWAVE_CPU_BUFFER_FORMAT_NV12 = 0, // 2 planes. Y packed in 8bpp, then CbCr packed in 16bpp. Only supported for encoding.
 	PYROWAVE_CPU_BUFFER_FORMAT_YUV420P = 1, // 3 planes. Y, Cb, Cr packed into separate planes. Native format for pyrowave.
 	PYROWAVE_CPU_BUFFER_FORMAT_YUV444P = 2, // 3 planes. Y, Cb, Cr packed into separate planes. Native format for pyrowave.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10 = 3, // 3 planes. Y, Cb, Cr packed into separate planes. 10 LSBs hold 10-bit UNORM value. Upper MSBs must be 0. Native endian.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10 = 4, // 3 planes. Y, Cb, Cr packed into separate planes. 10 LSBs hold 10-bit UNORM value. Upper MSBs must be 0. Native endian.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV420P16 = 5, // 3 planes. Y, Cb, Cr packed into separate planes. Native endian.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV444P16 = 6, // 3 planes. Y, Cb, Cr packed into separate planes. Native endian.
 	PYROWAVE_CPU_BUFFER_FORMAT_INT_MAX = 0x7fffffff
 } pyrowave_cpu_buffer_format;
 
@@ -462,6 +464,12 @@ typedef struct pyrowave_rate_control
 // The entry points for encoder are not thread safe. Application must ensure synchronization.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encoder *encoder);
+
+// Special purpose when encoding formats like yuv420p10 or yuv444p10 as used in e.g. FFmpeg.
+// For CPU encode path, this is set automatically.
+// Defaults to 1.0. For e.g. 10-bit LSB encoding stored in UNORM16, use factor of 0xffff / 0x3ff.
+PYROWAVE_PUBLIC_API void
+pyrowave_encoder_set_ycbcr_scaling_factor(pyrowave_encoder encoder, float factor);
 
 // Synchronous encode API. For low-latency use cases, overlapping frames in encode is meaningless
 // due to latency and the encoder is so fast anyway. This function will not block, but subsequent functions will.
@@ -638,6 +646,13 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers);
+
+// Special purpose when decoding to special formats like yuv420p10 or yuv444p10 as used in e.g. FFmpeg.
+// For CPU decode path, this is set automatically when decoding.
+// Defaults to 1.0. For e.g. 10-bit LSB encoding stored in UNORM16, use factor of 0x3ff / 0xffff.
+// Not compatible with fragment decoding path for now.
+PYROWAVE_PUBLIC_API void
+pyrowave_decoder_set_ycbcr_scaling_factor(pyrowave_decoder decoder, float factor);
 
 // Implementation ensures GPU is idle before destroying objects.
 PYROWAVE_PUBLIC_API void pyrowave_decoder_destroy(pyrowave_decoder decoder);
