@@ -11,6 +11,7 @@
 #include "logging.hpp"
 #include "slangmosh_scaler.hpp"
 #include "scaler.hpp"
+#include "thread_id.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -1029,6 +1030,8 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 	if (encoder->pyro_device->cmd && (acquire || release))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
+	Util::register_thread_index(0);
+
 	Util::set_thread_logging_interface(&null_logger);
 
 	BufferCreateInfo bufinfo = {};
@@ -1345,6 +1348,8 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	if (encoder->chroma == ChromaSubsampling::Chroma444 && buffers->format != PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
+	Util::register_thread_index(0);
+
 	for (int plane = 0; plane < num_planes; plane++)
 	{
 		int plane_width = encoder->width;
@@ -1632,6 +1637,8 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	if (decoder->pyro_device->cmd && (acquire || release))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
+	Util::register_thread_index(0);
+
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
 	device->next_frame_context();
@@ -1713,6 +1720,8 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 {
 	if (decoder->pyro_device->cmd)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	Util::register_thread_index(0);
 
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
