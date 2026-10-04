@@ -346,6 +346,22 @@ void BitstreamParser::mark_frame_decoded()
 //////
 // Encoder side.
 
+size_t compute_coefficient_payload_buffer_size(const BlockLayout &layout)
+{
+	// Quantization produces every component/band before rate control drops planes.
+	// Each padded 8x8 block has eight 4x2 payloads. The codec supports at most 14
+	// magnitude planes plus a sign byte per payload (BlockStatsBlock::stats[15]
+	// also stores the all-discarded state). Two bytes per coefficient conservatively
+	// cover these payloads. A frame-pixel estimate misses full-resolution chroma
+	// and padding; the final compressed-byte budget cannot bound this scratch.
+	constexpr size_t counter_bytes = 2 * sizeof(uint32_t);
+	constexpr size_t bytes_per_block = 64 * 2;
+	if (layout.block_count_8x8 < 0 ||
+	    size_t(layout.block_count_8x8) > (UINT32_MAX - counter_bytes) / bytes_per_block)
+		return 0;
+	return counter_bytes + size_t(layout.block_count_8x8) * bytes_per_block;
+}
+
 int compute_block_count_per_subdivision(int num_blocks)
 {
 	int per_subdivision = align(num_blocks, BlockSpaceSubdivision) / BlockSpaceSubdivision;

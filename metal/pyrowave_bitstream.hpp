@@ -242,6 +242,10 @@ struct RDOperation
 
 int compute_block_count_per_subdivision(int num_blocks);
 
+// Full pre-rate-control coefficient storage, including its two allocation counters.
+// Returns zero if the size would exceed the 32-bit shader allocation counter.
+size_t compute_coefficient_payload_buffer_size(const BlockLayout &layout);
+
 struct Packet
 {
 	size_t offset;

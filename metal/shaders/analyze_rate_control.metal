@@ -174,7 +174,7 @@ void emit_rdo_operations(thread uint& gl_SubgroupInvocationID, threadgroup spvUn
     }
     else
     {
-        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
+        cost = float(shared_rate_cost[0]);
         distortion = 1000000015047466219876688855040.0;
     }
     float param = distortion;
@@ -282,4 +282,3 @@ kernel void pyrowave_analyze_rate_control(device Buckets& buckets [[buffer(0)]],
         emit_rdo_operations(gl_SubgroupInvocationID, shared_rate_cost, shared_distortion, buckets, gl_WorkGroupID, registers);
     }
 }
-
