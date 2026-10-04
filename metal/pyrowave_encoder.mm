@@ -13,6 +13,10 @@
 
 #include "pyrowave_common.hpp"
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+#include "pyrowave_bench.h"
+#endif
+
 #include "shaders/pyrowave_msl.h"
 
 #import <IOSurface/IOSurfaceRef.h>
@@ -412,6 +416,12 @@ bool create_encode_buffers(pyrowave_encoder encoder)
 {
 	auto *device = encoder->device;
 	const auto &layout = encoder->layout;
+	const size_t coefficient_payload_size = compute_coefficient_payload_buffer_size(layout);
+	if (!coefficient_payload_size)
+	{
+		device->log("Coefficient payload scratch exceeds the shader allocation counter range.");
+		return false;
+	}
 
 	struct
 	{
@@ -423,10 +433,10 @@ bool create_encode_buffers(pyrowave_encoder encoder)
 		  size_t(layout.block_count_8x8) * sizeof(BlockStatsBlock), "pyrowave-block-stats" },
 		{ &encoder->meta_buffer,
 		  size_t(layout.block_count_8x8) * sizeof(BlockMeta), "pyrowave-block-meta" },
-		// Worst case estimate, same as the Vulkan encoder's. The first two words are
-		// allocation counters and the coefficient payload starts at byte 8.
+		// All padded wavelet coefficients are generated before the final budget is
+		// applied, including full-resolution chroma under 444.
 		{ &encoder->payload_data,
-		  size_t(layout.aligned_width) * size_t(layout.aligned_height) * 2, "pyrowave-payload" },
+		  coefficient_payload_size, "pyrowave-payload" },
 		{ &encoder->quant_buffer,
 		  size_t(layout.block_count_32x32) * sizeof(uint32_t), "pyrowave-quant" },
 		{ &encoder->bucket_buffer, bucket_buffer_size(layout), "pyrowave-buckets" },
@@ -1310,5 +1320,41 @@ pyrowave_result pyrowave_encoder_compute_block_active_words(pyrowave_encoder enc
 extern "C" double pyrowave_bench_last_gpu_ms(pyrowave_encoder encoder)
 {
 	return encoder ? encoder->bench_last_gpu_ms : -1.0;
+}
+
+extern "C" pyrowave_result pyrowave_bench_get_encode_diagnostics(
+		pyrowave_encoder encoder, pyrowave_bench_encode_diagnostics *diagnostics)
+{
+	if (!encoder || !diagnostics)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto result = wait_for_result(encoder);
+	if (result != PYROWAVE_SUCCESS)
+		return result;
+
+	// payload_data is private storage. Read its two allocation counters in a
+	// separate command buffer, leaving the measured encode command untouched.
+	auto readback = [encoder->device->mtl newBufferWithLength:2 * sizeof(uint32_t)
+	                                                options:MTLResourceStorageModeShared];
+	auto command = [encoder->queue commandBuffer];
+	if (!readback || !command)
+		return PYROWAVE_ERROR_GENERIC;
+	auto blit = [command blitCommandEncoder];
+	if (!blit)
+		return PYROWAVE_ERROR_GENERIC;
+	[blit copyFromBuffer:encoder->payload_data sourceOffset:0
+	           toBuffer:readback destinationOffset:0 size:2 * sizeof(uint32_t)];
+	[blit endEncoding];
+	[command commit];
+	[command waitUntilCompleted];
+	if (command.status != MTLCommandBufferStatusCompleted)
+		return PYROWAVE_ERROR_GENERIC;
+
+	const auto *counters = static_cast<const uint32_t *>(readback.contents);
+	diagnostics->coefficient_payload_bytes = counters[0];
+	diagnostics->bitstream_payload_words = counters[1];
+	diagnostics->coefficient_payload_capacity_bytes = encoder->payload_data.length - 2 * sizeof(uint32_t);
+	diagnostics->bitstream_capacity_bytes = encoder->bitstream.length;
+	return PYROWAVE_SUCCESS;
 }
 #endif

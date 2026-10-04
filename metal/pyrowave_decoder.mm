@@ -8,6 +8,13 @@
 
 #include "pyrowave_common.hpp"
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+#include "pyrowave_bench.h"
+#include <chrono>
+#include <cmath>
+#include <limits>
+#endif
+
 #include <memory>
 #include <string.h>
 #include <vector>
@@ -47,6 +54,12 @@ struct UploadSlot
 	id<MTLBuffer> payload;
 	id<MTLCommandBuffer> consumer;
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	id<MTLCounterSampleBuffer> bench_counters;
+	MTLTimestamp bench_cpu_start = 0;
+	MTLTimestamp bench_gpu_start = 0;
+#endif
+
 	void reclaim()
 	{
 		if (!consumer)
@@ -59,6 +72,37 @@ struct UploadSlot
 	// No destructor: ARC releases both buffers, and Metal keeps anything a command
 	// buffer still references alive on its own.
 };
+
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+using BenchClock = std::chrono::steady_clock;
+
+double bench_elapsed_ms(BenchClock::time_point start, BenchClock::time_point end)
+{
+	return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+pyrowave_bench_decode_timings empty_bench_timings()
+{
+	const double unavailable = std::numeric_limits<double>::quiet_NaN();
+	return { unavailable, unavailable, unavailable, unavailable, unavailable };
+}
+
+id<MTLComputeCommandEncoder> create_profiled_encoder(id<MTLCommandBuffer> command, UploadSlot *slot,
+	                                                NSUInteger first_sample)
+{
+	if (@available(macOS 11.0, iOS 14.0, *))
+	{
+		auto *descriptor = [MTLComputePassDescriptor computePassDescriptor];
+		descriptor.dispatchType = MTLDispatchTypeConcurrent;
+		auto *attachment = descriptor.sampleBufferAttachments[0];
+		attachment.sampleBuffer = slot->bench_counters;
+		attachment.startOfEncoderSampleIndex = first_sample;
+		attachment.endOfEncoderSampleIndex = first_sample + 1;
+		return [command computeCommandEncoderWithDescriptor:descriptor];
+	}
+	return nil;
+}
+#endif
 }
 
 struct pyrowave_decoder_opaque
@@ -73,6 +117,19 @@ struct pyrowave_decoder_opaque
 	// without bound when a caller submitted faster than the GPU drained.
 	UploadSlot upload_slots[UploadSlotCount];
 	size_t next_upload_slot = 0;
+
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	bool bench_batched_dequant = false;
+	bool bench_reduced_idwt_barriers = false;
+	int bench_native_dequant = 0;
+	bool bench_native_idwt = false;
+	bool bench_fused_idwt = false;
+	bool bench_compact_fused_idwt = false;
+	id<MTLTexture> bench_rgb_output;
+	bool bench_profiling = false;
+	UploadSlot *bench_last_profile_slot = nullptr;
+	pyrowave_bench_decode_timings bench_timings = empty_bench_timings();
+#endif
 };
 
 namespace
@@ -116,7 +173,12 @@ void encode_dequant(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc, 
 {
 	auto &layout = decoder->layout;
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	[enc setComputePipelineState:decoder->bench_native_dequant ?
+	                           decoder->device->bench_native_dequant_pipeline[decoder->bench_native_dequant - 1] : decoder->device->dequant_pipeline];
+#else
 	[enc setComputePipelineState:decoder->device->dequant_pipeline];
+#endif
 	// The u8/u16/u32 aliases of the payload collapse into a single binding in MSL.
 	[enc setBuffer:slot->payload offset:0 atIndex:0];
 	[enc setBuffer:slot->offsets offset:0 atIndex:2];
@@ -149,11 +211,56 @@ void encode_dequant(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc, 
 	}
 }
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+void encode_dequant_batched(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc, UploadSlot *slot)
+{
+	const auto &layout = decoder->layout;
+	[enc setComputePipelineState:decoder->bench_native_dequant ?
+	                           decoder->device->bench_native_batched_dequant_pipeline[decoder->bench_native_dequant - 1] : decoder->device->bench_batched_dequant_pipeline];
+	[enc setBuffer:slot->payload offset:0 atIndex:0];
+	[enc setBuffer:slot->offsets offset:0 atIndex:2];
+
+	for (int level = 0; level < DecompositionLevels; level++)
+	{
+		for (int component = 0; component < NumComponents; component++)
+		{
+			if (level == 0 && component != 0 && layout.chroma == ChromaSubsampling::Chroma420)
+				continue;
+			DequantPush bands[4] = {};
+			const int first_band = level == DecompositionLevels - 1 ? 0 : 1;
+			const int band_count = 4 - first_band;
+			for (int i = 0; i < band_count; i++)
+			{
+				auto &push = bands[i];
+				const int band = first_band + i;
+				push.resolution[0] = layout.level_width(level);
+				push.resolution[1] = layout.level_height(level);
+				push.output_layer = band;
+				push.block_offset_32x32 = layout.block_meta[component][level][band].block_offset_32x32;
+				push.block_stride_32x32 = layout.block_meta[component][level][band].block_stride_32x32;
+			}
+			[enc setTexture:decoder->wavelet.component_layer_views[component][level] atIndex:0];
+			[enc setBytes:bands length:sizeof(bands) atIndex:1];
+			[enc dispatchThreadgroups:MTLSizeMake((layout.level_width(level) + 31) / 32,
+			                                     (layout.level_height(level) + 31) / 32, band_count)
+			      threadsPerThreadgroup:MTLSizeMake(DequantThreadgroupSize, 1, 1)];
+		}
+	}
+}
+#endif
+
 void encode_idwt_dispatch(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc,
                           const IdwtPush &push, id<MTLTexture> input, id<MTLTexture> output,
                           bool dc_shift)
 {
-	[enc setComputePipelineState:decoder->device->idwt_pipeline[dc_shift ? 1 : 0]];
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (decoder->bench_native_idwt)
+		[enc setComputePipelineState:decoder->device->bench_native_idwt_pipeline[dc_shift ? 1 : 0]];
+	else if (decoder->bench_reduced_idwt_barriers)
+		[enc setComputePipelineState:decoder->device->bench_reduced_barrier_idwt_pipeline[dc_shift ? 1 : 0]];
+	else
+#endif
+		[enc setComputePipelineState:decoder->device->idwt_pipeline[dc_shift ? 1 : 0]];
 	[enc setBytes:&push length:sizeof(push) atIndex:0];
 	[enc setTexture:input atIndex:0];
 	[enc setTexture:output atIndex:1];
@@ -168,6 +275,10 @@ void encode_idwt(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc,
 {
 	auto &layout = decoder->layout;
 	const bool chroma_420 = layout.chroma == ChromaSubsampling::Chroma420;
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	const bool fused = decoder->bench_fused_idwt && !decoder->bench_rgb_output &&
+	                   layout.level_width(0) >= 32 && layout.level_height(0) >= 32;
+#endif
 
 	for (int input_level = DecompositionLevels - 1; input_level >= 0; input_level--)
 	{
@@ -186,11 +297,45 @@ void encode_idwt(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc,
 
 		if (input_level == 0)
 		{
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+			if (decoder->bench_rgb_output)
+			{
+				[enc setComputePipelineState:decoder->device->bench_rgb_idwt_pipeline[chroma_420]];
+				[enc setBytes:&push length:sizeof(push) atIndex:0];
+				for (int c = 0; c < NumComponents; c++)
+					[enc setTexture:chroma_420 && c != 0 ? planes[c] : decoder->wavelet.component_layer_views[c][0] atIndex:c];
+				[enc setTexture:decoder->bench_rgb_output atIndex:3];
+				[enc setSamplerState:decoder->device->mirror_repeat_sampler atIndex:0];
+				[enc dispatchThreadgroups:MTLSizeMake((push.resolution[0] + 15) / 16, (push.resolution[1] + 15) / 16, 1)
+				      threadsPerThreadgroup:MTLSizeMake(IdwtThreadgroupSize, 1, 1)];
+				continue;
+			}
+#endif
 			// Final level writes the output planes directly. Under 420 the chroma
 			// planes were already finished one level earlier.
 			const int components = chroma_420 ? 1 : NumComponents;
 			for (int c = 0; c < components; c++)
 			{
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+				if (fused)
+				{
+					struct { IdwtPush fine; IdwtPush coarse; } constants = {};
+					constants.fine = push;
+					constants.coarse.resolution[0] = layout.level_height(1);
+					constants.coarse.resolution[1] = layout.level_width(1);
+					constants.coarse.inv_resolution[0] = 1.0f / float(constants.coarse.resolution[0]);
+					constants.coarse.inv_resolution[1] = 1.0f / float(constants.coarse.resolution[1]);
+					[enc setComputePipelineState:decoder->device->bench_fused_idwt_pipeline[decoder->bench_compact_fused_idwt]];
+					[enc setBytes:&constants length:sizeof(constants) atIndex:0];
+					[enc setTexture:decoder->wavelet.component_layer_views[c][1] atIndex:0];
+					[enc setTexture:decoder->wavelet.component_layer_views[c][0] atIndex:1];
+					[enc setTexture:planes[c] atIndex:2];
+					[enc setSamplerState:decoder->device->mirror_repeat_sampler atIndex:0];
+					[enc dispatchThreadgroups:MTLSizeMake((push.resolution[0] + 15) / 16, (push.resolution[1] + 15) / 16, 1)
+					      threadsPerThreadgroup:MTLSizeMake(IdwtThreadgroupSize, 1, 1)];
+					continue;
+				}
+#endif
 				encode_idwt_dispatch(decoder, enc, push,
 				                     decoder->wavelet.component_layer_views[c][input_level],
 				                     planes[c], true);
@@ -200,6 +345,9 @@ void encode_idwt(pyrowave_decoder decoder, id<MTLComputeCommandEncoder> enc,
 		{
 			for (int c = 0; c < NumComponents; c++)
 			{
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+				if (fused && input_level == 1 && (!chroma_420 || c == 0)) continue;
+#endif
 				const bool final_chroma = chroma_420 && c != 0 && input_level == 1;
 				id<MTLTexture> output = final_chroma ?
 				                       planes[c] :
@@ -352,6 +500,17 @@ pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	const auto &offsets = decoder->parser.dequant_offsets();
 	const auto &payload = decoder->parser.payload();
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	const bool profiling = decoder->bench_profiling;
+	BenchClock::time_point profile_start;
+	if (profiling)
+	{
+		decoder->bench_last_profile_slot = nullptr;
+		decoder->bench_timings = empty_bench_timings();
+		profile_start = BenchClock::now();
+	}
+#endif
+
 	const size_t offsets_size = offsets.size() * sizeof(uint32_t);
 	// The dequant shader can read slightly past the end of the payload, so pad.
 	const size_t payload_size = payload.size() * sizeof(uint32_t) + 16;
@@ -365,6 +524,17 @@ pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	if (!payload.empty())
 		memcpy(slot->payload.contents, payload.data(), payload.size() * sizeof(uint32_t));
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (profiling)
+	{
+		decoder->bench_timings.upload_cpu_ms = bench_elapsed_ms(profile_start, BenchClock::now());
+		// GPU counter clocks may differ from CPU clocks. Bracket sampling with
+		// paired references, then calibrate durations after command completion.
+		[device->mtl sampleTimestamps:&slot->bench_cpu_start gpuTimestamp:&slot->bench_gpu_start];
+		profile_start = BenchClock::now();
+	}
+#endif
+
 	auto *cmd = (__bridge id<MTLCommandBuffer>)(command_buffer);
 
 	// Every dequant dispatch writes a distinct (component, level, band) region of
@@ -372,19 +542,44 @@ pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	// serial encoder would barrier between all ~42, but the cost is underutilization
 	// rather than barrier latency: each dispatch is far too small to fill the GPU on
 	// its own, which is why this pays at low resolution and not at 1080p 4:4:4.
-	auto dequant_enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+	id<MTLComputeCommandEncoder> dequant_enc;
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (profiling)
+		dequant_enc = create_profiled_encoder(cmd, slot, 0);
+	else
+#endif
+		dequant_enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
 	if (!dequant_enc)
 		return PYROWAVE_ERROR_GENERIC;
 
 	dequant_enc.label = @("pyrowave dequant");
-	encode_dequant(decoder, dequant_enc, slot);
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (decoder->bench_batched_dequant)
+		encode_dequant_batched(decoder, dequant_enc, slot);
+	else
+#endif
+		encode_dequant(decoder, dequant_enc, slot);
 	[dequant_enc endEncoding];
+
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (profiling)
+	{
+		decoder->bench_timings.dequant_encode_cpu_ms = bench_elapsed_ms(profile_start, BenchClock::now());
+		profile_start = BenchClock::now();
+	}
+#endif
 
 	// The iDWT is a dependent chain across levels, but the three components within
 	// a level are independent, so this is also concurrent with explicit barriers
 	// at the level boundaries only. Ordering against the dequant work above comes
 	// from the encoder boundary, which Metal tracks automatically.
-	auto idwt_enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
+	id<MTLComputeCommandEncoder> idwt_enc;
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (profiling)
+		idwt_enc = create_profiled_encoder(cmd, slot, 2);
+	else
+#endif
+		idwt_enc = [cmd computeCommandEncoderWithDispatchType:MTLDispatchTypeConcurrent];
 	if (!idwt_enc)
 		return PYROWAVE_ERROR_GENERIC;
 
@@ -392,10 +587,203 @@ pyrowave_result pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	encode_idwt(decoder, idwt_enc, planes);
 	[idwt_enc endEncoding];
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (profiling)
+		decoder->bench_timings.idwt_encode_cpu_ms = bench_elapsed_ms(profile_start, BenchClock::now());
+#endif
+
 	// Retained until this slot comes round again, so its buffers cannot be rewritten
 	// while the GPU is still reading them.
 	slot->consumer = cmd;
 
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+	if (profiling)
+		decoder->bench_last_profile_slot = slot;
+#endif
+
 	decoder->parser.mark_frame_decoded();
 	return PYROWAVE_SUCCESS;
 }
+
+#ifdef PYROWAVE_METAL_BENCH_HOOKS
+extern "C" pyrowave_result pyrowave_bench_set_native_dequant(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder) return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled) { auto result = ensure_native_dequant_pipelines(decoder->device); if (result != PYROWAVE_SUCCESS) return result; }
+	decoder->bench_native_dequant = enabled;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_hybrid_dequant(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder) return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled) { auto result = ensure_native_dequant_pipelines(decoder->device, true); if (result != PYROWAVE_SUCCESS) return result; }
+	decoder->bench_native_dequant = enabled ? 2 : 0;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_native_idwt(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder) return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled) { auto result = ensure_native_idwt_pipelines(decoder->device); if (result != PYROWAVE_SUCCESS) return result; }
+	decoder->bench_native_idwt = enabled;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_fused_idwt(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder) return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled) { auto result = ensure_fused_idwt_pipeline(decoder->device); if (result != PYROWAVE_SUCCESS) return result; }
+	decoder->bench_fused_idwt = enabled;
+	decoder->bench_compact_fused_idwt = false;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_compact_fused_idwt(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder) return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled) { auto result = ensure_fused_idwt_pipeline(decoder->device, true); if (result != PYROWAVE_SUCCESS) return result; }
+	decoder->bench_fused_idwt = enabled;
+	decoder->bench_compact_fused_idwt = enabled;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_rgb_output(pyrowave_decoder decoder, pyrowave_mtl_texture texture)
+{
+	if (!decoder)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	auto output = (__bridge id<MTLTexture>)texture;
+	if (texture)
+	{
+		if (output.width != NSUInteger(decoder->layout.width) || output.height != NSUInteger(decoder->layout.height) ||
+		    output.pixelFormat != MTLPixelFormatRGBA8Unorm || !(output.usage & MTLTextureUsageShaderWrite))
+			return PYROWAVE_ERROR_INVALID_ARGUMENT;
+		auto result = ensure_rgb_idwt_pipeline(decoder->device, decoder->layout.chroma == ChromaSubsampling::Chroma420);
+		if (result != PYROWAVE_SUCCESS) return result;
+	}
+	decoder->bench_rgb_output = output;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_batched_dequant(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled)
+	{
+		const auto result = ensure_batched_dequant_pipeline(decoder->device);
+		if (result != PYROWAVE_SUCCESS)
+			return result;
+	}
+	decoder->bench_batched_dequant = enabled;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_reduced_idwt_barriers(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (enabled)
+	{
+		const auto result = ensure_reduced_barrier_idwt_pipelines(decoder->device);
+		if (result != PYROWAVE_SUCCESS)
+			return result;
+	}
+	decoder->bench_reduced_idwt_barriers = enabled;
+	return PYROWAVE_SUCCESS;
+}
+
+extern "C" pyrowave_result pyrowave_bench_set_decode_profiling(pyrowave_decoder decoder, bool enabled)
+{
+	if (!decoder)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	decoder->bench_profiling = false;
+	decoder->bench_last_profile_slot = nullptr;
+	decoder->bench_timings = empty_bench_timings();
+	if (!enabled)
+		return PYROWAVE_SUCCESS;
+
+	if (@available(macOS 11.0, iOS 14.0, *))
+	{
+		auto *device = decoder->device;
+		if (![device->mtl supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+		{
+			device->log("GPU stage timestamp sampling is unavailable on this device.");
+			return PYROWAVE_ERROR_UNSUPPORTED_DEVICE;
+		}
+		id<MTLCounterSet> timestamps = nil;
+		for (id<MTLCounterSet> candidate in device->mtl.counterSets)
+		{
+			if ([candidate.name isEqualToString:MTLCommonCounterSetTimestamp])
+			{
+				timestamps = candidate;
+				break;
+			}
+		}
+		if (!timestamps)
+		{
+			device->log("GPU timestamp counter set is unavailable on this device.");
+			return PYROWAVE_ERROR_UNSUPPORTED_DEVICE;
+		}
+		auto *descriptor = [MTLCounterSampleBufferDescriptor new];
+		descriptor.counterSet = timestamps;
+		descriptor.sampleCount = 4;
+		descriptor.storageMode = MTLStorageModeShared;
+		descriptor.label = @"pyrowave decode stage timestamps";
+		for (auto &slot : decoder->upload_slots)
+		{
+			if (slot.bench_counters)
+				continue;
+			NSError *error = nil;
+			slot.bench_counters = [device->mtl newCounterSampleBufferWithDescriptor:descriptor error:&error];
+			if (!slot.bench_counters)
+			{
+				device->log("Failed to create stage timestamp buffer: %s",
+				            error.localizedDescription.UTF8String ?: "unknown error");
+				return PYROWAVE_ERROR_GENERIC;
+			}
+		}
+		decoder->bench_profiling = true;
+		return PYROWAVE_SUCCESS;
+	}
+	decoder->device->log("GPU stage profiling requires macOS 11 or iOS 14.");
+	return PYROWAVE_ERROR_UNSUPPORTED_DEVICE;
+}
+
+extern "C" pyrowave_result pyrowave_bench_get_decode_timings(pyrowave_decoder decoder,
+	                                                        pyrowave_bench_decode_timings *timings)
+{
+	if (!decoder || !timings)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	*timings = decoder->bench_timings;
+	auto *slot = decoder->bench_last_profile_slot;
+	if (!decoder->bench_profiling || !slot || slot->consumer.status != MTLCommandBufferStatusCompleted)
+		return PYROWAVE_ERROR_GENERIC;
+
+	if (@available(macOS 11.0, iOS 14.0, *))
+	{
+		MTLTimestamp cpu_end = 0, gpu_end = 0;
+		[decoder->device->mtl sampleTimestamps:&cpu_end gpuTimestamp:&gpu_end];
+		NSData *resolved = [slot->bench_counters resolveCounterRange:NSMakeRange(0, 4)];
+		if (resolved.length < 4 * sizeof(MTLCounterResultTimestamp) ||
+		    cpu_end <= slot->bench_cpu_start || gpu_end <= slot->bench_gpu_start)
+			return PYROWAVE_SUCCESS; // GPU fields remain NaN rather than reporting a false zero.
+		const auto *samples = static_cast<const MTLCounterResultTimestamp *>(resolved.bytes);
+		// sampleTimestamps CPU values are nanoseconds, per Apple's counter conversion API.
+		const double milliseconds_per_gpu_tick = double(cpu_end - slot->bench_cpu_start) /
+		                                         double(gpu_end - slot->bench_gpu_start) / 1e6;
+		auto duration = [&](NSUInteger first) {
+			const uint64_t start = samples[first].timestamp, end = samples[first + 1].timestamp;
+			if (start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start ||
+			    start < slot->bench_gpu_start || end > gpu_end)
+				return std::numeric_limits<double>::quiet_NaN();
+			const double elapsed = double(end - start) * milliseconds_per_gpu_tick;
+			return std::isfinite(elapsed) && elapsed > 0.0 ? elapsed : std::numeric_limits<double>::quiet_NaN();
+		};
+		timings->dequant_gpu_ms = duration(0);
+		timings->idwt_gpu_ms = duration(2);
+		return PYROWAVE_SUCCESS;
+	}
+	return PYROWAVE_ERROR_UNSUPPORTED_DEVICE;
+}
+#endif

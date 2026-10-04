@@ -49,6 +49,10 @@ See [docs/bitstream.md]()
 
 ## Building
 
+For the native Apple Silicon Metal backend and macOS performance CLI, see
+[metal/README.md](metal/README.md#macos-performance-cli). From this repository
+root, `./script/build_and_run.sh` builds and runs the Release benchmark.
+
 PyroWave is intended to be built alongside PyroFling with Granite in the normal case.
 
 ### Standalone C API
@@ -125,4 +129,3 @@ To decode back to y4m:
 ```shell
 pyrowave-decode out.wave out.y4m
 ```
-

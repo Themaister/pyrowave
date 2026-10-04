@@ -3382,7 +3382,7 @@ void emit_rdo_operations(thread uint& gl_SubgroupInvocationID, threadgroup spvUn
     }
     else
     {
-        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
+        cost = float(shared_rate_cost[0]);
         distortion = 1000000015047466219876688855040.0;
     }
     float param = distortion;

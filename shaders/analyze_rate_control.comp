@@ -110,8 +110,10 @@ void emit_rdo_operations()
     }
     else
     {
-        // Dummy values.
-        cost = float(shared_rate_cost[gl_SubgroupInvocationID]);
+        // Only lanes 0..15 have quantization costs. The other SIMD lanes
+        // participate in the scan but never emit operations; use the base
+        // cost to give them a defined bucket zero without an out-of-bounds read.
+        cost = float(shared_rate_cost[0]);
         distortion = 1e30;
     }
 
