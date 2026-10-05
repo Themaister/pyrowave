@@ -879,7 +879,9 @@ struct pyrowave_encoder_opaque
 	Encoder encoder;
 	Fence queued_fence;
 	BufferHandle queued_meta;
+	BufferHandle queued_meta_gpu;
 	BufferHandle queued_bitstream;
+	BufferHandle queued_bitstream_gpu;
 	ChromaSubsampling chroma = {};
 	int width = 0;
 	int height = 0;
@@ -888,6 +890,9 @@ struct pyrowave_encoder_opaque
 	// For scaling path.
 	ImageHandle scaler_planes[3];
 	VideoScaler scaler;
+
+	ImageHandle upload_images[3];
+	Semaphore upload_semaphore;
 };
 
 pyrowave_result
@@ -1042,15 +1047,17 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 
 	bufinfo.size = encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
-	encoder->queued_meta = device->create_buffer(bufinfo);
+	if (!encoder->queued_meta || encoder->queued_meta->get_create_info().size < bufinfo.size)
+		encoder->queued_meta = device->create_buffer(bufinfo);
 
 	if (!encoder->queued_meta)
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bufinfo.domain = BufferDomain::Device;
-	auto queued_meta_gpu = device->create_buffer(bufinfo);
+	if (!encoder->queued_meta_gpu || encoder->queued_meta_gpu->get_create_info().size < bufinfo.size)
+		encoder->queued_meta_gpu = device->create_buffer(bufinfo);
 
-	if (!queued_meta_gpu)
+	if (!encoder->queued_meta_gpu)
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	auto target_bitstream_size = rate_control->maximum_bitstream_size & ~VkDeviceSize(3u);
@@ -1061,23 +1068,25 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 
 	bufinfo.size = target_bitstream_size + encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
-	encoder->queued_bitstream = device->create_buffer(bufinfo);
+	if (!encoder->queued_bitstream || encoder->queued_bitstream->get_create_info().size < bufinfo.size)
+		encoder->queued_bitstream = device->create_buffer(bufinfo);
 
 	if (!encoder->queued_bitstream)
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bufinfo.domain = BufferDomain::Device;
-	auto queued_bitstream_gpu = device->create_buffer(bufinfo);
+	if (!encoder->queued_bitstream_gpu || encoder->queued_bitstream_gpu->get_create_info().size < bufinfo.size)
+		encoder->queued_bitstream_gpu = device->create_buffer(bufinfo);
 
-	if (!queued_bitstream_gpu)
+	if (!encoder->queued_bitstream_gpu)
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	Encoder::BitstreamBuffers bitstream_buffers = {};
 
-	bitstream_buffers.meta.buffer = queued_meta_gpu.get();
-	bitstream_buffers.meta.size = queued_meta_gpu->get_create_info().size;
-	bitstream_buffers.bitstream.buffer = queued_bitstream_gpu.get();
-	bitstream_buffers.bitstream.size = queued_bitstream_gpu->get_create_info().size;
+	bitstream_buffers.meta.buffer = encoder->queued_meta_gpu.get();
+	bitstream_buffers.meta.size = encoder->queued_meta_gpu->get_create_info().size;
+	bitstream_buffers.bitstream.buffer = encoder->queued_bitstream_gpu.get();
+	bitstream_buffers.bitstream.size = encoder->queued_bitstream_gpu->get_create_info().size;
 	bitstream_buffers.target_size = target_bitstream_size;
 
 	auto cmd =
@@ -1120,8 +1129,8 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 	// Performance issue since these memory types are mapped coherent on the GPU.
 	// A staging copy is just better. Could avoid it on iGPU, but iGPU isn't really supposed to be
 	// used as the encoder when streaming.
-	cmd->copy_buffer(*encoder->queued_meta, *queued_meta_gpu);
-	cmd->copy_buffer(*encoder->queued_bitstream, *queued_bitstream_gpu);
+	cmd->copy_buffer(*encoder->queued_meta, *encoder->queued_meta_gpu);
+	cmd->copy_buffer(*encoder->queued_bitstream, *encoder->queued_bitstream_gpu);
 
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
@@ -1136,8 +1145,15 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 		// Need to signal the GPU queues before we can move the context along.
 		device->submit_external(encoder->pyro_device->queue_type);
 	}
+	else if (encoder->upload_images[0])
+	{
+		encoder->upload_semaphore.reset();
+		device->submit(cmd, &encoder->queued_fence, 1, &encoder->upload_semaphore);
+	}
 	else
+	{
 		device->submit(cmd, &encoder->queued_fence);
+	}
 
 	pyrowave_device_signal_semaphore(device, encoder->pyro_device->queue_type, release);
 
@@ -1360,10 +1376,12 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	Util::set_thread_logging_interface(&null_logger);
 	int num_planes = buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_NV12 ? 2 : 3;
 	auto *device = encoder->device;
-	ImageHandle images[3];
 
 	// Validate some assumptions.
 	if (buffers->width != encoder->width || buffers->height != encoder->height)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (encoder->pyro_device->cmd)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	if (encoder->chroma == ChromaSubsampling::Chroma420 && !pyrowave_cpu_buffer_format_subsampled(buffers->format))
@@ -1402,16 +1420,16 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	}
 
+	auto &images = encoder->upload_images;
+
 	for (int plane = 0; plane < num_planes; plane++)
 	{
+		if (images[plane])
+			continue;
+
 		unsigned plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
 		if (pyrowave_cpu_buffer_format_16bit(buffers->format))
 			plane_bpp *= 2;
-
-		const ImageInitialData initial = {
-			buffers->data[plane],
-			uint32_t(buffers->row_stride_in_bytes[plane] / plane_bpp)
-		};
 
 		auto info = ImageCreateInfo::immutable_2d_image(
 			buffers->width, buffers->height,
@@ -1419,11 +1437,12 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 				? VK_FORMAT_R8G8_UNORM
 				: (plane_bpp == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM));
 
-		info.misc = IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_TRANSFER_BIT;
-		if (encoder->pyro_device->queue_type == CommandBuffer::Type::Generic)
-			info.misc |= IMAGE_MISC_CONCURRENT_QUEUE_GRAPHICS_BIT;
-		else
-			info.misc |= IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_COMPUTE_BIT;
+		info.misc = IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_TRANSFER_BIT |
+		            IMAGE_MISC_CONCURRENT_QUEUE_GRAPHICS_BIT |
+		            IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_COMPUTE_BIT;
+
+		info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 
 		if (plane != 0 && encoder->chroma == ChromaSubsampling::Chroma420)
 		{
@@ -1431,10 +1450,31 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			info.height /= 2;
 		}
 
-		images[plane] = device->create_image(info, &initial);
+		images[plane] = device->create_image(info);
 		if (!images[plane])
 			return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 	}
+
+	if (encoder->upload_semaphore)
+	{
+		device->add_wait_semaphore(CommandBuffer::Type::AsyncTransfer,
+			std::move(encoder->upload_semaphore),
+			VK_PIPELINE_STAGE_2_COPY_BIT, true);
+		encoder->upload_semaphore = {};
+	}
+
+	auto cmd = device->request_command_buffer(CommandBuffer::Type::AsyncTransfer);
+	cmd->begin_barrier_batch();
+	for (auto &img : images)
+	{
+		if (!img)
+			continue;
+
+		cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		                   VK_PIPELINE_STAGE_2_COPY_BIT, 0,
+		                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+	}
+	cmd->end_barrier_batch();
 
 	pyrowave_gpu_buffers gpu_buffers = {};
 
@@ -1452,7 +1492,35 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			           ? images[plane]->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
 			           : images[1]->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 		p.image = images[plane] ? images[plane]->get_image() : images[1]->get_image();
+
+		unsigned plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		if (pyrowave_cpu_buffer_format_16bit(buffers->format))
+			plane_bpp *= 2;
+
+		if (plane < num_planes)
+		{
+			void *ptr = cmd->update_image(*images[plane], {}, { p.width, p.height, 1 },
+			                              buffers->row_stride_in_bytes[plane] / plane_bpp, 0,
+			                              { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
+			memcpy(ptr, buffers->data[plane], buffers->row_stride_in_bytes[plane] * p.height);
+		}
 	}
+
+	cmd->begin_barrier_batch();
+	for (auto &img : encoder->upload_images)
+	{
+		if (!img)
+			continue;
+
+		cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+		                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		                   0, 0);
+	}
+	cmd->end_barrier_batch();
+
+	Semaphore sem;
+	device->submit(cmd, nullptr, 1, &sem);
+	device->add_wait_semaphore(encoder->pyro_device->queue_type, std::move(sem), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, true);
 
 	auto ret = pyrowave_encoder_encode_gpu_synchronous(encoder, nullptr, nullptr, &gpu_buffers, rate_control);
 	return ret;
