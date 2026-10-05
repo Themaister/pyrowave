@@ -193,27 +193,27 @@ static void test_encode_cpu_buffer_validation(bool nv12)
 
 	cpu_buffer.width = 16;
 	cpu_buffer.height = 16;
-	CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control));
+	CHECKED(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control));
 
 	// Mismatching width/height against encoder.
 	cpu_buffer.width = 15;
 	cpu_buffer.height = 16;
-	ASSERT_THAT(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
+	ASSERT_THAT(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 
 	cpu_buffer.width = 16;
 	cpu_buffer.height = 15;
-	ASSERT_THAT(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
+	ASSERT_THAT(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 
 	// Too small row strides.
 	cpu_buffer.width = 16;
 	cpu_buffer.height = 16;
 	cpu_buffer.row_stride_in_bytes[1] = nv12 ? 15 : 7;
-	ASSERT_THAT(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
+	ASSERT_THAT(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 
 	// Too small plane size.
 	cpu_buffer.row_stride_in_bytes[1] = nv12 ? 16 : 8;
 	cpu_buffer.plane_size_in_bytes[1] = (nv12 ? 2 : 1) * 8 * 8 - 1;
-	ASSERT_THAT(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
+	ASSERT_THAT(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control) == PYROWAVE_ERROR_INVALID_ARGUMENT);
 
 	pyrowave_encoder_destroy(encoder);
 	pyrowave_device_destroy(info.device);
@@ -273,7 +273,7 @@ static void test_error_correction_api()
 	cpu_buffer.width = Width;
 	cpu_buffer.height = Height;
 	const pyrowave_rate_control rate_control = { 256 * 1024 };
-	CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control));
+	CHECKED(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control));
 
 	size_t num_packets;
 	CHECKED(pyrowave_encoder_compute_num_packets_with_padding(encoder, 4 * 1024, 2000, &num_packets));
@@ -425,7 +425,7 @@ static void test_basic_encoder_roundtrip(bool fragment_decode, bool nv12_encode,
 	cpu_buffer.width = Width;
 	cpu_buffer.height = Height;
 	const pyrowave_rate_control rate_control = { 64 * 1024 }; // Just give it something massive.
-	CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &cpu_buffer, &rate_control));
+	CHECKED(pyrowave_encoder_encode_cpu(encoder, &cpu_buffer, &rate_control));
 
 	size_t num_packets;
 	CHECKED(pyrowave_encoder_compute_num_packets(encoder, 64 * 1024, &num_packets));
@@ -586,7 +586,7 @@ static void test_extended_cpu_formats(bool subsampled)
 
 		std::vector<uint8_t> bitstream;
 		bitstream.reserve(rate_control.maximum_bitstream_size);
-		CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &encode_buffer, &rate_control));
+		CHECKED(pyrowave_encoder_encode_cpu(encoder, &encode_buffer, &rate_control));
 
 		size_t after_packets = 0;
 		pyrowave_packet packet;
@@ -761,8 +761,11 @@ static void test_basic_system_stability(bool realtime_prio)
 		// Get some test coverage for async compute path.
 		CHECKED(pyrowave_device_set_queue_type(device, iter % 2 ? VK_QUEUE_COMPUTE_BIT : VK_QUEUE_GRAPHICS_BIT));
 
+		// Very basic testing.
+		CHECKED(pyrowave_encoder_set_frame_context(encoder, iter % 2));
+
 		bitstream.reserve(rate_control.maximum_bitstream_size);
-		CHECKED(pyrowave_encoder_encode_cpu_synchronous(encoder, &encode_buffer, &rate_control));
+		CHECKED(pyrowave_encoder_encode_cpu(encoder, &encode_buffer, &rate_control));
 
 		size_t num_packets, after_packets;
 		CHECKED(pyrowave_encoder_compute_num_packets(encoder, 8 * 1024, &num_packets));

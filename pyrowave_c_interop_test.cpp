@@ -351,10 +351,10 @@ static void send_image_to_encoder(pyrowave_image pyro_image,
 		scaled_info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 		scaled_info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 		scaled_info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
-		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, &acquire, &release, &scaled_info, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, &acquire, &release, &scaled_info, &rate_control));
 	}
 	else
-		CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu(encoder, &acquire, &release, &buffers, &rate_control));
 }
 
 static void send_granite_image_to_encoder(Device &device, Image &granite_image, pyrowave_image pyro_image,
@@ -623,7 +623,7 @@ static void test_direct_interop()
 	// Encode to provided cmd.
 	// Redirect commands here.
 	pyrowave_device_set_command_buffer(pyro_device, cmd->get_command_buffer());
-	CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, nullptr, nullptr, &gpu_buffers, &rate_control));
+	CHECKED(pyrowave_encoder_encode_gpu(encoder, nullptr, nullptr, &gpu_buffers, &rate_control));
 	pyrowave_device_set_command_buffer(pyro_device, VK_NULL_HANDLE);
 
 	// Wait on CPU before we call packetization.
@@ -837,7 +837,7 @@ static void test_direct_interop_scaling()
 	scaling.crop_rect = &crop_rect;
 
 	pyrowave_device_set_command_buffer(pyro_device, cmd->get_command_buffer());
-	CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr, &scaling, &rate_control));
+	CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, nullptr, nullptr, &scaling, &rate_control));
 	pyrowave_device_set_command_buffer(pyro_device, VK_NULL_HANDLE);
 
 	// Wait on CPU before we call packetization.
@@ -2426,7 +2426,7 @@ static void test_child_interop()
 
 		for (int i = 0; i < 3; i++)
 			CHECKED(pyrowave_image_get_image_view(img[i], VkImageAspectFlagBits(VK_IMAGE_ASPECT_PLANE_0_BIT << i), VK_IMAGE_USAGE_SAMPLED_BIT, &buffers.planes[i]));
-		CHECKED(pyrowave_encoder_encode_gpu_synchronous(encoder, &acquire, &release, &buffers, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu(encoder, &acquire, &release, &buffers, &rate_control));
 
 		pyrowave_packet packet;
 		size_t out_packets = 1;

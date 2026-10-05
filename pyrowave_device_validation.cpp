@@ -112,7 +112,7 @@ static bool verify_roundtrip(pyrowave_device device)
 	cpu_buffer.width = Width;
 	cpu_buffer.height = Height;
 	const pyrowave_rate_control rate_control = { 64 * 1024 }; // Just give it something massive.
-	if (pyrowave_encoder_encode_cpu_synchronous(encoder.get(), &cpu_buffer, &rate_control) != PYROWAVE_SUCCESS)
+	if (pyrowave_encoder_encode_cpu(encoder.get(), &cpu_buffer, &rate_control) != PYROWAVE_SUCCESS)
 		return false;
 
 	size_t num_packets;

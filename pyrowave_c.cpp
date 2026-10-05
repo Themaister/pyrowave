@@ -877,11 +877,7 @@ struct pyrowave_encoder_opaque
 	Device *device = nullptr;
 	pyrowave_device pyro_device = nullptr;
 	Encoder encoder;
-	Fence queued_fence;
-	BufferHandle queued_meta;
-	BufferHandle queued_meta_gpu;
-	BufferHandle queued_bitstream;
-	BufferHandle queued_bitstream_gpu;
+
 	ChromaSubsampling chroma = {};
 	int width = 0;
 	int height = 0;
@@ -891,8 +887,18 @@ struct pyrowave_encoder_opaque
 	ImageHandle scaler_planes[3];
 	VideoScaler scaler;
 
-	ImageHandle upload_images[3];
-	Semaphore upload_semaphore;
+	int context = 0;
+
+	struct
+	{
+		Fence queued_fence;
+		BufferHandle queued_meta;
+		BufferHandle queued_meta_gpu;
+		BufferHandle queued_bitstream;
+		BufferHandle queued_bitstream_gpu;
+		ImageHandle upload_images[3];
+		Semaphore upload_semaphore;
+	} contexts[PYROWAVE_MAX_FRAME_CONTEXTS];
 };
 
 pyrowave_result
@@ -1025,16 +1031,18 @@ static void pyrowave_device_signal_semaphore(Device *device, CommandBuffer::Type
 }
 
 static pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
-                                              const pyrowave_gpu_sync_operation *acquire,
-                                              const pyrowave_gpu_sync_operation *release,
-                                              const ViewBuffers &views,
-                                              const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu_inner(pyrowave_encoder encoder,
+                                  const pyrowave_gpu_sync_operation *acquire,
+                                  const pyrowave_gpu_sync_operation *release,
+                                  const ViewBuffers &views,
+                                  const pyrowave_rate_control *rate_control)
 {
 	auto *device = encoder->device;
 
 	if (encoder->pyro_device->cmd && (acquire || release))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto &context = encoder->contexts[encoder->context];
 
 	Util::register_thread_index(0);
 
@@ -1047,17 +1055,17 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 
 	bufinfo.size = encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
-	if (!encoder->queued_meta || encoder->queued_meta->get_create_info().size < bufinfo.size)
-		encoder->queued_meta = device->create_buffer(bufinfo);
+	if (!context.queued_meta || context.queued_meta->get_create_info().size < bufinfo.size)
+		context.queued_meta = device->create_buffer(bufinfo);
 
-	if (!encoder->queued_meta)
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bufinfo.domain = BufferDomain::Device;
-	if (!encoder->queued_meta_gpu || encoder->queued_meta_gpu->get_create_info().size < bufinfo.size)
-		encoder->queued_meta_gpu = device->create_buffer(bufinfo);
+	if (!context.queued_meta_gpu || context.queued_meta_gpu->get_create_info().size < bufinfo.size)
+		context.queued_meta_gpu = device->create_buffer(bufinfo);
 
-	if (!encoder->queued_meta_gpu)
+	if (!context.queued_meta_gpu)
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	auto target_bitstream_size = rate_control->maximum_bitstream_size & ~VkDeviceSize(3u);
@@ -1068,25 +1076,25 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 
 	bufinfo.size = target_bitstream_size + encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
-	if (!encoder->queued_bitstream || encoder->queued_bitstream->get_create_info().size < bufinfo.size)
-		encoder->queued_bitstream = device->create_buffer(bufinfo);
+	if (!context.queued_bitstream || context.queued_bitstream->get_create_info().size < bufinfo.size)
+		context.queued_bitstream = device->create_buffer(bufinfo);
 
-	if (!encoder->queued_bitstream)
+	if (!context.queued_bitstream)
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bufinfo.domain = BufferDomain::Device;
-	if (!encoder->queued_bitstream_gpu || encoder->queued_bitstream_gpu->get_create_info().size < bufinfo.size)
-		encoder->queued_bitstream_gpu = device->create_buffer(bufinfo);
+	if (!context.queued_bitstream_gpu || context.queued_bitstream_gpu->get_create_info().size < bufinfo.size)
+		context.queued_bitstream_gpu = device->create_buffer(bufinfo);
 
-	if (!encoder->queued_bitstream_gpu)
+	if (!context.queued_bitstream_gpu)
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	Encoder::BitstreamBuffers bitstream_buffers = {};
 
-	bitstream_buffers.meta.buffer = encoder->queued_meta_gpu.get();
-	bitstream_buffers.meta.size = encoder->queued_meta_gpu->get_create_info().size;
-	bitstream_buffers.bitstream.buffer = encoder->queued_bitstream_gpu.get();
-	bitstream_buffers.bitstream.size = encoder->queued_bitstream_gpu->get_create_info().size;
+	bitstream_buffers.meta.buffer = context.queued_meta_gpu.get();
+	bitstream_buffers.meta.size = context.queued_meta_gpu->get_create_info().size;
+	bitstream_buffers.bitstream.buffer = context.queued_bitstream_gpu.get();
+	bitstream_buffers.bitstream.size = context.queued_bitstream_gpu->get_create_info().size;
 	bitstream_buffers.target_size = target_bitstream_size;
 
 	auto cmd =
@@ -1129,13 +1137,13 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 	// Performance issue since these memory types are mapped coherent on the GPU.
 	// A staging copy is just better. Could avoid it on iGPU, but iGPU isn't really supposed to be
 	// used as the encoder when streaming.
-	cmd->copy_buffer(*encoder->queued_meta, *encoder->queued_meta_gpu);
-	cmd->copy_buffer(*encoder->queued_bitstream, *encoder->queued_bitstream_gpu);
+	cmd->copy_buffer(*context.queued_meta, *context.queued_meta_gpu);
+	cmd->copy_buffer(*context.queued_bitstream, *context.queued_bitstream_gpu);
 
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
 
-	encoder->queued_fence.reset();
+	context.queued_fence.reset();
 
 	if (encoder->pyro_device->cmd)
 	{
@@ -1145,14 +1153,14 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 		// Need to signal the GPU queues before we can move the context along.
 		device->submit_external(encoder->pyro_device->queue_type);
 	}
-	else if (encoder->upload_images[0])
+	else if (context.upload_images[0])
 	{
-		encoder->upload_semaphore.reset();
-		device->submit(cmd, &encoder->queued_fence, 1, &encoder->upload_semaphore);
+		context.upload_semaphore.reset();
+		device->submit(cmd, &context.queued_fence, 1, &context.upload_semaphore);
 	}
 	else
 	{
-		device->submit(cmd, &encoder->queued_fence);
+		device->submit(cmd, &context.queued_fence);
 	}
 
 	pyrowave_device_signal_semaphore(device, encoder->pyro_device->queue_type, release);
@@ -1161,11 +1169,11 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 }
 
 pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_gpu_sync_operation *acquire,
-                                        const pyrowave_gpu_sync_operation *release,
-                                        const pyrowave_gpu_buffers *buffers,
-                                        const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu(pyrowave_encoder encoder,
+                            const pyrowave_gpu_sync_operation *acquire,
+                            const pyrowave_gpu_sync_operation *release,
+                            const pyrowave_gpu_buffers *buffers,
+                            const pyrowave_rate_control *rate_control)
 {
 	auto *device = encoder->device;
 	WrappedViewBuffers views = {};
@@ -1174,15 +1182,15 @@ pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
 	views.range_scale = encoder->ycbcr_scaling_factor;
 	device->next_frame_context();
 	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, acquire, release, views, rate_control);
+	return pyrowave_encoder_encode_gpu_inner(encoder, acquire, release, views, rate_control);
 }
 
 pyrowave_result
-pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
-											   const pyrowave_gpu_sync_operation *acquire,
-											   const pyrowave_gpu_sync_operation *release,
-											   const pyrowave_scaled_encode_info *scaling_info,
-											   const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
+                                   const pyrowave_gpu_sync_operation *acquire,
+                                   const pyrowave_gpu_sync_operation *release,
+                                   const pyrowave_scaled_encode_info *scaling_info,
+                                   const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
 
@@ -1346,7 +1354,7 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	for (int i = 0; i < 3; i++)
 		buffers.planes[i] = &encoder->scaler_planes[i]->get_view();
 	buffers.range_scale = encoder->ycbcr_scaling_factor;
-	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, nullptr, release, buffers, rate_control);
+	return pyrowave_encoder_encode_gpu_inner(encoder, nullptr, release, buffers, rate_control);
 }
 
 static bool pyrowave_cpu_buffer_format_subsampled(pyrowave_cpu_buffer_format format)
@@ -1369,13 +1377,26 @@ static bool pyrowave_cpu_buffer_format_16bit(pyrowave_cpu_buffer_format format)
 	return format > PYROWAVE_CPU_BUFFER_FORMAT_YUV444P;
 }
 
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_set_frame_context(pyrowave_encoder encoder, int context)
+{
+	if (context >= PYROWAVE_MAX_FRAME_CONTEXTS)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	encoder->context = context;
+
+	return PYROWAVE_SUCCESS;
+}
+
 pyrowave_result
-pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
-										const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_cpu(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
+                            const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
 	int num_planes = buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_NV12 ? 2 : 3;
 	auto *device = encoder->device;
+
+	auto &context = encoder->contexts[encoder->context];
 
 	// Validate some assumptions.
 	if (buffers->width != encoder->width || buffers->height != encoder->height)
@@ -1420,7 +1441,7 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	}
 
-	auto &images = encoder->upload_images;
+	auto &images = context.upload_images;
 
 	for (int plane = 0; plane < num_planes; plane++)
 	{
@@ -1455,12 +1476,12 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 	}
 
-	if (encoder->upload_semaphore)
+	if (context.upload_semaphore)
 	{
 		device->add_wait_semaphore(CommandBuffer::Type::AsyncTransfer,
-			std::move(encoder->upload_semaphore),
+			std::move(context.upload_semaphore),
 			VK_PIPELINE_STAGE_2_COPY_BIT, true);
-		encoder->upload_semaphore = {};
+		context.upload_semaphore = {};
 	}
 
 	auto cmd = device->request_command_buffer(CommandBuffer::Type::AsyncTransfer);
@@ -1507,7 +1528,7 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	}
 
 	cmd->begin_barrier_batch();
-	for (auto &img : encoder->upload_images)
+	for (auto &img : images)
 	{
 		if (!img)
 			continue;
@@ -1522,7 +1543,7 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 	device->submit(cmd, nullptr, 1, &sem);
 	device->add_wait_semaphore(encoder->pyro_device->queue_type, std::move(sem), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, true);
 
-	auto ret = pyrowave_encoder_encode_gpu_synchronous(encoder, nullptr, nullptr, &gpu_buffers, rate_control);
+	auto ret = pyrowave_encoder_encode_gpu(encoder, nullptr, nullptr, &gpu_buffers, rate_control);
 	return ret;
 }
 
@@ -1531,14 +1552,16 @@ pyrowave_encoder_compute_num_packets_with_padding(
 		pyrowave_encoder encoder, size_t packet_boundary, size_t padding_size, size_t *num_packets)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
 
-	if (!encoder->queued_meta)
+	auto &context = encoder->contexts[encoder->context];
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
 	// This isn't really a "map". It just returns the persistently mapped pointer.
-	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_meta = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
 	*num_packets = encoder->encoder.compute_num_packets(mapped_meta, packet_boundary, padding_size);
 	return PYROWAVE_SUCCESS;
 }
@@ -1555,18 +1578,20 @@ pyrowave_encoder_compute_num_critical_packets(
 {
 	Util::set_thread_logging_interface(&null_logger);
 
+	auto &context = encoder->contexts[encoder->context];
+
 	// Internal assertion.
 	if (bands < 0 || bands > 4)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
+	if (context.queued_fence)
+		context.queued_fence->wait();
 
-	if (!encoder->queued_meta)
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
 	// This isn't really a "map". It just returns the persistently mapped pointer.
-	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_meta = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
 	*num_packets = encoder->encoder.compute_num_critical_packets(bands, mapped_meta, packet_boundary, padding_size);
 	return PYROWAVE_SUCCESS;
 }
@@ -1577,14 +1602,17 @@ pyrowave_encoder_packetize_with_padding(
 		size_t *out_packets, void *bitstream, size_t size)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
 
-	if (!encoder->queued_meta || !encoder->queued_bitstream)
+	auto &context = encoder->contexts[encoder->context];
+
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta || !context.queued_bitstream)
 		return PYROWAVE_ERROR_GENERIC;
 
-	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
-	auto *mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_meta = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_bitstream = encoder->device->map_host_buffer(*context.queued_bitstream, MEMORY_ACCESS_READ_BIT);
 
 	*out_packets = encoder->encoder.packetize(
 		reinterpret_cast<Encoder::Packet *>(packets), packet_boundary, bitstream,
@@ -1599,16 +1627,19 @@ pyrowave_encoder_get_mapped_raw_bitstream(
 		const void **mapped_metadata, size_t *mapped_metadata_size)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
 
-	if (!encoder->queued_meta || !encoder->queued_bitstream)
+	auto &context = encoder->contexts[encoder->context];
+
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta || !context.queued_bitstream)
 		return PYROWAVE_ERROR_GENERIC;
 
-	*mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
-	*mapped_metadata = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
-	*mapped_bitstream_size = encoder->queued_bitstream->get_create_info().size;
-	*mapped_metadata_size = encoder->queued_meta->get_create_info().size;
+	*mapped_bitstream = encoder->device->map_host_buffer(*context.queued_bitstream, MEMORY_ACCESS_READ_BIT);
+	*mapped_metadata = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
+	*mapped_bitstream_size = context.queued_bitstream->get_create_info().size;
+	*mapped_metadata_size = context.queued_meta->get_create_info().size;
 
 	return PYROWAVE_SUCCESS;
 }
@@ -1632,13 +1663,15 @@ pyrowave_encoder_compute_block_active_words(pyrowave_encoder encoder,
 	if (bands < 0 || bands > 4)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
+	auto &context = encoder->contexts[encoder->context];
 
-	if (!encoder->queued_meta)
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
-	const void *mapped_metadata = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	const void *mapped_metadata = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
 	encoder->encoder.compute_block_active_words(bands, words, word_count, mapped_metadata);
 	return PYROWAVE_SUCCESS;
 }

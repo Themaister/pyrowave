@@ -484,11 +484,21 @@ pyrowave_encoder_set_ycbcr_scaling_factor(pyrowave_encoder encoder, float factor
 //   Memory must be visible to COMPUTE_SHADER / SHADER_SAMPLED_READ.
 // - After: Application must add execution barrier on COMPUTE_SHADER stage before writing to images.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_gpu_sync_operation *acquire,
-                                        const pyrowave_gpu_sync_operation *release,
-                                        const pyrowave_gpu_buffers *buffers,
-                                        const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_gpu(pyrowave_encoder encoder,
+                            const pyrowave_gpu_sync_operation *acquire,
+                            const pyrowave_gpu_sync_operation *release,
+                            const pyrowave_gpu_buffers *buffers,
+                            const pyrowave_rate_control *rate_control);
+
+#define PYROWAVE_MAX_FRAME_CONTEXTS 2
+
+// Like the normal API, but optimized for throughput when doing batch processing in e.g. FFmpeg with double buffering.
+// Calling the sync APIs is equivalent to always using default context 0.
+// Intended usage pattern is to set context (frame % 2) before encoding, then pulling bitstream
+// from context (frame - 1) % 2 (of course, no valid bitstream for first frame).
+// context must be less than PYROWAVE_MAX_FRAME_CONTEXTS.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_set_frame_context(pyrowave_encoder encoder, int context);
 
 typedef struct pyrowave_scaled_encode_info
 {
@@ -537,16 +547,17 @@ typedef struct pyrowave_scaled_encode_info
 } pyrowave_scaled_encode_info;
 
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
-                                               const pyrowave_gpu_sync_operation *acquire,
-                                               const pyrowave_gpu_sync_operation *release,
-                                               const pyrowave_scaled_encode_info *scaling_info,
-                                               const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
+                                   const pyrowave_gpu_sync_operation *acquire,
+                                   const pyrowave_gpu_sync_operation *release,
+                                   const pyrowave_scaled_encode_info *scaling_info,
+                                   const pyrowave_rate_control *rate_control);
 
+// Encode where pixel data is provided on CPU. Encoding still happens on GPU of course.
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
-                                        const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_cpu(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
+                            const pyrowave_rate_control *rate_control);
 
 // Can only be called after a successful encoding operation and result is only valid for that particular frame.
 // Computes the number of network packets required if each packet can consume a provided number of bytes.
