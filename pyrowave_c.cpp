@@ -1377,7 +1377,7 @@ static bool pyrowave_cpu_buffer_format_16bit(pyrowave_cpu_buffer_format format)
 	return format > PYROWAVE_CPU_BUFFER_FORMAT_YUV444P;
 }
 
-PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_result
 pyrowave_encoder_set_frame_context(pyrowave_encoder encoder, int context)
 {
 	if (context >= PYROWAVE_MAX_FRAME_CONTEXTS)
@@ -1702,12 +1702,19 @@ struct pyrowave_decoder_opaque
 	Device *device = nullptr;
 	pyrowave_device pyro_device = nullptr;
 	Decoder decoder;
-	ImageHandle planes[3];
 	bool fragment_path = false;
 	ChromaSubsampling chroma = {};
 	int width = 0;
 	int height = 0;
 	float ycbcr_scaling_factor = 1.0f;
+
+	struct
+	{
+		BufferHandle readback_buffers[3];
+		ImageHandle planes[3];
+		Semaphore semaphore;
+		Fence fence;
+	} contexts[PYROWAVE_MAX_FRAME_CONTEXTS];
 };
 
 bool pyrowave_decoder_device_prefers_fragment_path(pyrowave_device device)
@@ -1870,9 +1877,12 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 }
 
 pyrowave_result
-pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers)
+pyrowave_decoder_decode_cpu_buffer_async(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context_index)
 {
 	if (decoder->pyro_device->cmd)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (context_index >= PYROWAVE_MAX_FRAME_CONTEXTS)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	Util::register_thread_index(0);
@@ -1903,6 +1913,8 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 
 	const size_t plane_bpp = pyrowave_cpu_buffer_format_16bit(buffers->format) ? 2 : 1;
 
+	auto &context = decoder->contexts[context_index];
+
 	for (int plane = 0; plane < 3; plane++)
 	{
 		int plane_width = decoder->width;
@@ -1922,7 +1934,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 
 	for (int plane = 0; plane < 3; plane++)
 	{
-		auto &img = decoder->planes[plane];
+		auto &img = context.planes[plane];
 
 		if (!img)
 		{
@@ -1959,12 +1971,21 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 		}
 	}
 
+	if (context.semaphore)
+	{
+		device->add_wait_semaphore(decoder->pyro_device->queue_type, std::move(context.semaphore),
+		                           decoder->fragment_path
+			                           ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+			                           : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+		context.semaphore = {};
+	}
+
 	if (decoder->fragment_path)
 	{
 		auto cmd = device->request_command_buffer(decoder->pyro_device->queue_type);
 		cmd->begin_barrier_batch();
 
-		for (auto &img: decoder->planes)
+		for (auto &img : context.planes)
 		{
 			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
 			                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
@@ -1982,10 +2003,10 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	for (int plane = 0; plane < 3; plane++)
 	{
 		auto &p = gpu_buffers.planes[plane];
-		p.image = decoder->planes[plane]->get_image();
-		p.width = decoder->planes[plane]->get_width();
-		p.height = decoder->planes[plane]->get_height();
-		p.image_format = decoder->planes[plane]->get_format();
+		p.image = context.planes[plane]->get_image();
+		p.width = context.planes[plane]->get_width();
+		p.height = context.planes[plane]->get_height();
+		p.image_format = context.planes[plane]->get_format();
 		p.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 		p.swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
 		p.view_format = p.image_format;
@@ -1993,7 +2014,6 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	}
 
 	BufferCreateInfo bufinfo = {};
-	BufferHandle readback_buffers[3];
 
 	auto res = pyrowave_decoder_decode_gpu_buffer(decoder, nullptr, nullptr, &gpu_buffers);
 	if (res != PYROWAVE_SUCCESS)
@@ -2004,7 +2024,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	if (decoder->fragment_path)
 	{
 		cmd->begin_barrier_batch();
-		for (auto &img : decoder->planes)
+		for (auto &img : context.planes)
 		{
 			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2028,35 +2048,56 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 		bufinfo.size = buffers->plane_size_in_bytes[plane];
 		bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 		bufinfo.domain = BufferDomain::CachedHost;
-		readback_buffers[plane] = device->create_buffer(bufinfo);
 
-		cmd->copy_image_to_buffer(*readback_buffers[plane], *decoder->planes[plane], 0, {},
-		                          {decoder->planes[plane]->get_width(), decoder->planes[plane]->get_height(), 1},
+		if (!context.readback_buffers[plane] || context.readback_buffers[plane]->get_create_info().size < bufinfo.size)
+			context.readback_buffers[plane] = device->create_buffer(bufinfo);
+
+		cmd->copy_image_to_buffer(*context.readback_buffers[plane], *context.planes[plane], 0, {},
+		                          { context.planes[plane]->get_width(), context.planes[plane]->get_height(), 1 },
 		                          buffers->row_stride_in_bytes[plane] / plane_bpp, 0,
-		                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+		                          { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
 	}
 
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 	             VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 
-	// TODO: Improve pipelining with async interface.
-	sem = {};
-	Fence fence;
-	device->submit(cmd, &fence, 1, &sem);
-	fence->wait();
+	context.fence.reset();
+	context.semaphore.reset();
+	device->submit(cmd, &context.fence, 1, &context.semaphore);
 
-	device->add_wait_semaphore(decoder->pyro_device->queue_type, std::move(sem),
-	                           decoder->fragment_path
-		                           ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-		                           : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_complete(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context_index)
+{
+	if (context_index >= PYROWAVE_MAX_FRAME_CONTEXTS)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto &context = decoder->contexts[context_index];
+
+	if (!context.fence)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto *device = decoder->device;
+	context.fence->wait();
 
 	for (int plane = 0; plane < 3; plane++)
 	{
-		void *mapped = device->map_host_buffer(*readback_buffers[plane], MEMORY_ACCESS_READ_BIT);
+		void *mapped = device->map_host_buffer(*context.readback_buffers[plane], MEMORY_ACCESS_READ_BIT);
 		memcpy(buffers->data[plane], mapped, buffers->plane_size_in_bytes[plane]);
 	}
 
 	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers)
+{
+	auto result = pyrowave_decoder_decode_cpu_buffer_async(decoder, buffers, 0);
+	if (result != PYROWAVE_SUCCESS)
+		return result;
+	return pyrowave_decoder_decode_cpu_buffer_complete(decoder, buffers, 0);
 }
 
 void pyrowave_decoder_set_ycbcr_scaling_factor(pyrowave_decoder decoder, float factor)

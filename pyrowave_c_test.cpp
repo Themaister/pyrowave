@@ -791,7 +791,8 @@ static void test_basic_system_stability(bool realtime_prio)
 		ASSERT_THAT(total_bitstream_size <= rate_control.maximum_bitstream_size);
 		ASSERT_THAT(total_bitstream_size >= 95 * rate_control.maximum_bitstream_size / 100);
 
-		CHECKED(pyrowave_decoder_decode_cpu_buffer_synchronous(decoder, &decode_buffer));
+		CHECKED(pyrowave_decoder_decode_cpu_buffer_async(decoder, &decode_buffer, iter % 2));
+		CHECKED(pyrowave_decoder_decode_cpu_buffer_complete(decoder, &decode_buffer, iter % 2));
 	}
 
 	pyrowave_decoder_destroy(decoder);

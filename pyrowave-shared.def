@@ -46,6 +46,8 @@ EXPORTS
 	pyrowave_decoder_decode_is_ready_with_sideband
 	pyrowave_decoder_decode_gpu_buffer
 	pyrowave_decoder_decode_cpu_buffer_synchronous
+	pyrowave_decoder_decode_cpu_buffer_async
+	pyrowave_decoder_decode_cpu_buffer_complete
 	pyrowave_decoder_set_ycbcr_scaling_factor
 	pyrowave_decoder_destroy
 

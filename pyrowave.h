@@ -658,6 +658,16 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers);
 
+// The data pointers from this function are not accessed, but the other parameters are validated and used to
+// setup a readback asynchronously.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_async(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context);
+
+// Completes the decode for context. Blocks until GPU is done and buffers are copied over.
+// Data pointers may be different from the async start, but *buffers must be equal otherwise.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_complete(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context);
+
 // Special purpose when decoding to special formats like yuv420p10 or yuv444p10 as used in e.g. FFmpeg.
 // For CPU decode path, this is set automatically when decoding.
 // Defaults to 1.0. For e.g. 10-bit LSB encoding stored in UNORM16, use factor of 0x3ff / 0xffff.
