@@ -1433,7 +1433,9 @@ pyrowave_encoder_encode_cpu(pyrowave_encoder encoder, const pyrowave_cpu_buffer 
 			plane_height /= 2;
 		}
 
-		const size_t plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		size_t plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		if (pyrowave_cpu_buffer_format_16bit(buffers->format))
+			plane_bpp *= 2;
 
 		if (buffers->row_stride_in_bytes[plane] < plane_width * plane_bpp)
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
