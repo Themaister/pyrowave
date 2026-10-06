@@ -693,7 +693,7 @@ static void test_direct_interop()
 	pyrowave_device_destroy(pyro_device);
 }
 
-static void test_direct_interop_scaling()
+static void test_direct_interop_scaling(VkSamplerYcbcrRange range, uint32_t bit_depth)
 {
 	ASSERT_THAT(Context::init_loader(nullptr));
 
@@ -832,6 +832,8 @@ static void test_direct_interop_scaling()
 	scaling.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	scaling.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	scaling.ycbcr_chroma_midpoint = 130.0f / 255.0f;
+	scaling.ycbcr_range = range;
+	scaling.ycbcr_range_bit_depth = bit_depth;
 	scaling.force_linear_filtering = true;
 	VkRect2D crop_rect = { { 2, 1 }, { 64, 64 } };
 	scaling.crop_rect = &crop_rect;
@@ -897,6 +899,15 @@ static void test_direct_interop_scaling()
 
 	auto *readback_ptr = static_cast<const uint16_t *>(device.map_host_buffer(*readback_buffer, MEMORY_ACCESS_READ_BIT));
 
+	float luma_scale = 1.0f, luma_offset = 0.0f, chroma_scale = 1.0f;
+	if (range == VK_SAMPLER_YCBCR_RANGE_ITU_NARROW)
+	{
+		float code_unit = float(1u << (bit_depth - 8)) / float((1u << bit_depth) - 1u);
+		luma_scale = 219.0f * code_unit;
+		luma_offset = 16.0f * code_unit;
+		chroma_scale = 224.0f * code_unit;
+	}
+
 #if 1
 	for (int y = 0; y < 64; y++)
 	{
@@ -912,9 +923,9 @@ static void test_direct_interop_scaling()
 			float b = 128.0f / 255.0f;
 #endif
 
-			auto Y = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-			auto Cb = 130.0f / 255.0f - 0.114572f * r - 0.385428f * g + 0.5f * b;
-			auto Cr = 130.0f / 255.0f + 0.5f * r - 0.454153f * g - 0.0458471f * b;
+			auto Y = luma_offset + luma_scale * (0.2126f * r + 0.7152f * g + 0.0722f * b);
+			auto Cb = 130.0f / 255.0f + chroma_scale * (-0.114572f * r - 0.385428f * g + 0.5f * b);
+			auto Cr = 130.0f / 255.0f + chroma_scale * (0.5f * r - 0.454153f * g - 0.0458471f * b);
 
 			float readback_y = float(readback_ptr[0 * 64 * 64 + y * 64 + x]) / float(0xffff);
 			float readback_cb = float(readback_ptr[1 * 64 * 64 + y * 64 + x]) / float(0xffff);
@@ -2665,7 +2676,11 @@ int main(int argc, char **argv)
 
 	printf("Running Vulkan <-> Vulkan interop test with direct device share ...\n");
 	test_direct_interop();
-	test_direct_interop_scaling();
+	test_direct_interop_scaling(VK_SAMPLER_YCBCR_RANGE_ITU_FULL, 0);
+	printf("Running scaled encode test with 8-bit narrow range ...\n");
+	test_direct_interop_scaling(VK_SAMPLER_YCBCR_RANGE_ITU_NARROW, 8);
+	printf("Running scaled encode test with 10-bit narrow range ...\n");
+	test_direct_interop_scaling(VK_SAMPLER_YCBCR_RANGE_ITU_NARROW, 10);
 
 	printf("Running opaque Vulkan <-> Vulkan interop test ...\n");
 	test_opaque_interop(false);

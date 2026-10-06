@@ -1169,6 +1169,15 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 		scaling_info->intermediate_plane_format != VK_FORMAT_R16_UNORM)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
+	if (scaling_info->ycbcr_range != VK_SAMPLER_YCBCR_RANGE_ITU_FULL &&
+		scaling_info->ycbcr_range != VK_SAMPLER_YCBCR_RANGE_ITU_NARROW)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	uint32_t ycbcr_range_bit_depth = scaling_info->ycbcr_range_bit_depth ? scaling_info->ycbcr_range_bit_depth : 8;
+	if (scaling_info->ycbcr_range == VK_SAMPLER_YCBCR_RANGE_ITU_NARROW &&
+		(ycbcr_range_bit_depth < 8 || ycbcr_range_bit_depth > 16))
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
 	auto *device = encoder->device;
 	device->next_frame_context();
 
@@ -1229,6 +1238,7 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	info.skip_dither = scaling_info->skip_dither;
 	info.force_linear_filtering = scaling_info->force_linear_filtering;
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
+	encoder->scaler.set_ycbcr_range(scaling_info->ycbcr_range, ycbcr_range_bit_depth);
 
 	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
 	{
