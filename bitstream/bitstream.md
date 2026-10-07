@@ -608,5 +608,5 @@ contains a start of frame header followed by 32x32 blocks packed together to for
 
 ### Global header format
 
-For containers like MKV where a global header is stored once, that global header should be just the `PWV1Header`, without leading "PWV1" bytes.
+For containers like MKV where a global header is stored once, that global header should be just the `PWV1Header`.
 
