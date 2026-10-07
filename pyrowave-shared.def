@@ -1,4 +1,4 @@
-LIBRARY libpyrowave-shared-0.dll
+LIBRARY libpyrowave-shared-1.dll
 
 EXPORTS
 	pyrowave_get_api_version
