@@ -116,7 +116,7 @@ int main(int argc, char **argv)
 	LOGI("Device name: %s\n", Granite::Path::to_utf8(adapter_desc.Description).c_str());
 
 	CHECKED(pyrowave_create_device_by_compat(0, 0, 0, 0,
-				reinterpret_cast<const pyrowave_luid *>(&adapter_desc.AdapterLuid), &pyro_device));
+				reinterpret_cast<const pyrowave_luid *>(&adapter_desc.AdapterLuid), VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &pyro_device));
 
 	pyrowave_encoder_create_info encoder_info = {};
 	encoder_info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
@@ -237,7 +237,7 @@ int main(int argc, char **argv)
 		info.ycbcr_chroma_midpoint = 128.0f / 255.0f;
 		info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
 
-		CHECKED(pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, &acquire, &release, &info, &rate_control));
+		CHECKED(pyrowave_encoder_encode_gpu_scaled(encoder, &acquire, &release, &info, &rate_control));
 
 		std::vector<uint8_t> bitstream(rate_control.maximum_bitstream_size);
 		pyrowave_packet packet = {};
