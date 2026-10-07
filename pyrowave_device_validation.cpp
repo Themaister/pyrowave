@@ -112,7 +112,7 @@ static bool verify_roundtrip(pyrowave_device device)
 	cpu_buffer.width = Width;
 	cpu_buffer.height = Height;
 	const pyrowave_rate_control rate_control = { 64 * 1024 }; // Just give it something massive.
-	if (pyrowave_encoder_encode_cpu_synchronous(encoder.get(), &cpu_buffer, &rate_control) != PYROWAVE_SUCCESS)
+	if (pyrowave_encoder_encode_cpu(encoder.get(), &cpu_buffer, &rate_control) != PYROWAVE_SUCCESS)
 		return false;
 
 	size_t num_packets;
@@ -216,7 +216,7 @@ int main(int argc, char **argv)
 	{
 		pyrowave_device device;
 		auto ret = pyrowave_create_device_by_compat(
-			vid, pid, nullptr, nullptr, use_luid ? &luid : nullptr, &device);
+			vid, pid, nullptr, nullptr, use_luid ? &luid : nullptr, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &device);
 
 		if (ret != PYROWAVE_SUCCESS)
 			return EXIT_CODE_NO_VULKAN_DEVICE;

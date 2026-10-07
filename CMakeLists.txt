@@ -140,8 +140,8 @@ if (${PROJECT_IS_TOP_LEVEL})
     target_link_libraries(pyrowave-device-validation PRIVATE pyrowave-shared granite-util granite-volk-headers)
     target_compile_options(pyrowave-device-validation PRIVATE ${PYROWAVE_CXX_FLAGS})
 
-    set(PYROWAVE_API_VERSION_MAJOR 0)
-    set(PYROWAVE_API_VERSION_MINOR 6)
+    set(PYROWAVE_API_VERSION_MAJOR 1)
+    set(PYROWAVE_API_VERSION_MINOR 0)
     set(PYROWAVE_API_VERSION_PATCH 0)
     set(PYROWAVE_API_VERSION ${PYROWAVE_API_VERSION_MAJOR}.${PYROWAVE_API_VERSION_MINOR}.${PYROWAVE_API_VERSION_PATCH})
 
@@ -184,7 +184,7 @@ if (${PROJECT_IS_TOP_LEVEL})
     set(PYROWAVE_INSTALL_INC_DIR ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_INCLUDEDIR}/pyrowave)
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/pkg-config/pyrowave-shared.pc.in
             ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc @ONLY)
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pyrowave-shared.pc DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
     if (WIN32 AND CMAKE_COMPILER_IS_GNUCXX)
         target_link_libraries(pyrowave-shared PRIVATE -static gcc stdc++ winpthread)

@@ -168,34 +168,41 @@ static void run_decoder(Device &device, const char *out_path, const char *in_pat
 		return;
 	}
 
-	char magic[9] = {};
-	if (fread(magic, 1, 8, infile.get()) != 8)
-	{
-		LOGE("Failed to read magic.\n");
-		return;
-	}
+	PyroWave::PWV1Header header = {};
 
-	if (strcmp(magic, "PYROWAVE") != 0)
-	{
-		LOGE("Invalid magic.\n");
-		return;
-	}
-
-	int32_t u32_params[8];
-	if (fread(u32_params, sizeof(u32_params), 1, infile.get()) != 1)
+	if (fread(&header, sizeof(header), 1, infile.get()) != 1)
 	{
 		LOGE("Failed to read parameters.\n");
 		return;
 	}
 
+	if (header.magic != PyroWave::PWV1Header::Magic)
+	{
+		LOGE("Invalid magic.\n");
+		return;
+	}
+
 	PyroWave::Decoder dec;
-	int width = u32_params[0];
-	int height = u32_params[1];
-	auto format = YUV4MPEGFile::Format(u32_params[2]);
-	auto chroma = PyroWave::ChromaSubsampling(u32_params[3]);
-	bool is_full = u32_params[4] != 0;
-	int frame_rate_num = u32_params[5];
-	int frame_rate_den = u32_params[6];
+	int width = header.pyro.width_minus_1 + 1;
+	int height = header.pyro.height_minus_1 + 1;
+
+	YUV4MPEGFile::Format format;
+	if (header.reference_bit_depth == 8)
+	{
+		format = header.pyro.chroma_resolution == PyroWave::CHROMA_RESOLUTION_420 ?
+			YUV4MPEGFile::Format::YUV420P : YUV4MPEGFile::Format::YUV444P;
+	}
+	else
+	{
+		format = header.pyro.chroma_resolution == PyroWave::CHROMA_RESOLUTION_420 ?
+			YUV4MPEGFile::Format::YUV420P16 : YUV4MPEGFile::Format::YUV444P16;
+	}
+
+	auto chroma = header.pyro.chroma_resolution == PyroWave::CHROMA_RESOLUTION_420 ?
+		PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
+	bool is_full = header.pyro.ycbcr_range == PyroWave::YCBCR_RANGE_FULL;
+	int frame_rate_num = header.frame_rate_num;
+	int frame_rate_den = header.frame_rate_den;
 	// Unused chroma siting. YUV4MPEG doesn't seem to have proper support for that.
 	if (!dec.init(&device, width, height, chroma))
 		return;
@@ -279,7 +286,7 @@ int main(int argc, char **argv)
 {
 	if (argc != 3)
 	{
-		LOGE("Usage: pyrowave-encode <input.pyrowave> <output.y4m>\n");
+		LOGE("Usage: pyrowave-encode <input.pwv1> <output.y4m>\n");
 		return EXIT_FAILURE;
 	}
 

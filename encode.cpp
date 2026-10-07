@@ -9,6 +9,7 @@
 #include "pyrowave_encoder.hpp"
 #include "yuv4mpeg.hpp"
 #include "shaders/slangmosh.hpp"
+#include "pyrowave_common.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -141,32 +142,40 @@ static void run_encoder(Device &device, const char *out_path, const char *in_pat
 		return;
 	}
 
-	if (fwrite("PYROWAVE", 1, 8, out.get()) != 8)
+	PyroWave::PWV1Header header = { PyroWave::PWV1Header::Magic };
+
+	header.pyro.width_minus_1 = input.get_width() - 1;
+	header.pyro.height_minus_1 = input.get_height() - 1;
+	header.pyro.chroma_resolution = YUV4MPEGFile::format_has_subsampling(input.get_format())
+		                                ? PyroWave::CHROMA_RESOLUTION_420
+		                                : PyroWave::CHROMA_RESOLUTION_444;
+	header.pyro.chroma_siting = input.is_center_chroma()
+		                            ? PyroWave::CHROMA_SITING_CENTER
+		                            : PyroWave::CHROMA_SITING_LEFT;
+	header.pyro.color_primaries = PyroWave::COLOR_PRIMARIES_SRGB;
+	header.pyro.ycbcr_range = input.is_full_range() ? PyroWave::YCBCR_RANGE_FULL : PyroWave::YCBCR_RANGE_LIMITED;
+	header.pyro.transfer_function = PyroWave::TRANSFER_FUNCTION_SRGB;
+	header.pyro.ycbcr_transform = PyroWave::YCBCR_TRANSFORM_BT709;
+	header.frame_rate_num = input.get_frame_rate_num();
+	header.frame_rate_den = input.get_frame_rate_den();
+	header.reference_bit_depth = YUV4MPEGFile::format_to_bytes_per_component(input.get_format()) == 2 ? 16 : 8;
+	header.header_version = 1;
+
+	if (fwrite(&header, sizeof(header), 1, out.get()) != 1)
 	{
-		LOGE("Failed to write magic.\n");
+		LOGE("Failed to write header.\n");
 		return;
 	}
 
-	int32_t width = input.get_width();
-	int32_t height = input.get_height();
-	auto fmt = YUV4MPEGFile::format_to_bytes_per_component(input.get_format()) == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
-	auto chroma = YUV4MPEGFile::format_has_subsampling(input.get_format()) ? PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
+	auto fmt = YUV4MPEGFile::format_to_bytes_per_component(input.get_format()) == 2 ?
+		VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+	auto chroma = YUV4MPEGFile::format_has_subsampling(input.get_format()) ?
+		PyroWave::ChromaSubsampling::Chroma420 : PyroWave::ChromaSubsampling::Chroma444;
 
-	int32_t u32_params[8] = {
-		width, height, int(input.get_format()), int(chroma), input.is_full_range(),
-		input.get_frame_rate_num(), input.get_frame_rate_den(), 0 /* placeholder for unknown chroma siting */
-	};
-
-	if (fwrite(u32_params, sizeof(u32_params), 1, out.get()) != 1)
-	{
-		LOGE("Failed to write u32 params.\n");
-		return;
-	}
-
-	auto inputs = create_ycbcr_images(device, width, height, fmt, chroma);
+	auto inputs = create_ycbcr_images(device, input.get_width(), input.get_height(), fmt, chroma);
 
 	PyroWave::Encoder enc;
-	if (!enc.init(&device, width, height, chroma))
+	if (!enc.init(&device, input.get_width(), input.get_height(), chroma))
 		return;
 
 	EncodedBuffer queue[2];
@@ -201,7 +210,7 @@ static void run_encoder(Device &device, const char *out_path, const char *in_pat
 		for (auto &img : inputs.images)
 		{
 			auto *y = cmd->update_image(*img);
-			if (!input.read(y, img->get_width() * img->get_height()))
+			if (!input.read(y, img->get_width() * img->get_height() * YUV4MPEGFile::format_to_bytes_per_component(input.get_format())))
 			{
 				LOGE("Failed to read plane.\n");
 				device.submit_discard(cmd);
@@ -212,7 +221,7 @@ static void run_encoder(Device &device, const char *out_path, const char *in_pat
 		for (auto &img : inputs.images)
 		{
 			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			                   VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
 			                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 			                   VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 		}
@@ -253,7 +262,7 @@ int main(int argc, char **argv)
 {
 	if (argc != 4)
 	{
-		LOGE("Usage: pyrowave-encode <input.y4m> <output.pyrowave> <bytes_per_frame>\n");
+		LOGE("Usage: pyrowave-encode <input.y4m> <output.pwv1> <bytes_per_frame>\n");
 		return EXIT_FAILURE;
 	}
 

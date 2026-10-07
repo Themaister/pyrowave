@@ -5,7 +5,8 @@
 #define PYROWAVE_H_
 
 #if !defined(VULKAN_CORE_H_)
-#error "Must include vulkan headers before including pyrowave.h"
+#warning "Should include vulkan headers before including pyrowave.h"
+#include <vulkan/vulkan.h>
 #endif
 
 #include <stddef.h>
@@ -16,10 +17,8 @@ extern "C" {
 #include <stdbool.h>
 #endif
 
-// API and ABI is not considered stable until MAJOR version hits 1!
-
-#define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 6
+#define PYROWAVE_API_VERSION_MAJOR 1
+#define PYROWAVE_API_VERSION_MINOR 0
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -73,6 +72,7 @@ typedef struct pyrowave_image_opaque *pyrowave_image;
 PYROWAVE_PUBLIC_API void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch);
 
 // Device API.
+// For more advanced usage, see pyrowave_create_device_by_compat.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
 
 typedef struct pyrowave_device_create_queue_info
@@ -152,17 +152,7 @@ typedef struct pyrowave_luid
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_create_device(const pyrowave_device_create_info *info, pyrowave_device *device);
 
-// On Windows, LUID is generally used, but other OS-es may need device_uuid/driver_uuid.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat(
-	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
-	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
-	uint32_t vid, uint32_t pid,
-	const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
-	const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
-	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
-	pyrowave_device *device);
-
-PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat2(
 	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
 	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
 	uint32_t vid, uint32_t pid,
@@ -172,6 +162,7 @@ PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat2(
 	// Intended to request HIGH or REALTIME global queue priorities.
 	// Only affects the compute queue. If HIGH or REALTIME is used,
 	// the device is automatically set to use async compute queues as per pyrowave_device_set_queue_type.
+	// If unsure, use VK_QUEUE_GLOBAL_PRIORITY_MEDIUM.
 	VkQueueGlobalPriority global_priority,
 	pyrowave_device *device);
 
@@ -428,14 +419,16 @@ typedef struct pyrowave_gpu_sync_operation
 	pyrowave_sync_point sync;
 } pyrowave_gpu_sync_operation;
 
-// TODO: Add support for importing external memory as GPU buffers.
-
 // The CPU path is mostly for bringup testing.
 typedef enum pyrowave_cpu_buffer_format
 {
 	PYROWAVE_CPU_BUFFER_FORMAT_NV12 = 0, // 2 planes. Y packed in 8bpp, then CbCr packed in 16bpp. Only supported for encoding.
 	PYROWAVE_CPU_BUFFER_FORMAT_YUV420P = 1, // 3 planes. Y, Cb, Cr packed into separate planes. Native format for pyrowave.
 	PYROWAVE_CPU_BUFFER_FORMAT_YUV444P = 2, // 3 planes. Y, Cb, Cr packed into separate planes. Native format for pyrowave.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10 = 3, // 3 planes. Y, Cb, Cr packed into separate planes. 10 LSBs hold 10-bit UNORM value. Upper MSBs must be 0. Native endian.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10 = 4, // 3 planes. Y, Cb, Cr packed into separate planes. 10 LSBs hold 10-bit UNORM value. Upper MSBs must be 0. Native endian.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV420P16 = 5, // 3 planes. Y, Cb, Cr packed into separate planes. Native endian.
+	PYROWAVE_CPU_BUFFER_FORMAT_YUV444P16 = 6, // 3 planes. Y, Cb, Cr packed into separate planes. Native endian.
 	PYROWAVE_CPU_BUFFER_FORMAT_INT_MAX = 0x7fffffff
 } pyrowave_cpu_buffer_format;
 
@@ -464,6 +457,12 @@ typedef struct pyrowave_rate_control
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encoder *encoder);
 
+// Special purpose when encoding formats like yuv420p10 or yuv444p10 as used in e.g. FFmpeg.
+// For CPU encode path, this is set automatically.
+// Defaults to 1.0. For e.g. 10-bit LSB encoding stored in UNORM16, use factor of 0xffff / 0x3ff.
+PYROWAVE_PUBLIC_API void
+pyrowave_encoder_set_ycbcr_scaling_factor(pyrowave_encoder encoder, float factor);
+
 // Synchronous encode API. For low-latency use cases, overlapping frames in encode is meaningless
 // due to latency and the encoder is so fast anyway. This function will not block, but subsequent functions will.
 // Calling an encode operation with synchronous API clobbers any previous encoded frame.
@@ -477,11 +476,21 @@ pyrowave_encoder_create(const pyrowave_encoder_create_info *info, pyrowave_encod
 //   Memory must be visible to COMPUTE_SHADER / SHADER_SAMPLED_READ.
 // - After: Application must add execution barrier on COMPUTE_SHADER stage before writing to images.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_gpu_sync_operation *acquire,
-                                        const pyrowave_gpu_sync_operation *release,
-                                        const pyrowave_gpu_buffers *buffers,
-                                        const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_gpu(pyrowave_encoder encoder,
+                            const pyrowave_gpu_sync_operation *acquire,
+                            const pyrowave_gpu_sync_operation *release,
+                            const pyrowave_gpu_buffers *buffers,
+                            const pyrowave_rate_control *rate_control);
+
+#define PYROWAVE_MAX_FRAME_CONTEXTS 2
+
+// Like the normal API, but optimized for throughput when doing batch processing in e.g. FFmpeg with double buffering.
+// Calling the sync APIs is equivalent to always using default context 0.
+// Intended usage pattern is to set context (frame % 2) before encoding, then pulling bitstream
+// from context (frame - 1) % 2 (of course, no valid bitstream for first frame).
+// context must be less than PYROWAVE_MAX_FRAME_CONTEXTS.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_encoder_set_frame_context(pyrowave_encoder encoder, int context);
 
 typedef struct pyrowave_scaled_encode_info
 {
@@ -500,7 +509,7 @@ typedef struct pyrowave_scaled_encode_info
 	// HDR10 is *not* tonemapped.
 	VkColorSpaceKHR output_color_space;
 
-	// YCbCr transform is always full-range, center chroma siting.
+	// YCbCr transform is full-range unless ycbcr_range says otherwise, center chroma siting.
 	// If output color space is HDR10_ST2084, BT.2020 NCL transform is used,
 	// otherwise, BT.701 coefficients are used.
 
@@ -527,19 +536,29 @@ typedef struct pyrowave_scaled_encode_info
 
 	// Optional.
 	const VkRect2D *crop_rect;
+
+	// YCbCr range of the output planes. Zero is VK_SAMPLER_YCBCR_RANGE_ITU_FULL.
+	// VK_SAMPLER_YCBCR_RANGE_ITU_NARROW produces H.273 narrow range (e.g. 16..235 luma at 8-bit),
+	// normalized like ycbcr_chroma_midpoint; pick the midpoint that matches (e.g. 128.0 / 255.0).
+	// Only applies to RGB(A) input. NV12 input is scaled without color conversion, so its range is kept.
+	VkSamplerYcbcrRange ycbcr_range;
+
+	// Bit depth whose narrow range code values are used. 0 means 8. Must be 8 to 16 for narrow range.
+	uint32_t ycbcr_range_bit_depth;
 } pyrowave_scaled_encode_info;
 
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
-                                               const pyrowave_gpu_sync_operation *acquire,
-                                               const pyrowave_gpu_sync_operation *release,
-                                               const pyrowave_scaled_encode_info *scaling_info,
-                                               const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
+                                   const pyrowave_gpu_sync_operation *acquire,
+                                   const pyrowave_gpu_sync_operation *release,
+                                   const pyrowave_scaled_encode_info *scaling_info,
+                                   const pyrowave_rate_control *rate_control);
 
+// Encode where pixel data is provided on CPU. Encoding still happens on GPU of course.
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
-                                        const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_cpu(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
+                            const pyrowave_rate_control *rate_control);
 
 // Can only be called after a successful encoding operation and result is only valid for that particular frame.
 // Computes the number of network packets required if each packet can consume a provided number of bytes.
@@ -639,6 +658,23 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 // A command buffer must not be set on pyrowave_device.
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers);
+
+// The data pointers from this function are not accessed, but the other parameters are validated and used to
+// setup a readback asynchronously.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_async(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context);
+
+// Completes the decode for context. Blocks until GPU is done and buffers are copied over.
+// Data pointers may be different from the async start, but *buffers must be equal otherwise.
+PYROWAVE_PUBLIC_API pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_complete(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context);
+
+// Special purpose when decoding to special formats like yuv420p10 or yuv444p10 as used in e.g. FFmpeg.
+// For CPU decode path, this is set automatically when decoding.
+// Defaults to 1.0. For e.g. 10-bit LSB encoding stored in UNORM16, use factor of 0x3ff / 0xffff.
+// Not compatible with fragment decoding path for now.
+PYROWAVE_PUBLIC_API void
+pyrowave_decoder_set_ycbcr_scaling_factor(pyrowave_decoder decoder, float factor);
 
 // Implementation ensures GPU is idle before destroying objects.
 PYROWAVE_PUBLIC_API void pyrowave_decoder_destroy(pyrowave_decoder decoder);

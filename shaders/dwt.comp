@@ -12,6 +12,7 @@ layout(set = 0, binding = 0) uniform mediump sampler2D uTexture;
 layout(set = 0, binding = 1) writeonly uniform mediump image2DArray uOutput;
 
 layout(constant_id = 0) const bool DCShift = false;
+layout(constant_id = 1) const float RangeScale = 1.0;
 
 layout(push_constant) uniform Registers
 {
@@ -45,6 +46,8 @@ void load_image_with_apron()
     VEC4 texels1 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 0)))).wzxy;
     VEC4 texels2 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(0, 16)))).wzxy;
     VEC4 texels3 = VEC4(textureGather(uTexture, generate_mirror_uv(coord0 + ivec2(16, 16)))).wzxy;
+
+	if (RangeScale != 1.0) { texels0 *= FLOAT(RangeScale); texels1 *= FLOAT(RangeScale); texels2 *= FLOAT(RangeScale); texels3 *= FLOAT(RangeScale); }
     if (DCShift) { texels0 -= FLOAT(0.5); texels1 -= FLOAT(0.5); texels2 -= FLOAT(0.5); texels3 -= FLOAT(0.5); }
 
     int local_coord0_y_half = local_coord0.y >> 1;
@@ -63,6 +66,7 @@ void load_image_with_apron()
     {
         ivec2 local_coord = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), 2 * (local_index / 4u));
         VEC4 texels = VEC4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (RangeScale != 1.0) { texels *= FLOAT(RangeScale); }
         if (DCShift) { texels -= FLOAT(0.5); }
         store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
         store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
@@ -72,6 +76,7 @@ void load_image_with_apron()
     {
         ivec2 local_coord = ivec2(2 * (local_index % 16u), BLOCK_SIZE + 2 * (local_index / 16u));
         VEC4 texels = VEC4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (RangeScale != 1.0) { texels *= FLOAT(RangeScale); }
         if (DCShift) { texels -= FLOAT(0.5); }
         store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
         store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);
@@ -82,6 +87,7 @@ void load_image_with_apron()
         // Load the bottom-right apron
         ivec2 local_coord = ivec2(BLOCK_SIZE + 2 * (local_index % 4u), BLOCK_SIZE + 2 * (local_index / 4u));
         VEC4 texels = VEC4(textureGather(uTexture, generate_mirror_uv(base_coord + local_coord))).wzxy;
+        if (RangeScale != 1.0) { texels *= FLOAT(RangeScale); }
         if (DCShift) { texels -= FLOAT(0.5); }
         store_shared(local_coord.y >> 1, local_coord.x + 0, texels.xz);
         store_shared(local_coord.y >> 1, local_coord.x + 1, texels.yw);

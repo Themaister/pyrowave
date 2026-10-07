@@ -505,8 +505,9 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 
 	// Only need simple 2-lane swaps.
 	cmd.set_subgroup_size_log2(true, 2, 7);
-	cmd.set_specialization_constant_mask(1);
+	cmd.set_specialization_constant_mask(3);
 	cmd.set_specialization_constant(0, false);
+	cmd.set_specialization_constant(1, 1.0f);
 
 	auto start_dwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -532,6 +533,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 		if (output_level == 0)
 		{
 			cmd.set_specialization_constant(0, true);
+			cmd.set_specialization_constant(1, views.range_scale);
 
 			if (chroma == ChromaSubsampling::Chroma444)
 			{
@@ -569,6 +571,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 					cmd.push_constants(&push, 0, sizeof(push));
 					cmd.set_texture(0, 0, *views.planes[c], *mirror_repeat_sampler);
 					cmd.set_specialization_constant(0, true);
+					cmd.set_specialization_constant(1, views.range_scale);
 				}
 				else
 				{
@@ -589,6 +592,7 @@ bool Encoder::Impl::dwt(CommandBuffer &cmd, const ViewBuffers &views)
 		            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
 		cmd.set_specialization_constant(0, false);
+		cmd.set_specialization_constant(1, 1.0f);
 	}
 
 	auto end_dwt = cmd.write_timestamp(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);

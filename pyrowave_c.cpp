@@ -11,6 +11,7 @@
 #include "logging.hpp"
 #include "slangmosh_scaler.hpp"
 #include "scaler.hpp"
+#include "thread_id.hpp"
 
 using namespace Granite;
 using namespace Vulkan;
@@ -56,7 +57,7 @@ VkQueueGlobalPriority pyrowave_device_get_global_priority(pyrowave_device device
 	return device->device.get_device_features().global_compute_priority;
 }
 
-pyrowave_result pyrowave_create_device_by_compat2(
+pyrowave_result pyrowave_create_device_by_compat(
 		// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
 		// Risks picking the wrong device if there are multiple ICDs for the same GPU.
 		uint32_t vid, uint32_t pid,
@@ -164,22 +165,9 @@ pyrowave_result pyrowave_create_device_by_compat2(
 	return PYROWAVE_SUCCESS;
 }
 
-pyrowave_result pyrowave_create_device_by_compat(
-		// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
-		// Risks picking the wrong device if there are multiple ICDs for the same GPU.
-		uint32_t vid, uint32_t pid,
-		const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
-		const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
-		const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
-		pyrowave_device *device)
-{
-	return pyrowave_create_device_by_compat2(vid, pid, device_uuid, driver_uuid, device_luid,
-	                                         VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, device);
-}
-
 pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 {
-	return pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr, device);
+	return pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, device);
 }
 
 static std::mutex global_device_lock;
@@ -876,16 +864,28 @@ struct pyrowave_encoder_opaque
 	Device *device = nullptr;
 	pyrowave_device pyro_device = nullptr;
 	Encoder encoder;
-	Fence queued_fence;
-	BufferHandle queued_meta;
-	BufferHandle queued_bitstream;
+
 	ChromaSubsampling chroma = {};
 	int width = 0;
 	int height = 0;
+	float ycbcr_scaling_factor = 1.0f;
 
 	// For scaling path.
 	ImageHandle scaler_planes[3];
 	VideoScaler scaler;
+
+	int context = 0;
+
+	struct
+	{
+		Fence queued_fence;
+		BufferHandle queued_meta;
+		BufferHandle queued_meta_gpu;
+		BufferHandle queued_bitstream;
+		BufferHandle queued_bitstream_gpu;
+		ImageHandle upload_images[3];
+		Semaphore upload_semaphore;
+	} contexts[PYROWAVE_MAX_FRAME_CONTEXTS];
 };
 
 pyrowave_result
@@ -1018,16 +1018,20 @@ static void pyrowave_device_signal_semaphore(Device *device, CommandBuffer::Type
 }
 
 static pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
-                                              const pyrowave_gpu_sync_operation *acquire,
-                                              const pyrowave_gpu_sync_operation *release,
-                                              const ViewBuffers &views,
-                                              const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu_inner(pyrowave_encoder encoder,
+                                  const pyrowave_gpu_sync_operation *acquire,
+                                  const pyrowave_gpu_sync_operation *release,
+                                  const ViewBuffers &views,
+                                  const pyrowave_rate_control *rate_control)
 {
 	auto *device = encoder->device;
 
 	if (encoder->pyro_device->cmd && (acquire || release))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto &context = encoder->contexts[encoder->context];
+
+	Util::register_thread_index(0);
 
 	Util::set_thread_logging_interface(&null_logger);
 
@@ -1038,15 +1042,17 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 
 	bufinfo.size = encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
-	encoder->queued_meta = device->create_buffer(bufinfo);
+	if (!context.queued_meta || context.queued_meta->get_create_info().size < bufinfo.size)
+		context.queued_meta = device->create_buffer(bufinfo);
 
-	if (!encoder->queued_meta)
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bufinfo.domain = BufferDomain::Device;
-	auto queued_meta_gpu = device->create_buffer(bufinfo);
+	if (!context.queued_meta_gpu || context.queued_meta_gpu->get_create_info().size < bufinfo.size)
+		context.queued_meta_gpu = device->create_buffer(bufinfo);
 
-	if (!queued_meta_gpu)
+	if (!context.queued_meta_gpu)
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	auto target_bitstream_size = rate_control->maximum_bitstream_size & ~VkDeviceSize(3u);
@@ -1057,23 +1063,25 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 
 	bufinfo.size = target_bitstream_size + encoder->encoder.get_meta_required_size();
 	bufinfo.domain = BufferDomain::CachedHost;
-	encoder->queued_bitstream = device->create_buffer(bufinfo);
+	if (!context.queued_bitstream || context.queued_bitstream->get_create_info().size < bufinfo.size)
+		context.queued_bitstream = device->create_buffer(bufinfo);
 
-	if (!encoder->queued_bitstream)
+	if (!context.queued_bitstream)
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
 
 	bufinfo.domain = BufferDomain::Device;
-	auto queued_bitstream_gpu = device->create_buffer(bufinfo);
+	if (!context.queued_bitstream_gpu || context.queued_bitstream_gpu->get_create_info().size < bufinfo.size)
+		context.queued_bitstream_gpu = device->create_buffer(bufinfo);
 
-	if (!queued_bitstream_gpu)
+	if (!context.queued_bitstream_gpu)
 		return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 
 	Encoder::BitstreamBuffers bitstream_buffers = {};
 
-	bitstream_buffers.meta.buffer = queued_meta_gpu.get();
-	bitstream_buffers.meta.size = queued_meta_gpu->get_create_info().size;
-	bitstream_buffers.bitstream.buffer = queued_bitstream_gpu.get();
-	bitstream_buffers.bitstream.size = queued_bitstream_gpu->get_create_info().size;
+	bitstream_buffers.meta.buffer = context.queued_meta_gpu.get();
+	bitstream_buffers.meta.size = context.queued_meta_gpu->get_create_info().size;
+	bitstream_buffers.bitstream.buffer = context.queued_bitstream_gpu.get();
+	bitstream_buffers.bitstream.size = context.queued_bitstream_gpu->get_create_info().size;
 	bitstream_buffers.target_size = target_bitstream_size;
 
 	auto cmd =
@@ -1116,13 +1124,13 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 	// Performance issue since these memory types are mapped coherent on the GPU.
 	// A staging copy is just better. Could avoid it on iGPU, but iGPU isn't really supposed to be
 	// used as the encoder when streaming.
-	cmd->copy_buffer(*encoder->queued_meta, *queued_meta_gpu);
-	cmd->copy_buffer(*encoder->queued_bitstream, *queued_bitstream_gpu);
+	cmd->copy_buffer(*context.queued_meta, *context.queued_meta_gpu);
+	cmd->copy_buffer(*context.queued_bitstream, *context.queued_bitstream_gpu);
 
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
 				 VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
 
-	encoder->queued_fence.reset();
+	context.queued_fence.reset();
 
 	if (encoder->pyro_device->cmd)
 	{
@@ -1132,8 +1140,15 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 		// Need to signal the GPU queues before we can move the context along.
 		device->submit_external(encoder->pyro_device->queue_type);
 	}
+	else if (context.upload_images[0])
+	{
+		context.upload_semaphore.reset();
+		device->submit(cmd, &context.queued_fence, 1, &context.upload_semaphore);
+	}
 	else
-		device->submit(cmd, &encoder->queued_fence);
+	{
+		device->submit(cmd, &context.queued_fence);
+	}
 
 	pyrowave_device_signal_semaphore(device, encoder->pyro_device->queue_type, release);
 
@@ -1141,32 +1156,42 @@ pyrowave_encoder_encode_gpu_synchronous_inner(pyrowave_encoder encoder,
 }
 
 pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_gpu_sync_operation *acquire,
-                                        const pyrowave_gpu_sync_operation *release,
-                                        const pyrowave_gpu_buffers *buffers,
-                                        const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu(pyrowave_encoder encoder,
+                            const pyrowave_gpu_sync_operation *acquire,
+                            const pyrowave_gpu_sync_operation *release,
+                            const pyrowave_gpu_buffers *buffers,
+                            const pyrowave_rate_control *rate_control)
 {
 	auto *device = encoder->device;
 	WrappedViewBuffers views = {};
 	if (!views.wrap(device, buffers, VK_IMAGE_USAGE_SAMPLED_BIT))
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+	views.range_scale = encoder->ycbcr_scaling_factor;
 	device->next_frame_context();
 	pyrowave_device_wait_semaphore(device, encoder->pyro_device->queue_type, acquire, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, acquire, release, views, rate_control);
+	return pyrowave_encoder_encode_gpu_inner(encoder, acquire, release, views, rate_control);
 }
 
 pyrowave_result
-pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
-											   const pyrowave_gpu_sync_operation *acquire,
-											   const pyrowave_gpu_sync_operation *release,
-											   const pyrowave_scaled_encode_info *scaling_info,
-											   const pyrowave_rate_control *rate_control)
+pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
+                                   const pyrowave_gpu_sync_operation *acquire,
+                                   const pyrowave_gpu_sync_operation *release,
+                                   const pyrowave_scaled_encode_info *scaling_info,
+                                   const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
 
 	if (scaling_info->intermediate_plane_format != VK_FORMAT_R8_UNORM &&
 		scaling_info->intermediate_plane_format != VK_FORMAT_R16_UNORM)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (scaling_info->ycbcr_range != VK_SAMPLER_YCBCR_RANGE_ITU_FULL &&
+		scaling_info->ycbcr_range != VK_SAMPLER_YCBCR_RANGE_ITU_NARROW)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	uint32_t ycbcr_range_bit_depth = scaling_info->ycbcr_range_bit_depth ? scaling_info->ycbcr_range_bit_depth : 8;
+	if (scaling_info->ycbcr_range == VK_SAMPLER_YCBCR_RANGE_ITU_NARROW &&
+		(ycbcr_range_bit_depth < 8 || ycbcr_range_bit_depth > 16))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
 	auto *device = encoder->device;
@@ -1229,6 +1254,7 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	info.skip_dither = scaling_info->skip_dither;
 	info.force_linear_filtering = scaling_info->force_linear_filtering;
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
+	encoder->scaler.set_ycbcr_range(scaling_info->ycbcr_range, ycbcr_range_bit_depth);
 
 	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
 	{
@@ -1324,26 +1350,74 @@ pyrowave_encoder_encode_gpu_scaled_synchronous(pyrowave_encoder encoder,
 	ViewBuffers buffers = {};
 	for (int i = 0; i < 3; i++)
 		buffers.planes[i] = &encoder->scaler_planes[i]->get_view();
-	return pyrowave_encoder_encode_gpu_synchronous_inner(encoder, nullptr, release, buffers, rate_control);
+	buffers.range_scale = encoder->ycbcr_scaling_factor;
+	return pyrowave_encoder_encode_gpu_inner(encoder, nullptr, release, buffers, rate_control);
+}
+
+static bool pyrowave_cpu_buffer_format_subsampled(pyrowave_cpu_buffer_format format)
+{
+	switch (format)
+	{
+	case PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10:
+	case PYROWAVE_CPU_BUFFER_FORMAT_YUV420P16:
+	case PYROWAVE_CPU_BUFFER_FORMAT_YUV420P:
+	case PYROWAVE_CPU_BUFFER_FORMAT_NV12:
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+static bool pyrowave_cpu_buffer_format_16bit(pyrowave_cpu_buffer_format format)
+{
+	return format > PYROWAVE_CPU_BUFFER_FORMAT_YUV444P;
 }
 
 pyrowave_result
-pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
-										const pyrowave_rate_control *rate_control)
+pyrowave_encoder_set_frame_context(pyrowave_encoder encoder, int context)
+{
+	if (context >= PYROWAVE_MAX_FRAME_CONTEXTS)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	encoder->context = context;
+
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_encoder_encode_cpu(pyrowave_encoder encoder, const pyrowave_cpu_buffer *buffers,
+                            const pyrowave_rate_control *rate_control)
 {
 	Util::set_thread_logging_interface(&null_logger);
 	int num_planes = buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_NV12 ? 2 : 3;
 	auto *device = encoder->device;
-	ImageHandle images[3];
+
+	auto &context = encoder->contexts[encoder->context];
 
 	// Validate some assumptions.
 	if (buffers->width != encoder->width || buffers->height != encoder->height)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (encoder->chroma == ChromaSubsampling::Chroma420 && buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
+	if (encoder->pyro_device->cmd)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
-	if (encoder->chroma == ChromaSubsampling::Chroma444 && buffers->format != PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
+
+	if (encoder->chroma == ChromaSubsampling::Chroma420 && !pyrowave_cpu_buffer_format_subsampled(buffers->format))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+	if (encoder->chroma == ChromaSubsampling::Chroma444 && pyrowave_cpu_buffer_format_subsampled(buffers->format))
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10 ||
+		buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10)
+	{
+		pyrowave_encoder_set_ycbcr_scaling_factor(encoder, float(0xffff) / float(0x3ff));
+	}
+	else
+	{
+		pyrowave_encoder_set_ycbcr_scaling_factor(encoder, 1.0f);
+	}
+
+	Util::register_thread_index(0);
 
 	for (int plane = 0; plane < num_planes; plane++)
 	{
@@ -1356,7 +1430,9 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			plane_height /= 2;
 		}
 
-		const size_t plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		size_t plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		if (pyrowave_cpu_buffer_format_16bit(buffers->format))
+			plane_bpp *= 2;
 
 		if (buffers->row_stride_in_bytes[plane] < plane_width * plane_bpp)
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
@@ -1364,18 +1440,29 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
 	}
 
+	auto &images = context.upload_images;
+
 	for (int plane = 0; plane < num_planes; plane++)
 	{
-		unsigned plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		if (images[plane])
+			continue;
 
-		const ImageInitialData initial = {
-			buffers->data[plane],
-			uint32_t(buffers->row_stride_in_bytes[plane] / plane_bpp)
-		};
+		unsigned plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		if (pyrowave_cpu_buffer_format_16bit(buffers->format))
+			plane_bpp *= 2;
 
 		auto info = ImageCreateInfo::immutable_2d_image(
 			buffers->width, buffers->height,
-			plane_bpp == 2 ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8_UNORM);
+			plane_bpp == 2 && num_planes == 2
+				? VK_FORMAT_R8G8_UNORM
+				: (plane_bpp == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM));
+
+		info.misc = IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_TRANSFER_BIT |
+		            IMAGE_MISC_CONCURRENT_QUEUE_GRAPHICS_BIT |
+		            IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_COMPUTE_BIT;
+
+		info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 
 		if (plane != 0 && encoder->chroma == ChromaSubsampling::Chroma420)
 		{
@@ -1383,10 +1470,31 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			info.height /= 2;
 		}
 
-		images[plane] = device->create_image(info, &initial);
+		images[plane] = device->create_image(info);
 		if (!images[plane])
 			return PYROWAVE_ERROR_OUT_OF_DEVICE_MEMORY;
 	}
+
+	if (context.upload_semaphore)
+	{
+		device->add_wait_semaphore(CommandBuffer::Type::AsyncTransfer,
+			std::move(context.upload_semaphore),
+			VK_PIPELINE_STAGE_2_COPY_BIT, true);
+		context.upload_semaphore = {};
+	}
+
+	auto cmd = device->request_command_buffer(CommandBuffer::Type::AsyncTransfer);
+	cmd->begin_barrier_batch();
+	for (auto &img : images)
+	{
+		if (!img)
+			continue;
+
+		cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		                   VK_PIPELINE_STAGE_2_COPY_BIT, 0,
+		                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+	}
+	cmd->end_barrier_batch();
 
 	pyrowave_gpu_buffers gpu_buffers = {};
 
@@ -1404,9 +1512,37 @@ pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder, const pyrowave
 			           ? images[plane]->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL)
 			           : images[1]->get_layout(VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL);
 		p.image = images[plane] ? images[plane]->get_image() : images[1]->get_image();
+
+		unsigned plane_bpp = num_planes == 2 && plane == 1 ? 2 : 1;
+		if (pyrowave_cpu_buffer_format_16bit(buffers->format))
+			plane_bpp *= 2;
+
+		if (plane < num_planes)
+		{
+			void *ptr = cmd->update_image(*images[plane], {}, { p.width, p.height, 1 },
+			                              buffers->row_stride_in_bytes[plane] / plane_bpp, 0,
+			                              { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
+			memcpy(ptr, buffers->data[plane], buffers->row_stride_in_bytes[plane] * p.height);
+		}
 	}
 
-	auto ret = pyrowave_encoder_encode_gpu_synchronous(encoder, nullptr, nullptr, &gpu_buffers, rate_control);
+	cmd->begin_barrier_batch();
+	for (auto &img : images)
+	{
+		if (!img)
+			continue;
+
+		cmd->image_barrier(*img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
+		                   VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		                   0, 0);
+	}
+	cmd->end_barrier_batch();
+
+	Semaphore sem;
+	device->submit(cmd, nullptr, 1, &sem);
+	device->add_wait_semaphore(encoder->pyro_device->queue_type, std::move(sem), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, true);
+
+	auto ret = pyrowave_encoder_encode_gpu(encoder, nullptr, nullptr, &gpu_buffers, rate_control);
 	return ret;
 }
 
@@ -1415,14 +1551,16 @@ pyrowave_encoder_compute_num_packets_with_padding(
 		pyrowave_encoder encoder, size_t packet_boundary, size_t padding_size, size_t *num_packets)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
 
-	if (!encoder->queued_meta)
+	auto &context = encoder->contexts[encoder->context];
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
 	// This isn't really a "map". It just returns the persistently mapped pointer.
-	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_meta = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
 	*num_packets = encoder->encoder.compute_num_packets(mapped_meta, packet_boundary, padding_size);
 	return PYROWAVE_SUCCESS;
 }
@@ -1439,18 +1577,20 @@ pyrowave_encoder_compute_num_critical_packets(
 {
 	Util::set_thread_logging_interface(&null_logger);
 
+	auto &context = encoder->contexts[encoder->context];
+
 	// Internal assertion.
 	if (bands < 0 || bands > 4)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
+	if (context.queued_fence)
+		context.queued_fence->wait();
 
-	if (!encoder->queued_meta)
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
 	// This isn't really a "map". It just returns the persistently mapped pointer.
-	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_meta = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
 	*num_packets = encoder->encoder.compute_num_critical_packets(bands, mapped_meta, packet_boundary, padding_size);
 	return PYROWAVE_SUCCESS;
 }
@@ -1461,14 +1601,17 @@ pyrowave_encoder_packetize_with_padding(
 		size_t *out_packets, void *bitstream, size_t size)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
 
-	if (!encoder->queued_meta || !encoder->queued_bitstream)
+	auto &context = encoder->contexts[encoder->context];
+
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta || !context.queued_bitstream)
 		return PYROWAVE_ERROR_GENERIC;
 
-	auto *mapped_meta = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
-	auto *mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_meta = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
+	auto *mapped_bitstream = encoder->device->map_host_buffer(*context.queued_bitstream, MEMORY_ACCESS_READ_BIT);
 
 	*out_packets = encoder->encoder.packetize(
 		reinterpret_cast<Encoder::Packet *>(packets), packet_boundary, bitstream,
@@ -1483,16 +1626,19 @@ pyrowave_encoder_get_mapped_raw_bitstream(
 		const void **mapped_metadata, size_t *mapped_metadata_size)
 {
 	Util::set_thread_logging_interface(&null_logger);
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
 
-	if (!encoder->queued_meta || !encoder->queued_bitstream)
+	auto &context = encoder->contexts[encoder->context];
+
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta || !context.queued_bitstream)
 		return PYROWAVE_ERROR_GENERIC;
 
-	*mapped_bitstream = encoder->device->map_host_buffer(*encoder->queued_bitstream, MEMORY_ACCESS_READ_BIT);
-	*mapped_metadata = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
-	*mapped_bitstream_size = encoder->queued_bitstream->get_create_info().size;
-	*mapped_metadata_size = encoder->queued_meta->get_create_info().size;
+	*mapped_bitstream = encoder->device->map_host_buffer(*context.queued_bitstream, MEMORY_ACCESS_READ_BIT);
+	*mapped_metadata = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
+	*mapped_bitstream_size = context.queued_bitstream->get_create_info().size;
+	*mapped_metadata_size = context.queued_meta->get_create_info().size;
 
 	return PYROWAVE_SUCCESS;
 }
@@ -1516,13 +1662,15 @@ pyrowave_encoder_compute_block_active_words(pyrowave_encoder encoder,
 	if (bands < 0 || bands > 4)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (encoder->queued_fence)
-		encoder->queued_fence->wait();
+	auto &context = encoder->contexts[encoder->context];
 
-	if (!encoder->queued_meta)
+	if (context.queued_fence)
+		context.queued_fence->wait();
+
+	if (!context.queued_meta)
 		return PYROWAVE_ERROR_GENERIC;
 
-	const void *mapped_metadata = encoder->device->map_host_buffer(*encoder->queued_meta, MEMORY_ACCESS_READ_BIT);
+	const void *mapped_metadata = encoder->device->map_host_buffer(*context.queued_meta, MEMORY_ACCESS_READ_BIT);
 	encoder->encoder.compute_block_active_words(bands, words, word_count, mapped_metadata);
 	return PYROWAVE_SUCCESS;
 }
@@ -1533,6 +1681,11 @@ pyrowave_encoder_packetize(pyrowave_encoder encoder, pyrowave_packet *packets, s
 {
 	return pyrowave_encoder_packetize_with_padding(
 			encoder, packets, packet_boundary, 0, out_packets, bitstream, size);
+}
+
+void pyrowave_encoder_set_ycbcr_scaling_factor(pyrowave_encoder encoder, float factor)
+{
+	encoder->ycbcr_scaling_factor = factor;
 }
 
 void pyrowave_encoder_destroy(pyrowave_encoder encoder)
@@ -1548,11 +1701,19 @@ struct pyrowave_decoder_opaque
 	Device *device = nullptr;
 	pyrowave_device pyro_device = nullptr;
 	Decoder decoder;
-	ImageHandle planes[3];
 	bool fragment_path = false;
 	ChromaSubsampling chroma = {};
 	int width = 0;
 	int height = 0;
+	float ycbcr_scaling_factor = 1.0f;
+
+	struct
+	{
+		BufferHandle readback_buffers[3];
+		ImageHandle planes[3];
+		Semaphore semaphore;
+		Fence fence;
+	} contexts[PYROWAVE_MAX_FRAME_CONTEXTS];
 };
 
 bool pyrowave_decoder_device_prefers_fragment_path(pyrowave_device device)
@@ -1632,6 +1793,11 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	if (decoder->pyro_device->cmd && (acquire || release))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
+	if (decoder->fragment_path && decoder->ycbcr_scaling_factor != 1.0f)
+		return PYROWAVE_ERROR_NOT_IMPLEMENTED;
+
+	Util::register_thread_index(0);
+
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
 	device->next_frame_context();
@@ -1639,6 +1805,7 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 	WrappedViewBuffers views = {};
 	if (!views.wrap(device, buffers, decoder->fragment_path ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_STORAGE_BIT))
 		return PYROWAVE_ERROR_OUT_OF_HOST_MEMORY;
+	views.range_scale = decoder->ycbcr_scaling_factor;
 
 	// Just use normal graphics queue here since the result will likely be consumed there.
 	auto cmd = decoder->pyro_device->cmd
@@ -1709,10 +1876,15 @@ pyrowave_decoder_decode_gpu_buffer(pyrowave_decoder decoder,
 }
 
 pyrowave_result
-pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers)
+pyrowave_decoder_decode_cpu_buffer_async(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context_index)
 {
 	if (decoder->pyro_device->cmd)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (context_index >= PYROWAVE_MAX_FRAME_CONTEXTS)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	Util::register_thread_index(0);
 
 	Util::set_thread_logging_interface(&null_logger);
 	auto *device = decoder->device;
@@ -1723,10 +1895,24 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	if (buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_NV12)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
 
-	if (decoder->chroma == ChromaSubsampling::Chroma420 && buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
+	if (decoder->chroma == ChromaSubsampling::Chroma420 && !pyrowave_cpu_buffer_format_subsampled(buffers->format))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
-	if (decoder->chroma == ChromaSubsampling::Chroma444 && buffers->format != PYROWAVE_CPU_BUFFER_FORMAT_YUV444P)
+	if (decoder->chroma == ChromaSubsampling::Chroma444 && pyrowave_cpu_buffer_format_subsampled(buffers->format))
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	if (buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_YUV420P10 ||
+	    buffers->format == PYROWAVE_CPU_BUFFER_FORMAT_YUV444P10)
+	{
+		pyrowave_decoder_set_ycbcr_scaling_factor(decoder, float(0x3ff) / float(0xffff));
+	}
+	else
+	{
+		pyrowave_decoder_set_ycbcr_scaling_factor(decoder, 1.0f);
+	}
+
+	const size_t plane_bpp = pyrowave_cpu_buffer_format_16bit(buffers->format) ? 2 : 1;
+
+	auto &context = decoder->contexts[context_index];
 
 	for (int plane = 0; plane < 3; plane++)
 	{
@@ -1739,8 +1925,6 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 			plane_height /= 2;
 		}
 
-		const size_t plane_bpp = 1;
-
 		if (buffers->row_stride_in_bytes[plane] < plane_width * plane_bpp)
 			return PYROWAVE_ERROR_INVALID_ARGUMENT;
 		if (buffers->row_stride_in_bytes[plane] * plane_height > buffers->plane_size_in_bytes[plane])
@@ -1749,22 +1933,30 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 
 	for (int plane = 0; plane < 3; plane++)
 	{
-		auto &img = decoder->planes[plane];
+		auto &img = context.planes[plane];
 
 		if (!img)
 		{
-			auto info = ImageCreateInfo::immutable_2d_image(buffers->width, buffers->height, VK_FORMAT_R8_UNORM);
+			auto info = ImageCreateInfo::immutable_2d_image(buffers->width, buffers->height,
+					plane_bpp == 2 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM);
 			info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 			if (decoder->fragment_path)
 			{
 				info.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+				info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 			}
 			else
 			{
 				info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
-				info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
 				info.layout = ImageLayout::General;
+				info.initial_layout = VK_IMAGE_LAYOUT_GENERAL;
 			}
+
+			info.misc |= IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_TRANSFER_BIT;
+			if (decoder->pyro_device->queue_type == CommandBuffer::Type::Generic)
+				info.misc |= IMAGE_MISC_CONCURRENT_QUEUE_GRAPHICS_BIT;
+			else
+				info.misc |= IMAGE_MISC_CONCURRENT_QUEUE_ASYNC_COMPUTE_BIT;
 
 			if (plane != 0 && decoder->chroma == ChromaSubsampling::Chroma420)
 			{
@@ -1778,16 +1970,28 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 		}
 	}
 
+	if (context.semaphore)
+	{
+		device->add_wait_semaphore(decoder->pyro_device->queue_type, std::move(context.semaphore),
+		                           decoder->fragment_path
+			                           ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+			                           : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, true);
+		context.semaphore = {};
+	}
+
 	if (decoder->fragment_path)
 	{
 		auto cmd = device->request_command_buffer(decoder->pyro_device->queue_type);
 		cmd->begin_barrier_batch();
-		for (auto &img : decoder->planes)
+
+		for (auto &img : context.planes)
 		{
 			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-				VK_PIPELINE_STAGE_2_COPY_BIT, 0, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR,
-				VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+			                   VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+			                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR,
+			                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 		}
+
 		cmd->end_barrier_batch();
 
 		// This just queues up a command buffer, flush only happens when sync objects are signaled.
@@ -1798,10 +2002,10 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	for (int plane = 0; plane < 3; plane++)
 	{
 		auto &p = gpu_buffers.planes[plane];
-		p.image = decoder->planes[plane]->get_image();
-		p.width = decoder->planes[plane]->get_width();
-		p.height = decoder->planes[plane]->get_height();
-		p.image_format = decoder->planes[plane]->get_format();
+		p.image = context.planes[plane]->get_image();
+		p.width = context.planes[plane]->get_width();
+		p.height = context.planes[plane]->get_height();
+		p.image_format = context.planes[plane]->get_format();
 		p.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 		p.swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
 		p.view_format = p.image_format;
@@ -1809,7 +2013,6 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	}
 
 	BufferCreateInfo bufinfo = {};
-	BufferHandle readback_buffers[3];
 
 	auto res = pyrowave_decoder_decode_gpu_buffer(decoder, nullptr, nullptr, &gpu_buffers);
 	if (res != PYROWAVE_SUCCESS)
@@ -1820,7 +2023,7 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 	if (decoder->fragment_path)
 	{
 		cmd->begin_barrier_batch();
-		for (auto &img : decoder->planes)
+		for (auto &img : context.planes)
 		{
 			cmd->image_barrier(*img, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -1834,33 +2037,71 @@ pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const p
 		             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
 	}
 
+	Semaphore sem;
+	device->submit(cmd, nullptr, 1, &sem);
+	device->add_wait_semaphore(CommandBuffer::Type::AsyncTransfer, std::move(sem), VK_PIPELINE_STAGE_2_COPY_BIT, true);
+	cmd = device->request_command_buffer(CommandBuffer::Type::AsyncTransfer);
+
 	for (int plane = 0; plane < 3; plane++)
 	{
 		bufinfo.size = buffers->plane_size_in_bytes[plane];
 		bufinfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 		bufinfo.domain = BufferDomain::CachedHost;
-		readback_buffers[plane] = device->create_buffer(bufinfo);
 
-		cmd->copy_image_to_buffer(*readback_buffers[plane], *decoder->planes[plane], 0, {},
-		                          {decoder->planes[plane]->get_width(), decoder->planes[plane]->get_height(), 1},
-		                          buffers->row_stride_in_bytes[plane], 0,
-		                          {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+		if (!context.readback_buffers[plane] || context.readback_buffers[plane]->get_create_info().size < bufinfo.size)
+			context.readback_buffers[plane] = device->create_buffer(bufinfo);
+
+		cmd->copy_image_to_buffer(*context.readback_buffers[plane], *context.planes[plane], 0, {},
+		                          { context.planes[plane]->get_width(), context.planes[plane]->get_height(), 1 },
+		                          buffers->row_stride_in_bytes[plane] / plane_bpp, 0,
+		                          { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 });
 	}
 
 	cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
 	             VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
 
-	Fence fence;
-	device->submit(cmd, &fence);
-	fence->wait();
+	context.fence.reset();
+	context.semaphore.reset();
+	device->submit(cmd, &context.fence, 1, &context.semaphore);
+
+	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_complete(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers, int context_index)
+{
+	if (context_index >= PYROWAVE_MAX_FRAME_CONTEXTS)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto &context = decoder->contexts[context_index];
+
+	if (!context.fence)
+		return PYROWAVE_ERROR_INVALID_ARGUMENT;
+
+	auto *device = decoder->device;
+	context.fence->wait();
 
 	for (int plane = 0; plane < 3; plane++)
 	{
-		void *mapped = device->map_host_buffer(*readback_buffers[plane], MEMORY_ACCESS_READ_BIT);
+		void *mapped = device->map_host_buffer(*context.readback_buffers[plane], MEMORY_ACCESS_READ_BIT);
 		memcpy(buffers->data[plane], mapped, buffers->plane_size_in_bytes[plane]);
 	}
 
 	return PYROWAVE_SUCCESS;
+}
+
+pyrowave_result
+pyrowave_decoder_decode_cpu_buffer_synchronous(pyrowave_decoder decoder, const pyrowave_cpu_buffer *buffers)
+{
+	auto result = pyrowave_decoder_decode_cpu_buffer_async(decoder, buffers, 0);
+	if (result != PYROWAVE_SUCCESS)
+		return result;
+	return pyrowave_decoder_decode_cpu_buffer_complete(decoder, buffers, 0);
+}
+
+void pyrowave_decoder_set_ycbcr_scaling_factor(pyrowave_decoder decoder, float factor)
+{
+	decoder->ycbcr_scaling_factor = factor;
 }
 
 void pyrowave_decoder_destroy(pyrowave_decoder decoder)

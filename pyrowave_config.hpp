@@ -11,7 +11,8 @@ namespace PyroWave
 {
 struct ViewBuffers
 {
-	const Vulkan::ImageView *planes[3];
+	const Vulkan::ImageView *planes[3] = {};
+	float range_scale = 1.0f; // For encode. Used to scale e.g. yuv420p10 into full unorm range. Decoder, the inverse.
 };
 
 enum class ChromaSubsampling
