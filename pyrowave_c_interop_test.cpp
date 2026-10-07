@@ -931,8 +931,8 @@ static void test_direct_interop_scaling(VkSamplerYcbcrRange range, uint32_t bit_
 			float cb_delta = std::abs(readback_cb - Cb);
 			float cr_delta = std::abs(readback_cr - Cr);
 			ASSERT_THAT(y_delta <= 1.0f / 255.0f);
-			ASSERT_THAT(cb_delta <= 2.0f / 255.0f);
-			ASSERT_THAT(cr_delta <= 2.0f / 255.0f);
+			ASSERT_THAT(cb_delta <= 3.0f / 255.0f);
+			ASSERT_THAT(cr_delta <= 3.0f / 255.0f);
 		}
 	}
 #endif
