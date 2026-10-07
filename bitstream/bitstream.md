@@ -561,11 +561,10 @@ This format is not required if this information is signaled by other means.
 
 ### Base header
 
-- 4 bytes, storing the ascii string: "PWV1", marking v1 of PyroWave bitstream.
-
 ```
 struct PWV1Header
 {
+    uint32_t magic; // Stores the ascii string "PWV1", packed as first letter in low-bits, etc. Can be used for endian-rejection.
     BitstreamSequenceHeader pyro;
     uint32_t frame_rate_num;
     uint32_t frame_rate_den;
@@ -575,18 +574,22 @@ struct PWV1Header
 };
 ```
 
-- PWV1Header. All fields have semantic meaning, except for these fields, which are reserved, and must be 0.
-  - `pyro.sequence`
-  - `pyro.extended`
-  - `pyro.total_blocks`
-  - `pyro.code`
+All fields have semantic meaning, except for these fields, which are reserved, and must be 0:
+
+- `pyro.sequence`
+- `pyro.extended`
+- `pyro.total_blocks`
+- `pyro.code`
 
 #### `reference_bit_depth`
 
 When working with normal YCbCr video, samples have a specific bit-depth
-  and the bit-depth subtly affects how YCbCr conversion to and from RGB should be done
-  and exact scaling factors for limited range, etc.
-  Can be 0, 8, 10, 12, 14 or 16. If 0, "arbitrary precision" is assumed.
+and the bit-depth subtly affects how YCbCr conversion to and from RGB should be done
+and exact scaling factors for limited range, etc.
+Can be 0, 8, 10, or 16. If 0, "arbitrary precision" is assumed.
+16 bits is there mostly since it's the "native" format for `R16_UNORM`.
+This is not a highly professional codec where 16 bits of precision can reliably be retained.
+10-bit is provided for convenient HDR10 use.
 
 #### `header_version`
 

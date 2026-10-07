@@ -222,6 +222,8 @@ private:
 
 struct PWV1Header
 {
+	enum { Magic = ('P' << 0) | ('W' << 8) | ('V' << 16) | ('1' << 24) };
+	uint32_t magic;
 	BitstreamSequenceHeader pyro;
 	uint32_t frame_rate_num;
 	uint32_t frame_rate_den;

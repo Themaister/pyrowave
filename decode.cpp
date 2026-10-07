@@ -168,24 +168,17 @@ static void run_decoder(Device &device, const char *out_path, const char *in_pat
 		return;
 	}
 
-	char magic[5] = {};
-	if (fread(magic, 1, 4, infile.get()) != 4)
-	{
-		LOGE("Failed to read magic.\n");
-		return;
-	}
-
-	if (strcmp(magic, "PWV1") != 0)
-	{
-		LOGE("Invalid magic.\n");
-		return;
-	}
-
 	PyroWave::PWV1Header header = {};
 
 	if (fread(&header, sizeof(header), 1, infile.get()) != 1)
 	{
 		LOGE("Failed to read parameters.\n");
+		return;
+	}
+
+	if (header.magic != PyroWave::PWV1Header::Magic)
+	{
+		LOGE("Invalid magic.\n");
 		return;
 	}
 

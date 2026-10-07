@@ -142,13 +142,7 @@ static void run_encoder(Device &device, const char *out_path, const char *in_pat
 		return;
 	}
 
-	if (fwrite("PWV1", 1, 4, out.get()) != 4)
-	{
-		LOGE("Failed to write magic.\n");
-		return;
-	}
-
-	PyroWave::PWV1Header header = {};
+	PyroWave::PWV1Header header = { PyroWave::PWV1Header::Magic };
 
 	header.pyro.width_minus_1 = input.get_width() - 1;
 	header.pyro.height_minus_1 = input.get_height() - 1;
