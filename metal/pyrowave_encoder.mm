@@ -1166,9 +1166,9 @@ void pyrowave_encoder_destroy(pyrowave_encoder encoder)
 	delete encoder;
 }
 
-pyrowave_result pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                                        const pyrowave_gpu_input *input,
-                                                        const pyrowave_rate_control *rate_control)
+pyrowave_result pyrowave_encoder_encode_gpu(pyrowave_encoder encoder,
+                                            const pyrowave_gpu_input *input,
+                                            const pyrowave_rate_control *rate_control)
 {
 	if (!encoder || !input || !rate_control)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
@@ -1184,9 +1184,9 @@ pyrowave_result pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder
 	return encode_frame(encoder, wrapped.sampled, rate_control);
 }
 
-pyrowave_result pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder,
-                                                        const pyrowave_cpu_buffer *input,
-                                                        const pyrowave_rate_control *rate_control)
+pyrowave_result pyrowave_encoder_encode_cpu(pyrowave_encoder encoder,
+                                            const pyrowave_cpu_buffer *input,
+                                            const pyrowave_rate_control *rate_control)
 {
 	if (!encoder || !input || !rate_control)
 		return PYROWAVE_ERROR_INVALID_ARGUMENT;
