@@ -670,7 +670,7 @@ static void test_basic_system_stability(bool realtime_prio)
 
 	if (realtime_prio)
 	{
-		CHECKED(pyrowave_create_device_by_compat2(0, 0, nullptr, nullptr, nullptr,
+		CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr,
 			VK_QUEUE_GLOBAL_PRIORITY_REALTIME, &device));
 	}
 	else

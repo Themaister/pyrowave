@@ -72,6 +72,7 @@ typedef struct pyrowave_image_opaque *pyrowave_image;
 PYROWAVE_PUBLIC_API void pyrowave_get_api_version(uint32_t *major, uint32_t *minor, uint32_t *patch);
 
 // Device API.
+// For more advanced usage, see pyrowave_create_device_by_compat.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_default_device(pyrowave_device *device);
 
 typedef struct pyrowave_device_create_queue_info
@@ -151,17 +152,7 @@ typedef struct pyrowave_luid
 PYROWAVE_PUBLIC_API pyrowave_result
 pyrowave_create_device(const pyrowave_device_create_info *info, pyrowave_device *device);
 
-// On Windows, LUID is generally used, but other OS-es may need device_uuid/driver_uuid.
 PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat(
-	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
-	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
-	uint32_t vid, uint32_t pid,
-	const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
-	const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
-	const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
-	pyrowave_device *device);
-
-PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat2(
 	// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
 	// Risks picking the wrong device if there are multiple ICDs for the same GPU.
 	uint32_t vid, uint32_t pid,
@@ -171,6 +162,7 @@ PYROWAVE_PUBLIC_API pyrowave_result pyrowave_create_device_by_compat2(
 	// Intended to request HIGH or REALTIME global queue priorities.
 	// Only affects the compute queue. If HIGH or REALTIME is used,
 	// the device is automatically set to use async compute queues as per pyrowave_device_set_queue_type.
+	// If unsure, use VK_QUEUE_GLOBAL_PRIORITY_MEDIUM.
 	VkQueueGlobalPriority global_priority,
 	pyrowave_device *device);
 

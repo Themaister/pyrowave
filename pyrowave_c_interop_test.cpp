@@ -53,7 +53,7 @@ static pyrowave_device create_device_from_granite(Device &device)
 	pyrowave_device pyro_device;
 	CHECKED(pyrowave_create_device_by_compat(device.get_gpu_properties().vendorID,
 		device.get_gpu_properties().deviceID, &device_uuid, &driver_uuid,
-		ids.deviceLUIDValid ? &device_luid : nullptr, &pyro_device));
+		ids.deviceLUIDValid ? &device_luid : nullptr, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &pyro_device));
 
 	return pyro_device;
 }
@@ -1552,7 +1552,7 @@ static void test_d3d11_interop()
 
 	pyrowave_device pyro_device;
 	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
-		reinterpret_cast<pyrowave_luid *>(&luid), &pyro_device));
+		reinterpret_cast<pyrowave_luid *>(&luid), VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &pyro_device));
 
 	for (int i = 0; i < 10000; i++)
 	{
@@ -2008,7 +2008,7 @@ static void test_d3d12_interop()
 
 	pyrowave_device pyro_device;
 	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
-		reinterpret_cast<pyrowave_luid *>(&luid), &pyro_device));
+		reinterpret_cast<pyrowave_luid *>(&luid), VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &pyro_device));
 
 	test_d3d12_interop_allocation_stress(device.get(), pyro_device);
 
@@ -2344,7 +2344,8 @@ static void test_child_interop()
 	ASSERT_THAT(shared);
 
 	pyrowave_device device;
-	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, reinterpret_cast<const pyrowave_luid *>(&shared->luid), &device));
+	CHECKED(pyrowave_create_device_by_compat(0, 0, nullptr, nullptr,
+	        reinterpret_cast<const pyrowave_luid *>(&shared->luid), VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &device));
 
 	pyrowave_image img[3] = {};
 	pyrowave_sync_object sync = {};

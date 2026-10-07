@@ -57,7 +57,7 @@ VkQueueGlobalPriority pyrowave_device_get_global_priority(pyrowave_device device
 	return device->device.get_device_features().global_compute_priority;
 }
 
-pyrowave_result pyrowave_create_device_by_compat2(
+pyrowave_result pyrowave_create_device_by_compat(
 		// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
 		// Risks picking the wrong device if there are multiple ICDs for the same GPU.
 		uint32_t vid, uint32_t pid,
@@ -165,22 +165,9 @@ pyrowave_result pyrowave_create_device_by_compat2(
 	return PYROWAVE_SUCCESS;
 }
 
-pyrowave_result pyrowave_create_device_by_compat(
-		// If non-zero, needs to match VkPhysicalDeviceProperties::vendorID/deviceID.
-		// Risks picking the wrong device if there are multiple ICDs for the same GPU.
-		uint32_t vid, uint32_t pid,
-		const pyrowave_uuid *device_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceUUID
-		const pyrowave_uuid *driver_uuid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::driverUUID
-		const pyrowave_luid *device_luid, // If non-NULL, needs to match VkPhysicalDeviceIDProperties::deviceLUID
-		pyrowave_device *device)
-{
-	return pyrowave_create_device_by_compat2(vid, pid, device_uuid, driver_uuid, device_luid,
-	                                         VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, device);
-}
-
 pyrowave_result pyrowave_create_default_device(pyrowave_device *device)
 {
-	return pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr, device);
+	return pyrowave_create_device_by_compat(0, 0, nullptr, nullptr, nullptr, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, device);
 }
 
 static std::mutex global_device_lock;

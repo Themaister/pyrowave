@@ -216,7 +216,7 @@ int main(int argc, char **argv)
 	{
 		pyrowave_device device;
 		auto ret = pyrowave_create_device_by_compat(
-			vid, pid, nullptr, nullptr, use_luid ? &luid : nullptr, &device);
+			vid, pid, nullptr, nullptr, use_luid ? &luid : nullptr, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM, &device);
 
 		if (ret != PYROWAVE_SUCCESS)
 			return EXIT_CODE_NO_VULKAN_DEVICE;
