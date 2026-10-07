@@ -712,10 +712,6 @@ static void test_direct_interop_scaling(VkSamplerYcbcrRange range, uint32_t bit_
 	Device device;
 	device.set_context(ctx);
 
-	bool has_rdoc = Device::init_renderdoc_capture();
-	if (has_rdoc)
-		device.begin_renderdoc_capture();
-
 	// Fill in a proxy instance create info.
 	VkInstanceCreateInfo instance_create_info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 	instance_create_info.enabledExtensionCount = device.get_device_features().num_instance_extensions;
@@ -944,9 +940,6 @@ static void test_direct_interop_scaling(VkSamplerYcbcrRange range, uint32_t bit_
 	pyrowave_encoder_destroy(encoder);
 	pyrowave_decoder_destroy(decoder);
 	pyrowave_device_destroy(pyro_device);
-
-	if (has_rdoc)
-		device.end_renderdoc_capture();
 }
 
 // Most basic interop scenario, OPAQUE_FD for everything.
