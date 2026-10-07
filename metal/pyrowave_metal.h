@@ -23,10 +23,8 @@ extern "C" {
 #include <stdbool.h>
 #endif
 
-// API and ABI is not considered stable until MAJOR version hits 1!
-
-#define PYROWAVE_API_VERSION_MAJOR 0
-#define PYROWAVE_API_VERSION_MINOR 6
+#define PYROWAVE_API_VERSION_MAJOR 1
+#define PYROWAVE_API_VERSION_MINOR 0
 #define PYROWAVE_API_VERSION_PATCH 0
 
 #if !defined(PYROWAVE_PUBLIC_API)
@@ -196,14 +194,14 @@ pyrowave_encoder_destroy(pyrowave_encoder encoder);
 // the previous frame's result. The bitstream carries a small sequence counter so
 // the decoder can track frame ordering.
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_gpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_gpu_input *input,
-                                        const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_gpu(pyrowave_encoder encoder,
+                            const pyrowave_gpu_input *input,
+                            const pyrowave_rate_control *rate_control);
 
 PYROWAVE_PUBLIC_API pyrowave_result
-pyrowave_encoder_encode_cpu_synchronous(pyrowave_encoder encoder,
-                                        const pyrowave_cpu_buffer *input,
-                                        const pyrowave_rate_control *rate_control);
+pyrowave_encoder_encode_cpu(pyrowave_encoder encoder,
+                            const pyrowave_cpu_buffer *input,
+                            const pyrowave_rate_control *rate_control);
 
 // Only valid after a successful encode, and only for that frame. Reports how many
 // packets the frame needs if each may carry at most packet_boundary bytes.
