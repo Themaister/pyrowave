@@ -603,3 +603,7 @@ with no temporal relation to each other.
 For every encoded frame, a u32 size element is encoded, followed by that many bytes of data which
 contains a start of frame header followed by 32x32 blocks packed together to form a frame.
 
+### Global header format
+
+For containers like MKV where a global header is stored once, that global header should be just the `PWV1Header`, without leading "PWV1" bytes.
+
