@@ -509,7 +509,7 @@ typedef struct pyrowave_scaled_encode_info
 	// HDR10 is *not* tonemapped.
 	VkColorSpaceKHR output_color_space;
 
-	// YCbCr transform is always full-range, center chroma siting.
+	// YCbCr transform is full-range unless ycbcr_range says otherwise, center chroma siting.
 	// If output color space is HDR10_ST2084, BT.2020 NCL transform is used,
 	// otherwise, BT.701 coefficients are used.
 
@@ -536,6 +536,15 @@ typedef struct pyrowave_scaled_encode_info
 
 	// Optional.
 	const VkRect2D *crop_rect;
+
+	// YCbCr range of the output planes. Zero is VK_SAMPLER_YCBCR_RANGE_ITU_FULL.
+	// VK_SAMPLER_YCBCR_RANGE_ITU_NARROW produces H.273 narrow range (e.g. 16..235 luma at 8-bit),
+	// normalized like ycbcr_chroma_midpoint; pick the midpoint that matches (e.g. 128.0 / 255.0).
+	// Only applies to RGB(A) input. NV12 input is scaled without color conversion, so its range is kept.
+	VkSamplerYcbcrRange ycbcr_range;
+
+	// Bit depth whose narrow range code values are used. 0 means 8. Must be 8 to 16 for narrow range.
+	uint32_t ycbcr_range_bit_depth;
 } pyrowave_scaled_encode_info;
 
 PYROWAVE_PUBLIC_API pyrowave_result

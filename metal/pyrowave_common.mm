@@ -12,6 +12,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 namespace PyroWave
 {
@@ -22,6 +23,14 @@ int requested_precision()
 		return DefaultPrecision;
 	int precision = atoi(env);
 	return (precision < 0 || precision > 2) ? DefaultPrecision : precision;
+}
+
+// Off by default: collection costs a pair of driver clock reads and a couple of
+// small allocations per submission.
+static bool timestamps_enabled_by_default()
+{
+	const char *env = getenv("PYROWAVE_TIMESTAMPS");
+	return env && *env && strcmp(env, "0") != 0;
 }
 
 MTLPixelFormat wavelet_format(int precision)
@@ -113,6 +122,217 @@ id<MTLComputePipelineState> create_pipeline_bool_constant(pyrowave_device device
 	return create_pipeline(device, library, entry_point, required_threads, constants);
 }
 
+//////
+// GPU timing
+
+TimestampBatch::TimestampBatch(std::shared_ptr<DeviceTimestamps> owner_)
+	: owner(std::move(owner_))
+{
+}
+
+id<MTLCounterSampleBuffer> TimestampBatch::add_pass(const char *tag)
+{
+	auto buffer = owner->acquire_sample_buffer();
+	if (buffer)
+		passes.push_back({ buffer, tag });
+	return buffer;
+}
+
+void TimestampBatch::submit(id<MTLCommandBuffer> cmd)
+{
+	if (passes.empty())
+		return;
+
+	// The block owns the batch, so resolving does not depend on the caller, the
+	// encoder or the device still existing when the GPU lands.
+	auto self = shared_from_this();
+	[cmd addCompletedHandler:^(id<MTLCommandBuffer>) { self->resolve(); }];
+}
+
+void TimestampBatch::resolve()
+{
+	MTLTimestamp cpu_end = 0, gpu_end = 0;
+	owner->sample_correlation(&cpu_end, &gpu_end);
+
+	// CPU timestamps are nanoseconds, GPU ticks have no documented unit, so scale
+	// by the ratio across this submission. A degenerate window assumes nanoseconds.
+	double seconds_per_tick = 1e-9;
+	if (gpu_end > gpu_begin && cpu_end > cpu_begin)
+		seconds_per_tick = double(cpu_end - cpu_begin) / (double(gpu_end - gpu_begin) * 1e9);
+
+	for (auto &pass : passes)
+	{
+		// resolveCounterRange: returns autoreleased data, on a Metal thread.
+		@autoreleasepool
+		{
+			NSData *data = [pass.buffer resolveCounterRange:NSMakeRange(0, 2)];
+			if (data && data.length >= 2 * sizeof(MTLCounterResultTimestamp))
+			{
+				auto *samples = static_cast<const MTLCounterResultTimestamp *>(data.bytes);
+				// MTLCounterErrorValue marks a sample the GPU never wrote.
+				if (samples[0].timestamp != MTLCounterErrorValue &&
+				    samples[1].timestamp != MTLCounterErrorValue &&
+				    samples[1].timestamp >= samples[0].timestamp)
+				{
+					owner->accumulate(pass.tag,
+					                  double(samples[1].timestamp - samples[0].timestamp) * seconds_per_tick);
+				}
+			}
+		}
+
+		owner->recycle_sample_buffer(pass.buffer);
+	}
+
+	passes.clear();
+}
+
+DeviceTimestamps::DeviceTimestamps(id<MTLDevice> mtl_)
+	: mtl(mtl_), enabled(timestamps_enabled_by_default())
+{
+	// Without pass boundary sampling there is nothing to attach a buffer to.
+	if (![mtl supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary])
+		return;
+
+	for (id<MTLCounterSet> set in mtl.counterSets)
+	{
+		if ([set.name isEqualToString:MTLCommonCounterSetTimestamp])
+		{
+			counter_set = set;
+			break;
+		}
+	}
+}
+
+id<MTLCounterSampleBuffer> DeviceTimestamps::acquire_sample_buffer()
+{
+	if (!counter_set)
+		return nil;
+
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		if (!pool.empty())
+		{
+			auto buffer = pool.back();
+			pool.pop_back();
+			return buffer;
+		}
+	}
+
+	auto *desc = [MTLCounterSampleBufferDescriptor new];
+	desc.counterSet = counter_set;
+	desc.storageMode = MTLStorageModeShared;
+	desc.sampleCount = 2;
+
+	NSError *error = nil;
+	// Failure is not fatal: that one pass goes untimed.
+	return [mtl newCounterSampleBufferWithDescriptor:desc error:&error];
+}
+
+void DeviceTimestamps::recycle_sample_buffer(id<MTLCounterSampleBuffer> buffer)
+{
+	std::lock_guard<std::mutex> holder{lock};
+	pool.push_back(buffer);
+}
+
+void DeviceTimestamps::sample_correlation(MTLTimestamp *cpu, MTLTimestamp *gpu) const
+{
+	[mtl sampleTimestamps:cpu gpuTimestamp:gpu];
+}
+
+std::shared_ptr<TimestampBatch> DeviceTimestamps::begin_batch()
+{
+	if (!collecting() || !counter_set)
+		return nullptr;
+
+	auto batch = std::make_shared<TimestampBatch>(shared_from_this());
+	sample_correlation(&batch->cpu_begin, &batch->gpu_begin);
+	return batch;
+}
+
+void DeviceTimestamps::accumulate(const char *tag, double seconds)
+{
+	std::lock_guard<std::mutex> holder{lock};
+	auto &entry = entries[tag];
+	entry.total_time += seconds;
+	entry.iterations++;
+}
+
+void DeviceTimestamps::report(pyrowave_message_cb cb, void *userdata, bool reset)
+{
+	// Snapshot, so the callback does not run under the lock.
+	std::map<std::string, Entry> snapshot;
+	{
+		std::lock_guard<std::mutex> holder{lock};
+		snapshot = entries;
+		if (reset)
+			entries.clear();
+	}
+
+	// Arm collection, so polling this alone works without PYROWAVE_TIMESTAMPS.
+	const bool was_collecting = enabled.exchange(true, std::memory_order_relaxed);
+
+	for (auto &entry : snapshot)
+	{
+		char msg[256];
+		snprintf(msg, sizeof(msg), "%s: %.3f ms per iteration (%llu iterations)",
+		         entry.first.c_str(),
+		         1e3 * entry.second.total_time / double(entry.second.iterations),
+		         static_cast<unsigned long long>(entry.second.iterations));
+		cb(userdata, msg);
+	}
+
+	if (snapshot.empty())
+	{
+		cb(userdata, was_collecting ?
+		             "No GPU timings have been collected yet." :
+		             "GPU timing was off. It is now on; figures appear after the next "
+		             "encode or decode completes.");
+	}
+}
+
+id<MTLComputeCommandEncoder> begin_compute_pass(id<MTLCommandBuffer> cmd, MTLDispatchType dispatch_type,
+                                                TimestampBatch *batch, const char *tag)
+{
+	if (batch)
+	{
+		if (auto sample_buffer = batch->add_pass(tag))
+		{
+			// Owned, not autoreleased: no encode or decode path has a pool.
+			auto *desc = [MTLComputePassDescriptor new];
+			desc.dispatchType = dispatch_type;
+
+			auto *attachment = desc.sampleBufferAttachments[0];
+			attachment.sampleBuffer = sample_buffer;
+			attachment.startOfEncoderSampleIndex = 0;
+			attachment.endOfEncoderSampleIndex = 1;
+
+			return [cmd computeCommandEncoderWithDescriptor:desc];
+		}
+	}
+
+	return [cmd computeCommandEncoderWithDispatchType:dispatch_type];
+}
+
+id<MTLBlitCommandEncoder> begin_blit_pass(id<MTLCommandBuffer> cmd, TimestampBatch *batch, const char *tag)
+{
+	if (batch)
+	{
+		if (auto sample_buffer = batch->add_pass(tag))
+		{
+			auto *desc = [MTLBlitPassDescriptor new];
+
+			auto *attachment = desc.sampleBufferAttachments[0];
+			attachment.sampleBuffer = sample_buffer;
+			attachment.startOfEncoderSampleIndex = 0;
+			attachment.endOfEncoderSampleIndex = 1;
+
+			return [cmd blitCommandEncoderWithDescriptor:desc];
+		}
+	}
+
+	return [cmd blitCommandEncoder];
+}
+
 bool WaveletPyramid::init(pyrowave_device device, const BlockLayout &layout)
 {
 	const MTLPixelFormat format = wavelet_format(device->precision);
@@ -185,18 +405,20 @@ void pyrowave_device_opaque::log(const char *fmt, ...) const
 
 namespace
 {
+// Lets a NULL callback fall back to the device's message sink.
+void log_to_device(void *userdata, const char *msg)
+{
+	static_cast<pyrowave_device>(userdata)->log("%s", msg);
+}
+
 bool device_is_supported(id<MTLDevice> mtl)
 {
 	if (!mtl)
 		return false;
 	// Apple7 (M1 / A14) and up. This guarantees a 32 wide SIMD group, which the
 	// dequant shader's subgroup fast path depends on.
-    if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, *)) {
-        if (![mtl supportsFamily:MTLGPUFamilyApple7])
-            return false;
-    } else {
-        return false;
-    }
+	if (![mtl supportsFamily:MTLGPUFamilyApple7])
+		return false;
 	if (mtl.maxThreadsPerThreadgroup.width < AnalyzeFinalizeThreadgroupSize)
 		return false;
 	return true;
@@ -253,6 +475,7 @@ pyrowave_result pyrowave_device_create(const pyrowave_device_create_info *info, 
 		created->message_userdata = info->message_userdata;
 		created->mtl = mtl;
 		created->precision = requested_precision();
+		created->timestamps = std::make_shared<DeviceTimestamps>(mtl);
 
 		id<MTLLibrary> dequant_library =
 				compile_library(created.get(), wavelet_dequant_msl_source, "wavelet_dequant");
@@ -308,6 +531,39 @@ pyrowave_result pyrowave_device_create(const pyrowave_device_create_info *info, 
 
 		*device = created.release();
 		return PYROWAVE_SUCCESS;
+	}
+}
+
+void pyrowave_device_report_performance_stats(pyrowave_device device, pyrowave_message_cb cb, void *userdata, bool reset)
+{
+	if (!device)
+		return;
+
+	if (!cb)
+	{
+		cb = log_to_device;
+		userdata = device;
+	}
+
+	device->timestamps->report(cb, userdata, reset);
+
+	if (!device->timestamps->counters_supported())
+		cb(userdata, "GPU pass timestamps are not supported by this device.");
+
+	@autoreleasepool
+	{
+		// Metal has no per heap budget like VK_EXT_memory_budget, only this
+		// process's allocation total against the recommended working set.
+		if (@available(macOS 10.15, iOS 16.0, tvOS 16.0, *))
+		{
+			char msg[256];
+			snprintf(msg, sizeof(msg),
+			         "Memory (%s): CurrentAllocated %.3f MiB, RecommendedMaxWorkingSet %.3f MiB",
+			         device->mtl.hasUnifiedMemory ? "unified" : "discrete",
+			         double(device->mtl.currentAllocatedSize) / (1024.0 * 1024.0),
+			         double(device->mtl.recommendedMaxWorkingSetSize) / (1024.0 * 1024.0));
+			cb(userdata, msg);
+		}
 	}
 }
 
