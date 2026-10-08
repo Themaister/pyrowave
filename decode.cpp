@@ -215,7 +215,7 @@ static void run_decoder(Device &device, const char *out_path, const char *in_pat
 
 	if (!output.open_write(out_path, params))
 	{
-		LOGE("Failed to open input file.\n");
+		LOGE("Failed to open output file.\n");
 		return;
 	}
 
@@ -286,7 +286,7 @@ int main(int argc, char **argv)
 {
 	if (argc != 3)
 	{
-		LOGE("Usage: pyrowave-encode <input.pwv1> <output.y4m>\n");
+		LOGE("Usage: pyrowave-decode <input.pwv1> <output.y4m>\n");
 		return EXIT_FAILURE;
 	}
 
