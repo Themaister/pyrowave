@@ -41,7 +41,7 @@ layout(set = 0, binding = 3) uniform mediump texture2D uCbCrEven;
 layout(set = 0, binding = 4) uniform mediump texture2D uCbCrOdd;
 #endif
 
-// Direct and naive implementing of the CDF 9/7 synthesis filters.
+// Direct and naive implementation of the CDF 9/7 synthesis filters.
 // Optimized for the mobile GPUs which don't have any
 // competent compute/shared memory performance whatsoever,
 // i.e. anything not AMD/NV/Intel.
@@ -149,11 +149,14 @@ void main()
 	{
 		// The mirroring rules are particular.
 		// For odd inputs we can rely on the mirrored sampling to get intended behavior.
-		if (vIntCoord < 1.0)
+		// Both the first even and odd output will end up reading the same edge condition.
+		// Do not fixup Y[0] = Y[8] since Y[0] ends up being unread here by the filter anyway.
+		// LP reads Y[1..7] and HP synthesis reads Y[1..9].
+		if (vIntCoord < 2.0)
 		{
 			// Y4 is the pivot.
 			Y[2] = Y[6];
-#if INPUT_SAMPLES > 1
+#if INPUT_PLANES > 1
 			CbCr[2] = CbCr[6];
 #endif
 		}
@@ -166,7 +169,7 @@ void main()
 			// Y5 is the pivot. LP inputs behave as expected when using mirroring.
 			Y[7] = Y[3];
 			Y[9] = Y[1];
-#if INPUT_SAMPLES > 1
+#if INPUT_PLANES > 1
 			CbCr[7] = CbCr[3];
 			CbCr[9] = CbCr[1];
 #endif
@@ -175,7 +178,7 @@ void main()
 		{
 			// Y7 is the pivot.
 			Y[9] = Y[5];
-#if INPUT_SAMPLES > 1
+#if INPUT_PLANES > 1
 			CbCr[9] = CbCr[5];
 #endif
 		}
