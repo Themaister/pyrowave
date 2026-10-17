@@ -513,7 +513,7 @@ static void test_direct_interop()
 	ctx.set_system_handles({});
 
 	VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
-	app_info.apiVersion = VK_API_VERSION_1_1;
+	app_info.apiVersion = VK_API_VERSION_1_3;
 	app_info.pApplicationName = "pyrowave-c-test";
 	app_info.pEngineName = "Granite";
 	ctx.set_application_info(&app_info);
@@ -702,7 +702,7 @@ static void test_direct_interop_scaling(VkSamplerYcbcrRange range, uint32_t bit_
 	ctx.set_system_handles({});
 
 	VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
-	app_info.apiVersion = VK_API_VERSION_1_1;
+	app_info.apiVersion = VK_API_VERSION_1_3;
 	app_info.pApplicationName = "pyrowave-c-test";
 	app_info.pEngineName = "Granite";
 	ctx.set_application_info(&app_info);
