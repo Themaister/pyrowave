@@ -78,7 +78,7 @@ pyrowave_result pyrowave_create_device_by_compat(
 	dev->context.set_system_handles({});
 
 	VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
-	app_info.apiVersion = VK_API_VERSION_1_2;
+	app_info.apiVersion = VK_API_VERSION_1_1;
 	app_info.pApplicationName = "pyrowave-c";
 	app_info.pEngineName = "Granite";
 	dev->context.set_application_info(&app_info);
@@ -112,7 +112,7 @@ pyrowave_result pyrowave_create_device_by_compat(
 		VkPhysicalDeviceProperties props = {};
 		vkGetPhysicalDeviceProperties(gpu, &props);
 		// Is this even possible these days?
-		if (props.apiVersion < VK_API_VERSION_1_2)
+		if (props.apiVersion < VK_API_VERSION_1_1)
 			continue;
 
 		VkPhysicalDeviceIDProperties ids = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES };
