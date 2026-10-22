@@ -1256,7 +1256,8 @@ pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
 	encoder->scaler.set_ycbcr_chroma_midpoint(scaling_info->ycbcr_chroma_midpoint);
 	encoder->scaler.set_ycbcr_range(scaling_info->ycbcr_range, ycbcr_range_bit_depth);
 
-	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM)
+	if (scaling_info->view.view_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM ||
+	    scaling_info->view.view_format == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM)
 	{
 		// Sam wanted this,
 		WrappedViewBuffers wrapped;
@@ -1265,9 +1266,11 @@ pyrowave_encoder_encode_gpu_scaled(pyrowave_encoder encoder,
 		for (auto &plane : buffers.planes)
 			plane = scaling_info->view;
 
-		buffers.planes[0].view_format = VK_FORMAT_R8_UNORM;
-		buffers.planes[1].view_format = VK_FORMAT_R8G8_UNORM;
-		buffers.planes[2].view_format = VK_FORMAT_R8G8_UNORM;
+		// P010 is scaled through 16-bit plane views
+		bool is_16bit = scaling_info->view.view_format == VK_FORMAT_G16_B16R16_2PLANE_420_UNORM;
+		buffers.planes[0].view_format = is_16bit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+		buffers.planes[1].view_format = is_16bit ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM;
+		buffers.planes[2].view_format = is_16bit ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM;
 
 		buffers.planes[0].aspect = VK_IMAGE_ASPECT_PLANE_0_BIT;
 		buffers.planes[1].aspect = VK_IMAGE_ASPECT_PLANE_1_BIT;

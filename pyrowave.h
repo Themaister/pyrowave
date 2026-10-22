@@ -495,9 +495,10 @@ pyrowave_encoder_set_frame_context(pyrowave_encoder encoder, int context);
 typedef struct pyrowave_scaled_encode_info
 {
 	// Input view must be some RGB(A) UNORM format.
-	// Alternatively, as a special case, NV12 (G8_B8R8_2PLANE_420) is allowed here with COLOR_ASPECT.
+	// Alternatively, as a special case, NV12 (G8_B8R8_2PLANE_420) or P010 (G16_B16R16_2PLANE_420)
+	// is allowed here with COLOR_ASPECT.
 	// This is only intended to be used with pipewire dmabuf screen capture path.
-	// If scaling NV12, the crop-rect (if any) must be aligned to 2 pixel offset and extent.
+	// If scaling NV12 or P010, the crop-rect (if any) must be aligned to 2 pixel offset and extent.
 	// The crop rect will be scaled accordingly for chroma plane.
 	pyrowave_image_view view;
 
@@ -540,7 +541,7 @@ typedef struct pyrowave_scaled_encode_info
 	// YCbCr range of the output planes. Zero is VK_SAMPLER_YCBCR_RANGE_ITU_FULL.
 	// VK_SAMPLER_YCBCR_RANGE_ITU_NARROW produces H.273 narrow range (e.g. 16..235 luma at 8-bit),
 	// normalized like ycbcr_chroma_midpoint; pick the midpoint that matches (e.g. 128.0 / 255.0).
-	// Only applies to RGB(A) input. NV12 input is scaled without color conversion, so its range is kept.
+	// Only applies to RGB(A) input. NV12 and P010 input is scaled without color conversion, so its range is kept.
 	VkSamplerYcbcrRange ycbcr_range;
 
 	// Bit depth whose narrow range code values are used. 0 means 8. Must be 8 to 16 for narrow range.
