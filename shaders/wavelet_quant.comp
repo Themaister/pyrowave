@@ -251,7 +251,9 @@ void encode_payload(ivec2 block_index_8x8, mat2x4 texels)
     }
 
     // Record distortion for throwing away everything.
-    float square_error = subgroupClusteredAdd((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * inv_quant_squared, 8);
+    // Must be weighted like compute_square_error() so all quant options of a block share units.
+    float square_error = subgroupClusteredAdd(
+        (dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * registers.rdo_distortion_scale * inv_quant_squared, 8);
     if ((gl_SubgroupInvocationID & 7u) == 0)
         block_stats.stats[block_index].errors[msb + 1] = QuantStats(float16_t(min(60000.0, square_error)), uint16_t(0));
 
