@@ -21,7 +21,8 @@ void main()
 
     barrier();
 
-    for (uint step = 1u; step < gl_WorkGroupSize.x / 2u; step *= 2u)
+    // Hillis-Steele scan over all 512 elements needs steps up to 256 inclusive.
+    for (uint step = 1u; step < gl_WorkGroupSize.x; step *= 2u)
     {
         barrier();
 
