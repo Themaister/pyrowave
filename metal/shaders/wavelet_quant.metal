@@ -574,14 +574,14 @@ void encode_payload(thread const int2& block_index_8x8, thread float2x4& texels,
             block_stats.stats[block_index].errors[q] = _672;
         }
     }
-    float square_error_1 = spvClustered_sum<8>((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * inv_quant_squared, gl_SubgroupInvocationID);
+    float square_error_1 = spvClustered_sum<8>(((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * registers.rdo_distortion_scale) * inv_quant_squared, gl_SubgroupInvocationID);
     if ((gl_SubgroupInvocationID & 7u) == 0u)
     {
-        QuantStats_1 _701 = QuantStats_1{ half(fast::min(60000.0, square_error_1)), ushort(0) };
-        QuantStats _703;
-        _703.square_error = _701.square_error;
-        _703.payload_cost = _701.payload_cost;
-        block_stats.stats[block_index].errors[msb + 1] = _703;
+        QuantStats_1 _704 = QuantStats_1{ half(fast::min(60000.0, square_error_1)), ushort(0) };
+        QuantStats _706;
+        _706.square_error = _704.square_error;
+        _706.payload_cost = _704.payload_cost;
+        block_stats.stats[block_index].errors[msb + 1] = _706;
     }
     uint byte_offset = uint(scan) + global_offset;
     bool need_sign = (result.block4x2_shifted != 0) || (quality_planes != 0);
@@ -590,12 +590,12 @@ void encode_payload(thread const int2& block_index_8x8, thread float2x4& texels,
         uint4 s0 = uint4(texels[0] < float4(0.0)) << uint4(0u, 1u, 2u, 3u);
         uint4 s1 = uint4(texels[1] < float4(0.0)) << uint4(4u, 5u, 6u, 7u);
         uint s = ((((((s0.x | s0.y) | s0.z) | s0.w) | s1.x) | s1.y) | s1.z) | s1.w;
-        uint _763 = byte_offset;
-        byte_offset = _763 + uint(1);
-        payload_data.data[_763] = uchar(s);
+        uint _766 = byte_offset;
+        byte_offset = _766 + uint(1);
+        payload_data.data[_766] = uchar(s);
         int plane_iterations = quality_planes + int(plane_code);
-        int _776 = plane_iterations - 1;
-        int q_1 = _776;
+        int _779 = plane_iterations - 1;
+        int q_1 = _779;
         do
         {
             s0 = uint4(extract_bits(uint(abs_quant_texels0.x), uint(q_1), uint(1)), extract_bits(uint(abs_quant_texels0.y), uint(q_1), uint(1)), extract_bits(uint(abs_quant_texels0.z), uint(q_1), uint(1)), extract_bits(uint(abs_quant_texels0.w), uint(q_1), uint(1)));
@@ -603,9 +603,9 @@ void encode_payload(thread const int2& block_index_8x8, thread float2x4& texels,
             s0 = s0 << uint4(0u, 1u, 2u, 3u);
             s1 = s1 << uint4(4u, 5u, 6u, 7u);
             s = ((((((s0.x | s0.y) | s0.z) | s0.w) | s1.x) | s1.y) | s1.z) | s1.w;
-            uint _850 = byte_offset;
-            byte_offset = _850 + uint(1);
-            payload_data.data[_850] = uchar(s);
+            uint _853 = byte_offset;
+            byte_offset = _853 + uint(1);
+            payload_data.data[_853] = uchar(s);
             q_1--;
         } while (q_1 >= 0);
     }

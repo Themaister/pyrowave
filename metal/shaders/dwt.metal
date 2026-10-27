@@ -51,6 +51,8 @@ struct Registers
     int2 aligned_resolution;
 };
 
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
 
@@ -100,6 +102,13 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     int2 param_4 = coord0 + int2(16);
     float2 _206 = generate_mirror_uv(param_4, _104);
     float4 texels3 = uTexture.gather(uTextureSmplr, _206, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels0 *= RangeScale;
+        texels1 *= RangeScale;
+        texels2 *= RangeScale;
+        texels3 *= RangeScale;
+    }
     if (DCShift)
     {
         texels0 -= float4(0.5);
@@ -142,8 +151,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     store_shared(param_26, param_27, param_28, shared_block);
     int2 local_coord = int2(int(32u + (2u * (local_index % 4u))), int(2u * (local_index / 4u)));
     int2 param_29 = base_coord + local_coord;
-    float2 _357 = generate_mirror_uv(param_29, _104);
-    float4 texels = uTexture.gather(uTextureSmplr, _357, int2(0), component::x).wzxy;
+    float2 _370 = generate_mirror_uv(param_29, _104);
+    float4 texels = uTexture.gather(uTextureSmplr, _370, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels *= RangeScale;
+    }
     if (DCShift)
     {
         texels -= float4(0.5);
@@ -158,8 +171,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     store_shared(param_33, param_34, param_35, shared_block);
     int2 local_coord_1 = int2(int(2u * (local_index % 16u)), int(32u + (2u * (local_index / 16u))));
     int2 param_36 = base_coord + local_coord_1;
-    float2 _411 = generate_mirror_uv(param_36, _104);
-    float4 texels_1 = uTexture.gather(uTextureSmplr, _411, int2(0), component::x).wzxy;
+    float2 _429 = generate_mirror_uv(param_36, _104);
+    float4 texels_1 = uTexture.gather(uTextureSmplr, _429, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels_1 *= RangeScale;
+    }
     if (DCShift)
     {
         texels_1 -= float4(0.5);
@@ -176,8 +193,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     {
         int2 local_coord_2 = int2(int(32u + (2u * (local_index % 4u))), int(32u + (2u * (local_index / 4u))));
         int2 param_43 = base_coord + local_coord_2;
-        float2 _469 = generate_mirror_uv(param_43, _104);
-        float4 texels_2 = uTexture.gather(uTextureSmplr, _469, int2(0), component::x).wzxy;
+        float2 _492 = generate_mirror_uv(param_43, _104);
+        float4 texels_2 = uTexture.gather(uTextureSmplr, _492, int2(0), component::x).wzxy;
+        if (RangeScale != 1.0)
+        {
+            texels_2 *= RangeScale;
+        }
         if (DCShift)
         {
             texels_2 -= float4(0.5);
@@ -320,8 +341,8 @@ kernel void pyrowave_dwt(constant Registers& _104 [[buffer(0)]], texture2d<float
     int2 local_coord = unswizzle8x8(param_2);
     for (int y = local_coord.y; y < 16; y += 8)
     {
-        int _978 = local_coord.x * 2;
-        for (int x = _978; x < 32; x += 16)
+        int _1006 = local_coord.x * 2;
+        for (int x = _1006; x < 32; x += 16)
         {
             uint param_3 = uint(y);
             uint param_4 = uint(x + 0);
@@ -332,14 +353,14 @@ kernel void pyrowave_dwt(constant Registers& _104 [[buffer(0)]], texture2d<float
             int img_x = x >> 1;
             int img_y = y;
             int2 base_image_coord = (int2(gl_WorkGroupID.xy) * int2(16)) + int2(img_x, img_y);
-            int3 _1027 = int3(base_image_coord, 0);
-            uOutput.write(v0.xxxx, uint2(_1027.xy), uint(_1027.z));
-            int3 _1034 = int3(base_image_coord, 2);
-            uOutput.write(v0.yyyy, uint2(_1034.xy), uint(_1034.z));
-            int3 _1041 = int3(base_image_coord, 1);
-            uOutput.write(v1.xxxx, uint2(_1041.xy), uint(_1041.z));
-            int3 _1048 = int3(base_image_coord, 3);
-            uOutput.write(v1.yyyy, uint2(_1048.xy), uint(_1048.z));
+            int3 _1055 = int3(base_image_coord, 0);
+            uOutput.write(v0.xxxx, uint2(_1055.xy), uint(_1055.z));
+            int3 _1062 = int3(base_image_coord, 2);
+            uOutput.write(v0.yyyy, uint2(_1062.xy), uint(_1062.z));
+            int3 _1069 = int3(base_image_coord, 1);
+            uOutput.write(v1.xxxx, uint2(_1069.xy), uint(_1069.z));
+            int3 _1076 = int3(base_image_coord, 3);
+            uOutput.write(v1.yyyy, uint2(_1076.xy), uint(_1076.z));
         }
     }
 }
