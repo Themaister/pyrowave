@@ -187,12 +187,12 @@ void emit_rdo_operations(thread uint& gl_SubgroupInvocationID, threadgroup spvUn
         bucket_index = 0u;
     }
     uint param_4 = bucket_index;
-    uint _139 = inclusive_max_clustered16(param_4, gl_SubgroupInvocationID);
-    uint inclusive_bucket_index = _139;
+    uint _138 = inclusive_max_clustered16(param_4, gl_SubgroupInvocationID);
+    uint inclusive_bucket_index = _138;
     if (gl_SubgroupInvocationID == 0u)
     {
         uint unquantized_cost = shared_rate_cost[0];
-        uint _158 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.consumed_payload, unquantized_cost, memory_order_relaxed);
+        uint _157 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.consumed_payload, unquantized_cost, memory_order_relaxed);
     }
     else
     {
@@ -204,12 +204,12 @@ void emit_rdo_operations(thread uint& gl_SubgroupInvocationID, threadgroup spvUn
                 int2 block32x32_index = int2(gl_WorkGroupID.xy);
                 int block_index = (registers.block_offset_32x32 + (block32x32_index.y * registers.block_stride_32x32)) + block32x32_index.x;
                 uint subdivision = uint(block_index >> int(registers.block_index_shamt));
-                uint _221 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.total_savings_per_bucket[(inclusive_bucket_index * 16u) + subdivision], saving, memory_order_relaxed);
-                RDOperation_1 _240 = RDOperation_1{ int(gl_SubgroupInvocationID), uint(block_index) | (saving << uint(16)) };
-                RDOperation _243;
-                _243.quant = _240.quant;
-                _243.block_offset_saving = _240.block_offset_saving;
-                buckets.rdo_operations[uint(block_index) + (inclusive_bucket_index * registers.num_blocks_aligned)] = _243;
+                uint _220 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.total_savings_per_bucket[(inclusive_bucket_index * 16u) + subdivision], saving, memory_order_relaxed);
+                RDOperation_1 _239 = RDOperation_1{ int(gl_SubgroupInvocationID), uint(block_index) | (saving << uint(16)) };
+                RDOperation _242;
+                _242.quant = _239.quant;
+                _242.block_offset_saving = _239.block_offset_saving;
+                buckets.rdo_operations[uint(block_index) + (inclusive_bucket_index * registers.num_blocks_aligned)] = _242;
             }
         }
     }
@@ -238,11 +238,11 @@ kernel void pyrowave_analyze_rate_control(device Buckets& buckets [[buffer(0)]],
         uint cost = 0u;
         if (block8x8_in_range)
         {
-            uint _331 = min(i, num_active_planes);
-            QuantStats_1 _335;
-            _335.square_error = block_stats.stats[block_index_8x8].errors[_331].square_error;
-            _335.payload_cost = block_stats.stats[block_index_8x8].errors[_331].payload_cost;
-            QuantStats_1 stats = _335;
+            uint _330 = min(i, num_active_planes);
+            QuantStats_1 _334;
+            _334.square_error = block_stats.stats[block_index_8x8].errors[_330].square_error;
+            _334.payload_cost = block_stats.stats[block_index_8x8].errors[_330].payload_cost;
+            QuantStats_1 stats = _334;
             dist = float(stats.square_error);
             cost = uint(stats.payload_cost);
         }

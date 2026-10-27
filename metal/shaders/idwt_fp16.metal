@@ -52,6 +52,9 @@ struct Registers
 
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
+constant half _1117 = half(RangeScale);
 
 static inline __attribute__((always_inline))
 int2 unswizzle8x8(thread const uint& index)
@@ -372,6 +375,10 @@ kernel void pyrowave_idwt(constant Registers& _150 [[buffer(0)]], texture2d_arra
             if (DCShift)
             {
                 v += half2(half(0.5));
+            }
+            if (RangeScale != 1.0)
+            {
+                v = clamp(v, half2(half(0.0)), half2(half(1.0))) * _1117;
             }
             uOutput.write(float4(v.xxxx), uint2((int2((2 * y) + 0, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
             uOutput.write(float4(v.yyyy), uint2((int2((2 * y) + 1, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));

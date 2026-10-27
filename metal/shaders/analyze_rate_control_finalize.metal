@@ -59,7 +59,7 @@ kernel void pyrowave_analyze_rate_control_finalize(device Buckets& buckets [[buf
     v.w += v.z;
     shared_scan[gl_LocalInvocationIndex] = v.w;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint _step = 1u; _step < 256u; _step *= 2u)
+    for (uint _step = 1u; _step < 512u; _step *= 2u)
     {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint shuffled_up = 0u;

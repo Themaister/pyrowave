@@ -59,6 +59,8 @@ struct Registers
 
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
 
 static inline __attribute__((always_inline))
 int2 unswizzle8x8(thread const uint& index)
@@ -380,6 +382,10 @@ kernel void pyrowave_idwt(constant Registers& _148 [[buffer(0)]], texture2d_arra
             {
                 v += float2(0.5);
             }
+            if (RangeScale != 1.0)
+            {
+                v = fast::clamp(v, float2(0.0), float2(1.0)) * RangeScale;
+            }
             uOutput.write(v.xxxx, uint2((int2((2 * y) + 0, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
             uOutput.write(v.yyyy, uint2((int2((2 * y) + 1, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
         }
@@ -443,6 +449,8 @@ struct Registers
 
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
 
 static inline __attribute__((always_inline))
 int2 unswizzle8x8(thread const uint& index)
@@ -764,6 +772,10 @@ kernel void pyrowave_idwt(constant Registers& _152 [[buffer(0)]], texture2d_arra
             {
                 v += float2(0.5);
             }
+            if (RangeScale != 1.0)
+            {
+                v = fast::clamp(v, float2(0.0), float2(1.0)) * RangeScale;
+            }
             uOutput.write(v.xxxx, uint2((int2((2 * y) + 0, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
             uOutput.write(v.yyyy, uint2((int2((2 * y) + 1, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
         }
@@ -827,6 +839,9 @@ struct Registers
 
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
+constant half _1117 = half(RangeScale);
 
 static inline __attribute__((always_inline))
 int2 unswizzle8x8(thread const uint& index)
@@ -1147,6 +1162,10 @@ kernel void pyrowave_idwt(constant Registers& _150 [[buffer(0)]], texture2d_arra
             if (DCShift)
             {
                 v += half2(half(0.5));
+            }
+            if (RangeScale != 1.0)
+            {
+                v = clamp(v, half2(half(0.0)), half2(half(1.0))) * _1117;
             }
             uOutput.write(float4(v.xxxx), uint2((int2((2 * y) + 0, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
             uOutput.write(float4(v.yyyy), uint2((int2((2 * y) + 1, x) + (int2(32) * int2(gl_WorkGroupID.yx)))));
@@ -1570,6 +1589,8 @@ struct Registers
     int2 aligned_resolution;
 };
 
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
 
@@ -1619,6 +1640,13 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     int2 param_4 = coord0 + int2(16);
     float2 _206 = generate_mirror_uv(param_4, _104);
     float4 texels3 = uTexture.gather(uTextureSmplr, _206, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels0 *= RangeScale;
+        texels1 *= RangeScale;
+        texels2 *= RangeScale;
+        texels3 *= RangeScale;
+    }
     if (DCShift)
     {
         texels0 -= float4(0.5);
@@ -1661,8 +1689,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     store_shared(param_26, param_27, param_28, shared_block);
     int2 local_coord = int2(int(32u + (2u * (local_index % 4u))), int(2u * (local_index / 4u)));
     int2 param_29 = base_coord + local_coord;
-    float2 _357 = generate_mirror_uv(param_29, _104);
-    float4 texels = uTexture.gather(uTextureSmplr, _357, int2(0), component::x).wzxy;
+    float2 _370 = generate_mirror_uv(param_29, _104);
+    float4 texels = uTexture.gather(uTextureSmplr, _370, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels *= RangeScale;
+    }
     if (DCShift)
     {
         texels -= float4(0.5);
@@ -1677,8 +1709,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     store_shared(param_33, param_34, param_35, shared_block);
     int2 local_coord_1 = int2(int(2u * (local_index % 16u)), int(32u + (2u * (local_index / 16u))));
     int2 param_36 = base_coord + local_coord_1;
-    float2 _411 = generate_mirror_uv(param_36, _104);
-    float4 texels_1 = uTexture.gather(uTextureSmplr, _411, int2(0), component::x).wzxy;
+    float2 _429 = generate_mirror_uv(param_36, _104);
+    float4 texels_1 = uTexture.gather(uTextureSmplr, _429, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels_1 *= RangeScale;
+    }
     if (DCShift)
     {
         texels_1 -= float4(0.5);
@@ -1695,8 +1731,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<float2, 41>
     {
         int2 local_coord_2 = int2(int(32u + (2u * (local_index % 4u))), int(32u + (2u * (local_index / 4u))));
         int2 param_43 = base_coord + local_coord_2;
-        float2 _469 = generate_mirror_uv(param_43, _104);
-        float4 texels_2 = uTexture.gather(uTextureSmplr, _469, int2(0), component::x).wzxy;
+        float2 _492 = generate_mirror_uv(param_43, _104);
+        float4 texels_2 = uTexture.gather(uTextureSmplr, _492, int2(0), component::x).wzxy;
+        if (RangeScale != 1.0)
+        {
+            texels_2 *= RangeScale;
+        }
         if (DCShift)
         {
             texels_2 -= float4(0.5);
@@ -1839,8 +1879,8 @@ kernel void pyrowave_dwt(constant Registers& _104 [[buffer(0)]], texture2d<float
     int2 local_coord = unswizzle8x8(param_2);
     for (int y = local_coord.y; y < 16; y += 8)
     {
-        int _978 = local_coord.x * 2;
-        for (int x = _978; x < 32; x += 16)
+        int _1006 = local_coord.x * 2;
+        for (int x = _1006; x < 32; x += 16)
         {
             uint param_3 = uint(y);
             uint param_4 = uint(x + 0);
@@ -1851,14 +1891,14 @@ kernel void pyrowave_dwt(constant Registers& _104 [[buffer(0)]], texture2d<float
             int img_x = x >> 1;
             int img_y = y;
             int2 base_image_coord = (int2(gl_WorkGroupID.xy) * int2(16)) + int2(img_x, img_y);
-            int3 _1027 = int3(base_image_coord, 0);
-            uOutput.write(v0.xxxx, uint2(_1027.xy), uint(_1027.z));
-            int3 _1034 = int3(base_image_coord, 2);
-            uOutput.write(v0.yyyy, uint2(_1034.xy), uint(_1034.z));
-            int3 _1041 = int3(base_image_coord, 1);
-            uOutput.write(v1.xxxx, uint2(_1041.xy), uint(_1041.z));
-            int3 _1048 = int3(base_image_coord, 3);
-            uOutput.write(v1.yyyy, uint2(_1048.xy), uint(_1048.z));
+            int3 _1055 = int3(base_image_coord, 0);
+            uOutput.write(v0.xxxx, uint2(_1055.xy), uint(_1055.z));
+            int3 _1062 = int3(base_image_coord, 2);
+            uOutput.write(v0.yyyy, uint2(_1062.xy), uint(_1062.z));
+            int3 _1069 = int3(base_image_coord, 1);
+            uOutput.write(v1.xxxx, uint2(_1069.xy), uint(_1069.z));
+            int3 _1076 = int3(base_image_coord, 3);
+            uOutput.write(v1.yyyy, uint2(_1076.xy), uint(_1076.z));
         }
     }
 }
@@ -1919,6 +1959,8 @@ struct Registers
     int2 aligned_resolution;
 };
 
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
 
@@ -1968,6 +2010,13 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     int2 param_4 = coord0 + int2(16);
     float2 _210 = generate_mirror_uv(param_4, _108);
     float4 texels3 = uTexture.gather(uTextureSmplr, _210, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels0 *= RangeScale;
+        texels1 *= RangeScale;
+        texels2 *= RangeScale;
+        texels3 *= RangeScale;
+    }
     if (DCShift)
     {
         texels0 -= float4(0.5);
@@ -2010,8 +2059,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     store_shared(param_26, param_27, param_28, shared_block);
     int2 local_coord = int2(int(32u + (2u * (local_index % 4u))), int(2u * (local_index / 4u)));
     int2 param_29 = base_coord + local_coord;
-    float2 _361 = generate_mirror_uv(param_29, _108);
-    float4 texels = uTexture.gather(uTextureSmplr, _361, int2(0), component::x).wzxy;
+    float2 _374 = generate_mirror_uv(param_29, _108);
+    float4 texels = uTexture.gather(uTextureSmplr, _374, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels *= RangeScale;
+    }
     if (DCShift)
     {
         texels -= float4(0.5);
@@ -2026,8 +2079,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     store_shared(param_33, param_34, param_35, shared_block);
     int2 local_coord_1 = int2(int(2u * (local_index % 16u)), int(32u + (2u * (local_index / 16u))));
     int2 param_36 = base_coord + local_coord_1;
-    float2 _415 = generate_mirror_uv(param_36, _108);
-    float4 texels_1 = uTexture.gather(uTextureSmplr, _415, int2(0), component::x).wzxy;
+    float2 _433 = generate_mirror_uv(param_36, _108);
+    float4 texels_1 = uTexture.gather(uTextureSmplr, _433, int2(0), component::x).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels_1 *= RangeScale;
+    }
     if (DCShift)
     {
         texels_1 -= float4(0.5);
@@ -2044,8 +2101,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     {
         int2 local_coord_2 = int2(int(32u + (2u * (local_index % 4u))), int(32u + (2u * (local_index / 4u))));
         int2 param_43 = base_coord + local_coord_2;
-        float2 _473 = generate_mirror_uv(param_43, _108);
-        float4 texels_2 = uTexture.gather(uTextureSmplr, _473, int2(0), component::x).wzxy;
+        float2 _496 = generate_mirror_uv(param_43, _108);
+        float4 texels_2 = uTexture.gather(uTextureSmplr, _496, int2(0), component::x).wzxy;
+        if (RangeScale != 1.0)
+        {
+            texels_2 *= RangeScale;
+        }
         if (DCShift)
         {
             texels_2 -= float4(0.5);
@@ -2188,8 +2249,8 @@ kernel void pyrowave_dwt(constant Registers& _108 [[buffer(0)]], texture2d<float
     int2 local_coord = unswizzle8x8(param_2);
     for (int y = local_coord.y; y < 16; y += 8)
     {
-        int _982 = local_coord.x * 2;
-        for (int x = _982; x < 32; x += 16)
+        int _1010 = local_coord.x * 2;
+        for (int x = _1010; x < 32; x += 16)
         {
             uint param_3 = uint(y);
             uint param_4 = uint(x + 0);
@@ -2200,14 +2261,14 @@ kernel void pyrowave_dwt(constant Registers& _108 [[buffer(0)]], texture2d<float
             int img_x = x >> 1;
             int img_y = y;
             int2 base_image_coord = (int2(gl_WorkGroupID.xy) * int2(16)) + int2(img_x, img_y);
-            int3 _1031 = int3(base_image_coord, 0);
-            uOutput.write(v0.xxxx, uint2(_1031.xy), uint(_1031.z));
-            int3 _1038 = int3(base_image_coord, 2);
-            uOutput.write(v0.yyyy, uint2(_1038.xy), uint(_1038.z));
-            int3 _1045 = int3(base_image_coord, 1);
-            uOutput.write(v1.xxxx, uint2(_1045.xy), uint(_1045.z));
-            int3 _1052 = int3(base_image_coord, 3);
-            uOutput.write(v1.yyyy, uint2(_1052.xy), uint(_1052.z));
+            int3 _1059 = int3(base_image_coord, 0);
+            uOutput.write(v0.xxxx, uint2(_1059.xy), uint(_1059.z));
+            int3 _1066 = int3(base_image_coord, 2);
+            uOutput.write(v0.yyyy, uint2(_1066.xy), uint(_1066.z));
+            int3 _1073 = int3(base_image_coord, 1);
+            uOutput.write(v1.xxxx, uint2(_1073.xy), uint(_1073.z));
+            int3 _1080 = int3(base_image_coord, 3);
+            uOutput.write(v1.yyyy, uint2(_1080.xy), uint(_1080.z));
         }
     }
 }
@@ -2268,8 +2329,17 @@ struct Registers
     int2 aligned_resolution;
 };
 
+constant float RangeScale_tmp [[function_constant(1)]];
+constant float RangeScale = is_function_constant_defined(RangeScale_tmp) ? RangeScale_tmp : 1.0;
+constant half _221 = half(RangeScale);
+constant half _224 = half(RangeScale);
+constant half _227 = half(RangeScale);
+constant half _230 = half(RangeScale);
 constant bool DCShift_tmp [[function_constant(0)]];
 constant bool DCShift = is_function_constant_defined(DCShift_tmp) ? DCShift_tmp : false;
+constant half _388 = half(RangeScale);
+constant half _449 = half(RangeScale);
+constant half _514 = half(RangeScale);
 
 static inline __attribute__((always_inline))
 int2 unswizzle8x8(thread const uint& index)
@@ -2317,6 +2387,13 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     int2 param_4 = coord0 + int2(16);
     float2 _212 = generate_mirror_uv(param_4, _106);
     half4 texels3 = half4(uTexture.gather(uTextureSmplr, _212, int2(0), component::x)).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels0 *= _221;
+        texels1 *= _224;
+        texels2 *= _227;
+        texels3 *= _230;
+    }
     if (DCShift)
     {
         texels0 -= half4(half(0.5));
@@ -2359,8 +2436,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     store_shared(param_26, param_27, param_28, shared_block);
     int2 local_coord = int2(int(32u + (2u * (local_index % 4u))), int(2u * (local_index / 4u)));
     int2 param_29 = base_coord + local_coord;
-    float2 _364 = generate_mirror_uv(param_29, _106);
-    half4 texels = half4(uTexture.gather(uTextureSmplr, _364, int2(0), component::x)).wzxy;
+    float2 _381 = generate_mirror_uv(param_29, _106);
+    half4 texels = half4(uTexture.gather(uTextureSmplr, _381, int2(0), component::x)).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels *= _388;
+    }
     if (DCShift)
     {
         texels -= half4(half(0.5));
@@ -2375,8 +2456,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     store_shared(param_33, param_34, param_35, shared_block);
     int2 local_coord_1 = int2(int(2u * (local_index % 16u)), int(32u + (2u * (local_index / 16u))));
     int2 param_36 = base_coord + local_coord_1;
-    float2 _419 = generate_mirror_uv(param_36, _106);
-    half4 texels_1 = half4(uTexture.gather(uTextureSmplr, _419, int2(0), component::x)).wzxy;
+    float2 _442 = generate_mirror_uv(param_36, _106);
+    half4 texels_1 = half4(uTexture.gather(uTextureSmplr, _442, int2(0), component::x)).wzxy;
+    if (RangeScale != 1.0)
+    {
+        texels_1 *= _449;
+    }
     if (DCShift)
     {
         texels_1 -= half4(half(0.5));
@@ -2393,8 +2478,12 @@ void load_image_with_apron(threadgroup spvUnsafeArray<spvUnsafeArray<half2, 41>,
     {
         int2 local_coord_2 = int2(int(32u + (2u * (local_index % 4u))), int(32u + (2u * (local_index / 4u))));
         int2 param_43 = base_coord + local_coord_2;
-        float2 _478 = generate_mirror_uv(param_43, _106);
-        half4 texels_2 = half4(uTexture.gather(uTextureSmplr, _478, int2(0), component::x)).wzxy;
+        float2 _507 = generate_mirror_uv(param_43, _106);
+        half4 texels_2 = half4(uTexture.gather(uTextureSmplr, _507, int2(0), component::x)).wzxy;
+        if (RangeScale != 1.0)
+        {
+            texels_2 *= _514;
+        }
         if (DCShift)
         {
             texels_2 -= half4(half(0.5));
@@ -2537,8 +2626,8 @@ kernel void pyrowave_dwt(constant Registers& _106 [[buffer(0)]], texture2d<float
     int2 local_coord = unswizzle8x8(param_2);
     for (int y = local_coord.y; y < 16; y += 8)
     {
-        int _988 = local_coord.x * 2;
-        for (int x = _988; x < 32; x += 16)
+        int _1023 = local_coord.x * 2;
+        for (int x = _1023; x < 32; x += 16)
         {
             uint param_3 = uint(y);
             uint param_4 = uint(x + 0);
@@ -2549,14 +2638,14 @@ kernel void pyrowave_dwt(constant Registers& _106 [[buffer(0)]], texture2d<float
             int img_x = x >> 1;
             int img_y = y;
             int2 base_image_coord = (int2(gl_WorkGroupID.xy) * int2(16)) + int2(img_x, img_y);
-            int3 _1037 = int3(base_image_coord, 0);
-            uOutput.write(float4(v0.xxxx), uint2(_1037.xy), uint(_1037.z));
-            int3 _1045 = int3(base_image_coord, 2);
-            uOutput.write(float4(v0.yyyy), uint2(_1045.xy), uint(_1045.z));
-            int3 _1053 = int3(base_image_coord, 1);
-            uOutput.write(float4(v1.xxxx), uint2(_1053.xy), uint(_1053.z));
-            int3 _1061 = int3(base_image_coord, 3);
-            uOutput.write(float4(v1.yyyy), uint2(_1061.xy), uint(_1061.z));
+            int3 _1072 = int3(base_image_coord, 0);
+            uOutput.write(float4(v0.xxxx), uint2(_1072.xy), uint(_1072.z));
+            int3 _1080 = int3(base_image_coord, 2);
+            uOutput.write(float4(v0.yyyy), uint2(_1080.xy), uint(_1080.z));
+            int3 _1088 = int3(base_image_coord, 1);
+            uOutput.write(float4(v1.xxxx), uint2(_1088.xy), uint(_1088.z));
+            int3 _1096 = int3(base_image_coord, 3);
+            uOutput.write(float4(v1.yyyy), uint2(_1096.xy), uint(_1096.z));
         }
     }
 }
@@ -3140,14 +3229,14 @@ void encode_payload(thread const int2& block_index_8x8, thread float2x4& texels,
             block_stats.stats[block_index].errors[q] = _672;
         }
     }
-    float square_error_1 = spvClustered_sum<8>((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * inv_quant_squared, gl_SubgroupInvocationID);
+    float square_error_1 = spvClustered_sum<8>(((dot(texels[0], texels[0]) + dot(texels[1], texels[1])) * registers.rdo_distortion_scale) * inv_quant_squared, gl_SubgroupInvocationID);
     if ((gl_SubgroupInvocationID & 7u) == 0u)
     {
-        QuantStats_1 _701 = QuantStats_1{ half(fast::min(60000.0, square_error_1)), ushort(0) };
-        QuantStats _703;
-        _703.square_error = _701.square_error;
-        _703.payload_cost = _701.payload_cost;
-        block_stats.stats[block_index].errors[msb + 1] = _703;
+        QuantStats_1 _704 = QuantStats_1{ half(fast::min(60000.0, square_error_1)), ushort(0) };
+        QuantStats _706;
+        _706.square_error = _704.square_error;
+        _706.payload_cost = _704.payload_cost;
+        block_stats.stats[block_index].errors[msb + 1] = _706;
     }
     uint byte_offset = uint(scan) + global_offset;
     bool need_sign = (result.block4x2_shifted != 0) || (quality_planes != 0);
@@ -3156,12 +3245,12 @@ void encode_payload(thread const int2& block_index_8x8, thread float2x4& texels,
         uint4 s0 = uint4(texels[0] < float4(0.0)) << uint4(0u, 1u, 2u, 3u);
         uint4 s1 = uint4(texels[1] < float4(0.0)) << uint4(4u, 5u, 6u, 7u);
         uint s = ((((((s0.x | s0.y) | s0.z) | s0.w) | s1.x) | s1.y) | s1.z) | s1.w;
-        uint _763 = byte_offset;
-        byte_offset = _763 + uint(1);
-        payload_data.data[_763] = uchar(s);
+        uint _766 = byte_offset;
+        byte_offset = _766 + uint(1);
+        payload_data.data[_766] = uchar(s);
         int plane_iterations = quality_planes + int(plane_code);
-        int _776 = plane_iterations - 1;
-        int q_1 = _776;
+        int _779 = plane_iterations - 1;
+        int q_1 = _779;
         do
         {
             s0 = uint4(extract_bits(uint(abs_quant_texels0.x), uint(q_1), uint(1)), extract_bits(uint(abs_quant_texels0.y), uint(q_1), uint(1)), extract_bits(uint(abs_quant_texels0.z), uint(q_1), uint(1)), extract_bits(uint(abs_quant_texels0.w), uint(q_1), uint(1)));
@@ -3169,9 +3258,9 @@ void encode_payload(thread const int2& block_index_8x8, thread float2x4& texels,
             s0 = s0 << uint4(0u, 1u, 2u, 3u);
             s1 = s1 << uint4(4u, 5u, 6u, 7u);
             s = ((((((s0.x | s0.y) | s0.z) | s0.w) | s1.x) | s1.y) | s1.z) | s1.w;
-            uint _850 = byte_offset;
-            byte_offset = _850 + uint(1);
-            payload_data.data[_850] = uchar(s);
+            uint _853 = byte_offset;
+            byte_offset = _853 + uint(1);
+            payload_data.data[_853] = uchar(s);
             q_1--;
         } while (q_1 >= 0);
     }
@@ -3395,12 +3484,12 @@ void emit_rdo_operations(thread uint& gl_SubgroupInvocationID, threadgroup spvUn
         bucket_index = 0u;
     }
     uint param_4 = bucket_index;
-    uint _139 = inclusive_max_clustered16(param_4, gl_SubgroupInvocationID);
-    uint inclusive_bucket_index = _139;
+    uint _138 = inclusive_max_clustered16(param_4, gl_SubgroupInvocationID);
+    uint inclusive_bucket_index = _138;
     if (gl_SubgroupInvocationID == 0u)
     {
         uint unquantized_cost = shared_rate_cost[0];
-        uint _158 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.consumed_payload, unquantized_cost, memory_order_relaxed);
+        uint _157 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.consumed_payload, unquantized_cost, memory_order_relaxed);
     }
     else
     {
@@ -3412,12 +3501,12 @@ void emit_rdo_operations(thread uint& gl_SubgroupInvocationID, threadgroup spvUn
                 int2 block32x32_index = int2(gl_WorkGroupID.xy);
                 int block_index = (registers.block_offset_32x32 + (block32x32_index.y * registers.block_stride_32x32)) + block32x32_index.x;
                 uint subdivision = uint(block_index >> int(registers.block_index_shamt));
-                uint _221 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.total_savings_per_bucket[(inclusive_bucket_index * 16u) + subdivision], saving, memory_order_relaxed);
-                RDOperation_1 _240 = RDOperation_1{ int(gl_SubgroupInvocationID), uint(block_index) | (saving << uint(16)) };
-                RDOperation _243;
-                _243.quant = _240.quant;
-                _243.block_offset_saving = _240.block_offset_saving;
-                buckets.rdo_operations[uint(block_index) + (inclusive_bucket_index * registers.num_blocks_aligned)] = _243;
+                uint _220 = atomic_fetch_add_explicit((device atomic_uint*)&buckets.total_savings_per_bucket[(inclusive_bucket_index * 16u) + subdivision], saving, memory_order_relaxed);
+                RDOperation_1 _239 = RDOperation_1{ int(gl_SubgroupInvocationID), uint(block_index) | (saving << uint(16)) };
+                RDOperation _242;
+                _242.quant = _239.quant;
+                _242.block_offset_saving = _239.block_offset_saving;
+                buckets.rdo_operations[uint(block_index) + (inclusive_bucket_index * registers.num_blocks_aligned)] = _242;
             }
         }
     }
@@ -3446,11 +3535,11 @@ kernel void pyrowave_analyze_rate_control(device Buckets& buckets [[buffer(0)]],
         uint cost = 0u;
         if (block8x8_in_range)
         {
-            uint _331 = min(i, num_active_planes);
-            QuantStats_1 _335;
-            _335.square_error = block_stats.stats[block_index_8x8].errors[_331].square_error;
-            _335.payload_cost = block_stats.stats[block_index_8x8].errors[_331].payload_cost;
-            QuantStats_1 stats = _335;
+            uint _330 = min(i, num_active_planes);
+            QuantStats_1 _334;
+            _334.square_error = block_stats.stats[block_index_8x8].errors[_330].square_error;
+            _334.payload_cost = block_stats.stats[block_index_8x8].errors[_330].payload_cost;
+            QuantStats_1 stats = _334;
             dist = float(stats.square_error);
             cost = uint(stats.payload_cost);
         }
@@ -3555,7 +3644,7 @@ kernel void pyrowave_analyze_rate_control_finalize(device Buckets& buckets [[buf
     v.w += v.z;
     shared_scan[gl_LocalInvocationIndex] = v.w;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint _step = 1u; _step < 256u; _step *= 2u)
+    for (uint _step = 1u; _step < 512u; _step *= 2u)
     {
         threadgroup_barrier(mem_flags::mem_threadgroup);
         uint shuffled_up = 0u;
