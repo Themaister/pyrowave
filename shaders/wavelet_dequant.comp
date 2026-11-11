@@ -161,6 +161,7 @@ mat2x4 decode_payload(uint code_word, uint q_bits, uint offset, uint block_index
 
 shared uint shared_sign_offset;
 shared uint shared_plane_byte_offsets[16];
+shared uint shared_plane_byte_costs[16];
 shared uint shared_sign_scan[128 / 4];
 
 const int MaxScaleExp = 4;
@@ -278,10 +279,30 @@ void main()
         msbs |= msbs_shift;
         uint byte_cost = bitCount(lsbs) + bitCount(msbs) + q_bits * 8;
 
-        uint byte_scan = offset_u32 * 4 + 8 + 3 * bitCount(ballot) + subgroupInclusiveAdd(byte_cost);
-        if (local_index == 15)
-            shared_sign_offset = 8 * byte_scan;
-        shared_plane_byte_offsets[local_index] = byte_scan - byte_cost;
+        if (gl_SubgroupSize >= 16)
+        {
+            uint byte_scan = offset_u32 * 4 + 8 + 3 * bitCount(ballot) + subgroupInclusiveAdd(byte_cost);
+            if (local_index == 15)
+                shared_sign_offset = 8 * byte_scan;
+            shared_plane_byte_offsets[local_index] = byte_scan - byte_cost;
+        }
+        else
+            shared_plane_byte_costs[local_index] = byte_cost;
+    }
+
+    if (gl_SubgroupSize < 16)
+    {
+        // Subgroup scan only covers 16 threads when the subgroup is at least 16 wide.
+        barrier();
+        if (local_index < 16)
+        {
+            uint byte_start = offset_u32 * 4 + 8 + 3 * bitCount(ballot);
+            for (uint i = 0; i < local_index; i++)
+                byte_start += shared_plane_byte_costs[i];
+            shared_plane_byte_offsets[local_index] = byte_start;
+            if (local_index == 15)
+                shared_sign_offset = 8 * (byte_start + shared_plane_byte_costs[15]);
+        }
     }
 
     barrier();
